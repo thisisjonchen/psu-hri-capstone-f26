@@ -3,7 +3,6 @@
 
 PALS is a cooperative multi-drone system in which two Duckiedrone DD24 quadcopters autonomously transport a shared cable-suspended payload.
 
-## System Overview
 <image src="diagrams/hl-diagram.png" alt="Display"/>
 
 We have 3 core objectives:
