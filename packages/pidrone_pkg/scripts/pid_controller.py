@@ -434,25 +434,22 @@ def main(ControllerClass):
                 print('desired position:', pid_controller.desired_position)
                 print('position error:', pid_controller.position_error)
             else:
-                print('current velocity:',
-      pid_controller.current_velocity.x,
-      pid_controller.current_velocity.y,
-      pid_controller.current_velocity.z)
-
-print('desired velocity:',
-      pid_controller.desired_velocity.x,
-      pid_controller.desired_velocity.y,
-      pid_controller.desired_velocity.z)
-
-print('velocity error:',
-      pid_controller.velocity_error.x,
-      pid_controller.velocity_error.y,
-      pid_controller.velocity_error.z)
-
-	print('pid_error:',
-      		pid_controller.pid_error.x,
-      		pid_controller.pid_error.y,
-      		pid_controller.pid_error.z)
+                print('current velocity:', 
+                    pid_controller.current_velocity.x, 
+                    pid_controller.current_velocity.y, 
+                    pid_controller.current_velocity.z)
+                print('desired velocity:',
+                    pid_controller.desired_velocity.x,
+                    pid_controller.desired_velocity.y,
+                    pid_controller.desired_velocity.z)
+                print('velocity error:',
+                    pid_controller.velocity_error.x,
+                    pid_controller.velocity_error.y,
+                    pid_controller.velocity_error.z)
+                print('pid_error:',
+                    pid_controller.pid_error.x,
+                    pid_controller.pid_error.y,
+                    pid_controller.pid_error.z)
         if args.verbose >= 1:
             print('r,p,y,t:', fly_command)
 
