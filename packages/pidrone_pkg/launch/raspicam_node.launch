@@ -1,0 +1,26 @@
+<launch>
+  <arg name="enable_raw" default="false"/>
+  <arg name="enable_imv" default="true"/>
+  <arg name="camera_id" default="0"/>
+
+
+  <node type="raspicam_node" pkg="raspicam_node" name="raspicam_node" output="screen">
+    <param name="private_topics" value="true"/>
+
+    <param name="camera_frame_id" value="camera"/>
+    <param name="enable_raw" value="false"/>
+    <param name="enable_imv" value="true"/>
+    <param name="camera_id" value="0"/>
+    <remap from="/raspicam_node/image" to="/raspicam_node/image_raw" />
+
+
+    <param name="camera_name" value="camera_dd24"/>
+    <param name="camera_info_url" value="package://raspicam_node/camera_info/camera_dd24.yaml"/>
+    <param name="width" value="240"/>
+    <param name="height" value="320"/>
+
+    <param name="framerate" value="30"/>
+    <param name="exposure_mode" value="antishake"/>
+    <param name="shutter_speed" value="0"/>
+  </node>
+</launch>
