@@ -307,7 +307,7 @@ class PIDController(object):
         '''
         # reset position control variables
         self.position_error = Error(0,0,0)
-        self.desired_position = Position(self.current_position.x,self.current_position.y,0.05)
+        self.desired_position = Position(self.current_position.x,self.current_position.y,0.20)
         # reset velocity control_variables
         self.velocity_error = Error(0,0,0)
         self.desired_velocity = Velocity(0,0,0)
@@ -345,6 +345,7 @@ def main(ControllerClass):
     parser.add_argument(
         '-v',
         '--verbose',
+	type=int,
         choices=[0,1,2],
         default=0,
         help="Verbosity between 0 and 2, 2 is most verbose"
@@ -433,10 +434,25 @@ def main(ControllerClass):
                 print('desired position:', pid_controller.desired_position)
                 print('position error:', pid_controller.position_error)
             else:
-                print('current velocity:', pid_controller.current_velocity)
-                print('desired velocity:', pid_controller.desired_velocity)
-                print('velocity error:  ', pid_controller.velocity_error)
-            print('pid_error:       ', pid_controller.pid_error)
+                print('current velocity:',
+      pid_controller.current_velocity.x,
+      pid_controller.current_velocity.y,
+      pid_controller.current_velocity.z)
+
+print('desired velocity:',
+      pid_controller.desired_velocity.x,
+      pid_controller.desired_velocity.y,
+      pid_controller.desired_velocity.z)
+
+print('velocity error:',
+      pid_controller.velocity_error.x,
+      pid_controller.velocity_error.y,
+      pid_controller.velocity_error.z)
+
+	print('pid_error:',
+      		pid_controller.pid_error.x,
+      		pid_controller.pid_error.y,
+      		pid_controller.pid_error.z)
         if args.verbose >= 1:
             print('r,p,y,t:', fly_command)
 

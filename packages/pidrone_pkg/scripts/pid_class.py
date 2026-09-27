@@ -74,9 +74,9 @@ class PID:
                  yaw=PIDaxis(0.0, 0.0, 0.0),
 
                  # Kv 2300 motors have midpoint 1300, Kv 2550 motors have midpoint 1250
-                 throttle=PIDaxis(1,
+                 throttle=PIDaxis(0.2, # P
                                   0, #0.5/height_factor * battery_factor,
-                                  1,
+                                  0, # D
                                   i_range=(-400, 400), control_range=(1200, 1700),
                                   d_range=(-40, 40), midpoint=1500)
                  ):
