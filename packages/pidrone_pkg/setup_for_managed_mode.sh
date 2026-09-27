@@ -6,7 +6,7 @@
 # The pi.screenrc file requires this to be in the ws root.  You may
 # also set any other ROS environment variables here.
 
-source ../../devel/setup.bash
+source ~/catkin_ws/devel/setup.bash
 [ -n "`hostname`" ] && my_hostname="`hostname`" || my_hostname='defaultdrone'
 #export ROS_IP=192.168.42.1
 export ROS_HOSTNAME="${my_hostname}"
