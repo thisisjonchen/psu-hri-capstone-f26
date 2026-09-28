@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-import threading
-from functools import wraps
-from altitude_safety import AltitudeConfig, RangeMonitor, finite, fresh
 import traceback
 import sys
 import yaml
@@ -20,19 +17,11 @@ import command_values as cmds
 from sensor_msgs.msg import Imu
 from h2rMultiWii import MultiWii
 from serial import SerialException
-from std_msgs.msg import Header, Empty, String
+from std_msgs.msg import Header, Empty
 from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State
 from sensor_msgs.msg import Range
 import os
-
-
-def serialized(method):
-    @wraps(method)
-    def call(self, *args, **kwargs):
-        with self.command_lock:
-            return method(self, *args, **kwargs)
-    return call
 
 
 class FlightController(object):
@@ -55,13 +44,6 @@ class FlightController(object):
     """
 
     def __init__(self):
-        self.command_lock = threading.RLock()
-        self.altitude_config = AltitudeConfig()
-        self.range_monitor = RangeMonitor(self.altitude_config.timeout)
-        self.safety_fault = None
-        self.state_message = None
-        self.recovery_ack = False
-        rospy.loginfo('FC source=%s commands=%s', __file__, cmds.__file__)
         # Connect to the flight controller board
         print("getboard")
         self.board = self.getBoard()
@@ -110,31 +92,15 @@ class FlightController(object):
 
     # ROS subscriber callback methods:
     ##################################
-    @serialized
     def desired_mode_callback(self, msg):
         """ Set the current mode to the desired mode """
-        if msg.mode == 'DISARMED':
-            self.recovery_ack = True
-            self.curr_mode = 'DISARMED'
-            self.command = list(cmds.disarm_cmd)
-            self.send_rc_cmd()
-            return
-        if self.safety_fault or msg.mode not in ('ARMED', 'FLYING'):
-            return
-        if msg.mode == 'ARMED' and self.curr_mode == 'DISARMED':
-            if not self.recovery_ack or self.shouldIDisarm():
-                return
-        elif msg.mode == 'FLYING' and self.curr_mode not in ('ARMED', 'FLYING'):
-            return
         self.prev_mode = self.curr_mode
         self.curr_mode = msg.mode
-        rospy.loginfo('Mode %s -> %s', self.prev_mode, self.curr_mode)
         self.update_command()
 
-    @serialized
     def fly_commands_callback(self, msg):
         """ Store and send the flight commands if the current mode is FLYING """
-        if self.curr_mode == 'FLYING' and not self.safety_fault:
+        if self.curr_mode == 'FLYING':
             r = msg.roll
             p = msg.pitch
             y = msg.yaw
@@ -144,7 +110,6 @@ class FlightController(object):
 
     # Update methods:
     #################
-    @serialized
     def update_imu_message(self):
         """
         Compute the ROS IMU message by reading data from the board.
@@ -230,7 +195,6 @@ class FlightController(object):
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
 
-    @serialized
     def update_battery_message(self):
         """
         Compute the ROS battery message by reading data from the board.
@@ -241,7 +205,6 @@ class FlightController(object):
         self.battery_message.vbat = self.board.analog['vbat'] * 0.10
         self.battery_message.amperage = self.board.analog['amperage']
 
-    @serialized
     def update_command(self):
         ''' Set command values if the mode is ARMED or DISARMED '''
         if self.curr_mode == 'DISARMED':
@@ -271,18 +234,13 @@ class FlightController(object):
                 sys.exit()
         return board
 
-    @serialized
     def send_rc_cmd(self):
         """ Send commands to the flight controller board """
-        if self.curr_mode != 'DISARMED' and self.shouldIDisarm():
-            self.latch_fault(self.last_safety_reason)
-        if self.safety_fault:
-            self.command = list(cmds.disarm_cmd)
-        assert len(self.command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
+        assert len(self.command) is 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
         self.board.send_raw_command(8, MultiWii.SET_RAW_RC, self.command)
         self.board.receiveDataPacket()
         if (self.command != self.last_command):
-            rospy.loginfo_throttle(1, 'RC command=%s' % self.command)
+            print('new command sent:', self.command)
             self.last_command = self.command
 
     def near_zero(self, n):
@@ -309,60 +267,47 @@ class FlightController(object):
         """Update pid_controller heartbeat"""
         self.heartbeat_pid_controller = rospy.Time.now()
 
-    @serialized
     def heartbeat_infrared_callback(self, msg):
         """Update ir sensor heartbeat"""
         self.heartbeat_infrared = rospy.Time.now()
         self.range = msg.range
-        self.range_monitor.update(msg)
-        reason = self.range_monitor.fault(rospy.get_time())
-        if not reason and msg.range > self.altitude_config.limit:
-            reason = 'raw range exceeds emergency limit'
-        rospy.loginfo_throttle(1, 'Raw range=%s fault=%s' % (msg.range, reason))
-        if reason and self.curr_mode != 'DISARMED':
-            self.latch_fault(reason)
-            self.send_rc_cmd()
 
-    @serialized
     def heartbeat_state_estimator_callback(self, msg):
         """Update state_estimator heartbeat"""
         self.heartbeat_state_estimator = rospy.Time.now()
-        self.state_message = msg
-
-    @serialized
-    def latch_fault(self, reason):
-        if not self.safety_fault:
-            self.safety_fault = reason
-            rospy.logerr('Safety fault latched: %s; restart required after investigation', reason)
-        self.curr_mode = 'DISARMED'
-        self.command = list(cmds.disarm_cmd)
-
-    @serialized
-    def altitude_fault_callback(self, msg):
-        if msg.data:
-            self.latch_fault(msg.data)
-            self.send_rc_cmd()
 
     def shouldIDisarm(self):
-        now = rospy.get_time()
-        reason = self.safety_fault or self.range_monitor.fault(now)
-        if not reason and self.range_monitor.message.range > self.altitude_config.limit:
-            reason = 'raw range exceeds emergency limit'
-        state = self.state_message
-        if not reason and (state is None or not finite(state.pose_with_covariance.pose.position.z)
-                           or not fresh(state.header.stamp, now, self.altitude_config.timeout)):
-            reason = 'state altitude invalid or stale'
-        for name, timeout in (('web_interface', 3), ('pid_controller', 1),
-                              ('infrared', 1), ('state_estimator', 1)):
-            if now - getattr(self, 'heartbeat_' + name).to_sec() > timeout:
-                reason = name + ' heartbeat timeout'
-        # Battery cutoff remains disabled pending validated battery configuration.
-        if self.battery_message.vbat is not None and self.battery_message.vbat < self.minimum_voltage:
-            rospy.logwarn_throttle(5, 'Low battery indication; cutoff UNVALIDATED and disabled')
-        if reason:
-            rospy.logerr_throttle(1, reason)
-        self.last_safety_reason = reason
-        return reason is not None
+        """
+        Disarm the drone if the battery values are too low or if there is a
+        missing heartbeat
+        """
+        curr_time = rospy.Time.now()
+        disarm = False
+        if self.battery_message.vbat != None and self.battery_message.vbat < self.minimum_voltage:
+            #print('\nSafety Failure: low battery\n')
+            disarm = False
+        if curr_time - self.heartbeat_web_interface > rospy.Duration.from_sec(3):
+            print('\nSafety Failure: web interface heartbeat\n')
+            print('The web interface stopped responding. Check your browser')
+            disarm = True
+        if curr_time - self.heartbeat_pid_controller > rospy.Duration.from_sec(1):
+            print('\nSafety Failure: not receiving flight commands.')
+            print('Check the pid_controller node\n')
+            disarm = True
+        if curr_time - self.heartbeat_infrared > rospy.Duration.from_sec(1):
+            print('\nSafety Failure: not receiving data from the IR sensor.')
+            print('Check the infrared node\n')
+            disarm = True
+
+        if self.range is not None and self.range > 1:
+            print(('\nSafety Failure: too high: ' + str(self.range)))
+            disarm = True
+        if curr_time - self.heartbeat_state_estimator > rospy.Duration.from_sec(1):
+            print('\nSafety Failure: not receiving a state estimate.')
+            print('Check the state_estimator node\n')
+            disarm = True
+
+        return disarm
 
 
 def main():
@@ -394,7 +339,6 @@ def main():
 
     # Subscribers
     ############
-    rospy.Subscriber("/pidrone/safety/altitude_fault", String, fc.altitude_fault_callback)
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback)
     # heartbeat subscribers
@@ -410,11 +354,12 @@ def main():
     r = rospy.Rate(60)
     try:
         while not rospy.is_shutdown():
-            # Serialize safety decisions with callbacks and board writes.
-            with fc.command_lock:
-                if fc.curr_mode != 'DISARMED' and fc.shouldIDisarm():
-                    fc.latch_fault(fc.last_safety_reason)
-                    fc.send_rc_cmd()
+            # if the current mode is anything other than disarmed
+            # preform as safety check
+                # Break the loop if a safety check has failed
+            if fc.curr_mode != 'DISARMED' and fc.shouldIDisarm():
+                print("mode", fc.curr_mode)
+                break
                 
             # update and publish flight controller readings
             fc.update_battery_message()
@@ -441,9 +386,8 @@ def main():
     finally:
         print('Shutdown received')
         print('Sending DISARM command')
-        with fc.command_lock:
-            fc.latch_fault('flight-controller shutdown')
-            fc.send_rc_cmd()
+        fc.board.send_raw_command(8, MultiWii.SET_RAW_RC, cmds.disarm_cmd)
+        fc.board.receiveDataPacket()
 
 
 if __name__ == '__main__':

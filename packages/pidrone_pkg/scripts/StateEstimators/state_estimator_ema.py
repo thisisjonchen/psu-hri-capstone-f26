@@ -3,8 +3,6 @@
 import tf
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from altitude_safety import AltitudeConfig, RangeMonitor, finite
 import rospy
 import signal
 import numpy as np
@@ -31,8 +29,8 @@ class EMAStateEstimator(object):
     def __init__(self):
         ''' A constructor for EMAStateEstimator
         '''
-        self.altitude_config = AltitudeConfig()
-        self.range_monitor = RangeMonitor(self.altitude_config.timeout)
+        self.measurement_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
+        self.range_message = None
         rospy.loginfo("EMA source=%s", __file__)
         # Initialize the State:
         #######################
@@ -66,6 +64,8 @@ class EMAStateEstimator(object):
         # Altitude timestamp is owned by the range callback.
         # update linear twist data
         # TODO TEST
+        if not self.received_range_data:
+            return
         self.filter_twist(data.twist)
         # update that data has been recieved
         self.received_twist_data = True
@@ -90,22 +90,26 @@ class EMAStateEstimator(object):
 
     def range_callback(self, data):
         """ Update the z-position of the drone """
-        self.range_monitor.update(data)
-        if self.range_monitor.fault(rospy.get_time()):
+        self.range_message = data
+        age = rospy.get_time() - data.header.stamp.to_sec()
+        if not (np.all(np.isfinite([data.range, data.min_range, data.max_range]))
+                and 0 <= data.min_range < data.max_range
+                and data.min_range <= data.range <= data.max_range
+                and data.header.stamp.to_sec() > 0 and 0 <= age <= self.measurement_timeout):
             self.state.pose_with_covariance.pose.position.z = float('nan')
             self.received_range_data = False
             return
         self.filter_range(data.range)
         self.state.header.stamp = data.header.stamp
-        self.received_range_data = finite(self.state.pose_with_covariance.pose.position.z)
+        self.received_range_data = np.isfinite(self.state.pose_with_covariance.pose.position.z)
 
     def publish_state(self, publisher):
-        reason = self.range_monitor.fault(rospy.get_time())
-        if reason:
-            self.state.pose_with_covariance.pose.position.z = float('nan')
-        rospy.loginfo_throttle(1, 'EMA raw=%s estimated=%s fault=%s' % (
-            self.range_monitor.message.range if self.range_monitor.message else None,
-            self.state.pose_with_covariance.pose.position.z, reason))
+        age = rospy.get_time() - self.state.header.stamp.to_sec()
+        if not self.received_range_data or not 0 <= age <= self.measurement_timeout:
+            rospy.logwarn_throttle(1, 'Not publishing state: altitude missing, invalid or stale')
+            return
+        rospy.loginfo_throttle(1, 'EMA raw=%s estimated=%s' % (
+            self.range_message.range, self.state.pose_with_covariance.pose.position.z))
         publisher.publish(self.state)
 
     # EMA Filtering Methods:
@@ -161,8 +165,8 @@ class EMAStateEstimator(object):
         curr_altitude = range_reading * np.cos(r) * np.cos(p)
         prev_altitude = self.state.pose_with_covariance.pose.position.z
         # use an ema filter to smoothe the range reading
-        smoothed_altitude = curr_altitude if alpha == 1 or not finite(prev_altitude) else alpha * curr_altitude + (1 - alpha) * prev_altitude
-        if not finite(smoothed_altitude) or smoothed_altitude < 0:
+        smoothed_altitude = curr_altitude if alpha == 1 or not np.isfinite(prev_altitude) else alpha * curr_altitude + (1 - alpha) * prev_altitude
+        if not np.isfinite(smoothed_altitude) or smoothed_altitude < 0:
             smoothed_altitude = float("nan")
         # update the current z position
         self.state.pose_with_covariance.pose.position.z = smoothed_altitude
