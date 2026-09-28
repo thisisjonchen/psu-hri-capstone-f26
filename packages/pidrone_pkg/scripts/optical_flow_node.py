@@ -51,9 +51,11 @@ class OpticalFlowNode(object):
         twist_msg = TwistStamped()
         twist_msg.header.stamp = rospy.Time.now()
         twist_msg.twist.linear.x = x_motion
-        twist_msg.twist.linear.y = -y_motion
+        # DD24 camera mounting: forward translation must publish positive y.
+        # The velocity PID then lowers Betaflight pitch to oppose that motion.
+        twist_msg.twist.linear.y = y_motion
         #print(self.altitude)
-        #print(x_motion,-y_motion)
+        #print(x_motion,y_motion)
         # Update and publish the twist message
         self.twistpub.publish(twist_msg)
         duration_from_last_altitude = rospy.Time.now() - self.altitude_ts
