@@ -2,8 +2,12 @@
 """Take off, move about 1 m forward and back, then land on DD24."""
 
 import argparse
+import os
+import sys
 
 import rospy
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
