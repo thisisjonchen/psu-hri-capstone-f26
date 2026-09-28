@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off, move about 0.5 m forward and back, then land on DD24."""
+"""Take off, move about 0.2 m forward and back, then land on DD24."""
 
 import argparse
 import os
@@ -24,9 +24,9 @@ def main():
     drone.ready()
     try:
         drone.takeoff()
-        drone.move_forward(0.5)
+        drone.move_forward(0.2)
         drone.hover()
-        drone.move_back(0.5)
+        drone.move_back(0.2)
         drone.hover()
     finally:
         if drone.mode == 'FLYING':
