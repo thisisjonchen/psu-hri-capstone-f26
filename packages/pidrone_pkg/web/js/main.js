@@ -42,10 +42,35 @@ var heightChartPaused = false;
 var velocityChartPaused = false;
 var showingUkfAnalysis = false;
 var spanningFullWindow = false;
+var heartbeatInterval;
+var controlModeListenersBound = false;
+
+function selectedDroneHost() {
+  var selected = document.querySelector('input[name="drone"]:checked');
+  // The displayed address includes the SSH user; browser URLs need only the host.
+  return selected.value.split('@').pop();
+}
+
+function selectDrone() {
+  closeSession();
+  document.getElementById('vbat').textContent = '???';
+  $('#vbat').addClass('alert-danger').removeClass('alert-success');
+  document.getElementById('position_state').textContent = 'Awaiting connection';
+  document.getElementById('cameraImage').src = 'nocamera.jpg';
+}
 
 function closeSession(){
   console.log("Closing connections.");
-  ros.close();
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+  if (ros) {
+    ros.close();
+    ros = null;
+  }
+  document.getElementById('statusMessage').textContent = 'Disconnected';
+  $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
   return false;
 }
 
@@ -55,19 +80,24 @@ function connect() {
     if(ros && ros.isConnected) {
 	return
     }
+    if (ros) {
+      closeSession();
+    }
     
-    var url = 'ws://' + document.getElementById('hostname').value + ':9090'
+    var url = 'ws://' + selectedDroneHost() + ':9090'
     ros = new ROSLIB.Ros({
         url : url
     });
+    var connection = ros;
 
-    var velocityBtn = document.getElementById('velocityBtn');
-    velocityBtn.addEventListener("click", publishVelocityMode, false);
-
-    var positionBtn = document.getElementById('positionBtn');
-    positionBtn.addEventListener("click", publishPositionMode, false);
+    if (!controlModeListenersBound) {
+      document.getElementById('velocityBtn').addEventListener("click", publishVelocityMode, false);
+      document.getElementById('positionBtn').addEventListener("click", publishPositionMode, false);
+      controlModeListenersBound = true;
+    }
 
     ros.on('error', function(error) {
+      if (ros !== connection) return;
       console.log('ROS Master:  Error, check console.');
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML='Error detected; check console.';
@@ -75,6 +105,7 @@ function connect() {
     });
 
     ros.on('connection', function() {
+      if (ros !== connection) return;
       console.log('ROS Master:  Connected.');
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML="Connected";
@@ -82,6 +113,7 @@ function connect() {
     });
 
     ros.on('close', function() {
+      if (ros !== connection) return;
       console.log('ROS Master:  Connection closed.');
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML="Disconnected";
@@ -147,7 +179,7 @@ function connect() {
       messageType : 'std_msgs/Empty'
     });
 
-    setInterval(function(){
+    heartbeatInterval = setInterval(function(){
       heartbeatPub.publish(emptyMsg);
       //console.log("heartbeat");
     }, 1000);
@@ -766,7 +798,7 @@ function connect() {
 
   function imageStream() {
     var image = document.getElementById('cameraImage');
-    image.src = "http://" + document.getElementById('hostname').value + ":8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed";
+    image.src = "http://" + selectedDroneHost() + ":8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed";
 
   }
 
@@ -1408,7 +1440,6 @@ $(document).ready(function() {
         }
     });
 
-    init();
 });
 
 $(window).on("beforeunload", function(e) {
@@ -1435,6 +1466,11 @@ function togglePauseHeightChart(btn) {
         heightChart.data.datasets[0].backgroundColor = 'rgba(255, 80, 0, 0)';
         heightChart.data.datasets[0].fill = false;
     }
+}
+
+function togglePauseVelocityChart(btn) {
+    velocityChartPaused = !velocityChartPaused;
+    btn.value = velocityChartPaused ? 'Play' : 'Pause';
 }
 
 function toggleUkfAnalysis(btn) {
