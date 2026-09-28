@@ -1,0 +1,290 @@
+#!/usr/bin/env python
+"""High-level ROS 1 control for the Duckiedrone DD24."""
+
+import math
+import time
+
+import rospy
+from geometry_msgs.msg import Pose, Twist, TwistStamped
+from pidrone_pkg.msg import Battery, Mode
+from sensor_msgs.msg import Range
+from std_msgs.msg import Empty
+
+
+class Drone(object):
+    """Small, high-level wrapper around the pidrone ROS topics."""
+
+    TAKEOFF_HEIGHT_M = 0.20  # Must match pid_controller.reset()
+    MIN_START_V = 15.2  # 4-cell battery; verify against the actual pack before flight
+    LOW_FLIGHT_V = 14.0
+
+    def __init__(self):
+        self.mode = None
+        self.mode_at = 0
+        self.height = None
+        self.height_at = 0
+        self.ground_height = None
+        self.target_height = None
+        self.flow_at = 0
+        self.voltage = None
+        self.battery_at = 0
+        self.low_voltage_at = None
+        self.right_m = 0.0
+        self.forward_m = 0.0
+        self.mode_pub = rospy.Publisher('/pidrone/desired/mode', Mode, queue_size=1)
+        self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
+        self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
+        self.heartbeat_pub = rospy.Publisher(
+            '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
+        rospy.Subscriber('/pidrone/mode', Mode, self._mode_received)
+        rospy.Subscriber('/pidrone/range', Range, self._range_received)
+        rospy.Subscriber('/pidrone/picamera/twist', TwistStamped, self._flow_received)
+        rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
+        self.heartbeat = rospy.Timer(
+            rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
+
+    def _mode_received(self, msg):
+        self.mode = msg.mode
+        self.mode_at = time.time()
+
+    def _range_received(self, msg):
+        if msg.min_range <= msg.range <= msg.max_range:
+            self.height = msg.range
+            self.height_at = time.time()
+
+    def _flow_received(self, msg):
+        now = time.time()
+        vx = msg.twist.linear.x
+        vy = msg.twist.linear.y
+        if (self.flow_at and now - self.flow_at < 0.2 and
+                abs(vx) <= 0.5 and abs(vy) <= 0.5):
+            dt = now - self.flow_at
+            self.right_m += vx * dt
+            self.forward_m += vy * dt
+        self.flow_at = now
+
+    def _battery_received(self, msg):
+        voltage = msg.vbat
+        if not math.isnan(voltage) and 8.0 <= voltage <= 20.0:
+            now = time.time()
+            self.voltage = voltage
+            self.battery_at = now
+            if voltage < self.LOW_FLIGHT_V:
+                self.low_voltage_at = self.low_voltage_at or now
+            else:
+                self.low_voltage_at = None
+
+    def _check_battery(self):
+        if time.time() - self.battery_at > 1.0:
+            raise RuntimeError('Battery telemetry is missing/stale')
+        if (self.low_voltage_at is not None and
+                time.time() - self.low_voltage_at >= 1.5):
+            raise RuntimeError('Battery voltage is low ({:.1f} V)'.format(
+                self.voltage))
+
+    def _check_sensors(self, need_flow=True):
+        now = time.time()
+        if now - self.mode_at > 0.5:
+            raise RuntimeError('Flight controller mode is missing/stale')
+        if now - self.height_at > 1.0:
+            raise RuntimeError('Downward range is missing/stale')
+        if need_flow and now - self.flow_at > 0.5:
+            raise RuntimeError('Optical flow is missing/stale')
+
+    def ready(self):
+        deadline = time.time() + 90.0
+        publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
+                      self.heartbeat_pub)
+        ground_candidate = None
+        candidate_at = 0
+        while time.time() < deadline:
+            if (self.mode == 'DISARMED' and
+                    time.time() - self.mode_at <= 0.5 and
+                    all(pub.get_num_connections() for pub in publishers)):
+                try:
+                    self._check_sensors()
+                    self._check_battery()
+                    if self.height <= 0.12:
+                        if (ground_candidate is None or
+                                abs(self.height - ground_candidate) > 0.01):
+                            ground_candidate = self.height
+                            candidate_at = time.time()
+                        elif time.time() - candidate_at >= 0.5:
+                            if self.voltage < self.MIN_START_V:
+                                raise ValueError(
+                                    'Battery voltage is too low to start ({:.1f} V)'.format(
+                                        self.voltage))
+                            self.ground_height = self.height
+                            return
+                    else:
+                        ground_candidate = None
+                except RuntimeError:
+                    ground_candidate = None
+            rospy.sleep(0.1)
+        raise RuntimeError('Flight nodes or sensors not ready, or drone not grounded')
+
+    def _set_mode(self, name):
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            self.mode_pub.publish(Mode(name))
+            if self.mode == name:
+                return
+            rospy.sleep(0.1)
+        raise RuntimeError('Mode {} was not confirmed'.format(name))
+
+    def hover(self, seconds=1.0):
+        self.twist_pub.publish(Twist())
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self.mode != 'FLYING':
+                raise RuntimeError('Flight mode changed during hover')
+            self._check_sensors(need_flow=False)
+            self._check_battery()
+            rospy.sleep(min(0.1, deadline - time.time()))
+
+    def disarm(self):
+        self._set_mode('DISARMED')
+
+    def takeoff(self):
+        if self.ground_height is None or self.mode != 'DISARMED':
+            raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
+        self._check_sensors()
+        self._check_battery()
+        if abs(self.height - self.ground_height) > 0.02:
+            raise RuntimeError('Drone is no longer at the measured ground height')
+        if self.voltage < self.MIN_START_V:
+            raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
+                self.voltage))
+        self._set_mode('ARMED')
+        rospy.sleep(1.0)
+        self._check_sensors(need_flow=False)
+        self._check_battery()
+        self.hover(0)
+        self._set_mode('FLYING')
+        deadline = time.time() + 10.0
+        stable_since = None
+        while time.time() < deadline:
+            if self.mode != 'FLYING':
+                raise RuntimeError('Flight mode changed during takeoff')
+            self._check_sensors(need_flow=False)
+            self._check_battery()
+            if self.height > 0.35:
+                raise RuntimeError('Takeoff rose above the expected height')
+            if abs(self.height - self.TAKEOFF_HEIGHT_M) <= 0.04:
+                stable_since = stable_since or time.time()
+                if time.time() - stable_since >= 0.5:
+                    self.right_m = 0.0
+                    self.forward_m = 0.0
+                    self.target_height = self.TAKEOFF_HEIGHT_M
+                    return
+            else:
+                stable_since = None
+            rospy.sleep(0.1)
+        raise RuntimeError('Takeoff altitude was not reached')
+
+    def move(self, x=0.0, y=0.0, z=0.0):
+        """Move relative to the drone: x right, y forward, z up (meters).
+
+        Horizontal distance comes from optical flow and is approximate.
+        """
+        if self.mode != 'FLYING':
+            raise RuntimeError('Drone must be flying before moving')
+        if x == 0 and y == 0 and z == 0:
+            return
+        horizontal = math.hypot(x, y)
+        self._check_sensors(need_flow=horizontal > 0)
+        start_x, start_y, start_z = self.right_m, self.forward_m, self.height
+        target_x, target_y, target_z = start_x + x, start_y + y, start_z + z
+        if z and not 0.08 <= target_z <= 0.45:
+            raise ValueError('Target altitude must be between 0.08 and 0.45 m')
+        if z:
+            pose = Pose()
+            pose.position.z = target_z - self.target_height
+            self.pose_pub.publish(pose)
+            self.target_height = target_z
+        started = time.time()
+        deadline = started + 15.0
+        commanded_distance = 0.0
+        last_command_at = started
+        last_command_speed = 0.0
+        try:
+            while time.time() < deadline:
+                if self.mode != 'FLYING':
+                    raise RuntimeError('Flight mode changed during movement')
+                self._check_sensors(need_flow=horizontal > 0)
+                self._check_battery()
+                now = time.time()
+                commanded_distance += last_command_speed * (now - last_command_at)
+                last_command_at = now
+                if horizontal and commanded_distance > max(0.4, horizontal * 1.5):
+                    raise RuntimeError('Movement limit reached without reaching target')
+                ex = target_x - self.right_m
+                ey = target_y - self.forward_m
+                ez = target_z - self.height
+                horizontal_done = (not horizontal or
+                                   (abs(ex) <= 0.06 and abs(ey) <= 0.06))
+                if horizontal_done and (not z or abs(ez) <= 0.03):
+                    return
+                if time.time() - started > 3.0:
+                    progress_xy = ((self.right_m - start_x) * x +
+                                   (self.forward_m - start_y) * y)
+                    if horizontal and progress_xy / horizontal < 0.03:
+                        raise RuntimeError('No horizontal movement detected')
+                    if z and (self.height - start_z) * (1 if z > 0 else -1) < 0.02:
+                        raise RuntimeError('No vertical movement detected')
+                command = Twist()
+                if horizontal:
+                    for error, axis in ((ex, 'x'), (ey, 'y')):
+                        if abs(error) > 0.06:
+                            speed = min(0.15, max(0.06, abs(error) * 0.5))
+                            setattr(command.linear, axis, speed if error > 0 else -speed)
+                planar_speed = math.hypot(command.linear.x, command.linear.y)
+                if planar_speed > 0.15:
+                    command.linear.x *= 0.15 / planar_speed
+                    command.linear.y *= 0.15 / planar_speed
+                    planar_speed = 0.15
+                self.twist_pub.publish(command)
+                last_command_speed = planar_speed
+                rospy.sleep(0.1)
+            raise RuntimeError('Movement timed out')
+        finally:
+            self.hover(0)
+
+    def move_forward(self, meters):
+        if meters <= 0:
+            raise ValueError('meters must be positive')
+        self.move(y=meters)
+
+    def move_back(self, meters):
+        if meters <= 0:
+            raise ValueError('meters must be positive')
+        self.move(y=-meters)
+
+    def land(self):
+        self.hover(0)
+        if self.ground_height is None:
+            raise RuntimeError('Ground height was not measured before takeoff')
+        deadline = time.time() + 20.0
+        last_step = 0
+        grounded_at = None
+        while time.time() < deadline:
+            if self.mode == 'DISARMED':
+                return
+            if self.mode != 'FLYING':
+                raise RuntimeError('Flight mode changed during landing')
+            self._check_sensors(need_flow=False)
+            now = time.time()
+            if self.height <= self.ground_height + 0.02:
+                grounded_at = grounded_at or now
+                if now - grounded_at >= 1.0:
+                    self.disarm()
+                    return
+            else:
+                grounded_at = None
+                if now - last_step >= 1.5:
+                    down = Pose()
+                    down.position.z = -0.05
+                    self.pose_pub.publish(down)
+                    last_step = now
+            rospy.sleep(0.1)
+        raise RuntimeError('Landing was not confirmed; drone is still armed')

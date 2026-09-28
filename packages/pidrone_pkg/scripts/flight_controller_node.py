@@ -299,7 +299,7 @@ class FlightController(object):
             print('Check the infrared node\n')
             disarm = True
 
-        if self.range > 1:
+        if self.range is not None and self.range > 1:
             print(('\nSafety Failure: too high: ' + str(self.range)))
             disarm = True            
         if curr_time - self.heartbeat_state_estimator > rospy.Duration.from_sec(1):
@@ -347,17 +347,7 @@ def main():
     rospy.Subscriber("/pidrone/heartbeat/pid_controller", Empty, fc.heartbeat_pid_controller_callback)
     rospy.Subscriber("/pidrone/state", State, fc.heartbeat_state_estimator_callback)
 
-    print("Waiting for ROS connections...")
-    rospy.sleep(3.0)
-
-    curr_time = rospy.Time.now()
-    fc.heartbeat_infrared = curr_time
-    fc.heartbeat_web_interface = curr_time
-    fc.heartbeat_pid_controller = curr_time
-    fc.heartbeat_state_estimator = curr_time
-
     print("Started flight-controller node!")
-
 
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
     # set the loop rate (Hz)
@@ -367,7 +357,7 @@ def main():
             # if the current mode is anything other than disarmed
             # preform as safety check
                 # Break the loop if a safety check has failed
-            if fc.shouldIDisarm():
+            if fc.curr_mode != 'DISARMED' and fc.shouldIDisarm():
                 print("mode", fc.curr_mode)
                 break
                 
