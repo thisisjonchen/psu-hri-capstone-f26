@@ -39,15 +39,15 @@
       </section>
 
       <section class="status-grid" aria-label="Drone status">
-        <div class="status-card"><span class="status-icon connection-icon" aria-hidden="true">●</span><div><p>Connection status</p><div class="alert alert-danger status-value" id="statusMessage" role="status" aria-live="polite">Disconnected</div></div></div>
+        <div class="status-card"><span class="status-icon connection-icon" id="connectionIcon" aria-hidden="true">●</span><div><p>Connection status</p><div class="alert alert-danger status-value" id="statusMessage" role="status" aria-live="polite">Disconnected</div></div></div>
         <div class="status-card"><span class="status-icon battery-icon" aria-hidden="true">ϟ</span><div><p>Battery voltage</p><div class="alert alert-danger status-value" id="vbat" role="status" aria-live="polite">???</div></div></div>
         <div class="status-card"><span class="status-icon mode-icon" aria-hidden="true">◎</span><div><p>Control mode</p><div class="mode-value" id="position_state" role="status" aria-live="polite">Awaiting connection</div></div></div>
       </section>
 
       <div class="workspace-grid">
-        <section class="telemetry-column" aria-label="Telemetry charts">
+        <section class="overview-section" aria-label="Telemetry and camera">
           <div class="section-heading"><h2>Telemetry</h2></div>
-          <div class="chart-grid">
+          <div class="overview-grid">
             <article class="panel chart-panel" id="heightchart">
               <div class="panel-header"><h3>Height</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="heightPauseBtn" onclick="togglePauseHeightChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis" name="ukfAnalysisBtn" onclick="toggleUkfAnalysis(this)"></div></div>
               <div class="canvas-wrap"><canvas id="heightChart" width="520" height="280" aria-label="Height chart"></canvas></div>
@@ -57,10 +57,16 @@
               <div class="panel-header"><h3>Speed</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="velocityPauseBtn" onclick="togglePauseVelocityChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis (TODO)" name="velukfAnalysisBtn" disabled title="Velocity UKF analysis is not implemented yet"></div></div>
               <div class="canvas-wrap"><canvas id="velocityChart" width="520" height="280" aria-label="Speed chart"></canvas></div>
             </article>
+            <article class="panel camera-panel">
+              <div class="panel-header"><h3>Camera image</h3></div>
+              <div class="camera-frame"><img id="cameraImage" alt="Drone camera image" src="nocamera.jpg" width="320"></div>
+              <p id="imagetopicHelp" class="panel-help">Start <code>rosrun web_video_server web_video_server</code> and the image stream to view live video.</p>
+            </article>
           </div>
         </section>
 
-        <aside class="operations-column" aria-label="Flight operations">
+        <section class="flight-section" aria-label="Flight controls and XY map">
+          <div class="flight-grid">
           <article class="panel control-panel">
             <div class="panel-header"><h3>Controls</h3></div>
             <p class="field-label">Control mode</p>
@@ -69,16 +75,12 @@
             <div class="coordinate-grid"><label for="controlX">X <span>axis</span><input type="number" step="0.1" id="controlX" value="0"></label><label for="controlY">Y <span>axis</span><input type="number" step="0.1" id="controlY" value="0"></label><label for="controlZ">Z <span>axis</span><input type="number" step="0.1" id="controlZ" value="0"></label></div>
             <input class="btn btn-primary set-button" type="button" value="Set controls" name="controlSetBtn" onclick="setControls()">
           </article>
-          <article class="panel camera-panel">
-            <div class="panel-header"><h3>Camera image</h3></div>
-            <div class="camera-frame"><img id="cameraImage" alt="Drone camera image" src="nocamera.jpg" width="320"></div>
-            <p id="imagetopicHelp" class="panel-help">Start <code>rosrun web_video_server web_video_server</code> and the image stream to view live video.</p>
-          </article>
           <article class="panel topview-panel" id="xychart">
-            <div class="panel-header"><h3>Top view</h3><input class="btn btn-light btn-sm" type="button" value="Pause (TODO)" name="xyPauseBtn" disabled title="Top view pause is not implemented yet"></div>
+            <div class="panel-header"><h3>XY map</h3><input class="btn btn-light btn-sm" type="button" value="Pause (TODO)" name="xyPauseBtn" disabled title="Top view pause is not implemented yet"></div>
             <div class="canvas-wrap"><canvas id="xyChart" width="400" height="400" aria-label="Top view chart"></canvas></div>
           </article>
-        </aside>
+          </div>
+        </section>
       </div>
 
       <section class="keyboard-dock" aria-label="Keyboard controls">

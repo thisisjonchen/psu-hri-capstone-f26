@@ -71,6 +71,7 @@ function closeSession(){
   }
   document.getElementById('statusMessage').textContent = 'Disconnected';
   $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
+  $('#connectionIcon').removeClass('is-connected');
   return false;
 }
 
@@ -102,6 +103,7 @@ function connect() {
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML='Error detected; check console.';
       $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
+      $('#connectionIcon').removeClass('is-connected');
     });
 
     ros.on('connection', function() {
@@ -110,6 +112,7 @@ function connect() {
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML="Connected";
       $('#statusMessage').addClass('alert-success').removeClass('alert-danger');
+      $('#connectionIcon').addClass('is-connected');
     });
 
     ros.on('close', function() {
@@ -118,6 +121,7 @@ function connect() {
       //printProperties(error);
       document.getElementById('statusMessage').innerHTML="Disconnected";
       $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
+      $('#connectionIcon').removeClass('is-connected');
     });
 
     /*
@@ -1523,7 +1527,12 @@ function setControls () {
  * Listen for key events
 */
 
+function isFormControl(target) {
+  return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName));
+}
+
 $(document).keyup(function(event){
+  if (isFormControl(event.target)) return;
   var char = String.fromCharCode(event.which || event.keyCode);
   if (char == "J" || char == "L" || char == "K" || char == "I" || char == "W" || char == "S" || char == "A" || char == "D") {
     publishZeroVelocity();
@@ -1531,11 +1540,10 @@ $(document).keyup(function(event){
 });
 
 $(document).keypress(function(event){
+  if (isFormControl(event.target)) return;
   var char = String.fromCharCode(event.which || event.keyCode);
   if (char == ';') {
     publishArm();
-  } else if (char == ' ') {
-    publishDisarm();
   } else if (char == 'r') {
     publishResetTransform();
   } else if (char == 't') {
@@ -1550,6 +1558,12 @@ $(document).keypress(function(event){
 });
 
 $(document).keydown(function(event){
+  if (isFormControl(event.target)) return;
+  if ((event.which || event.keyCode) === 32) {
+    event.preventDefault();
+    publishDisarm();
+    return;
+  }
   var char = String.fromCharCode(event.which || event.keyCode);
   // console.log("Key down: " + char);
   if (char == 'J') {

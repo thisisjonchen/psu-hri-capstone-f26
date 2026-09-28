@@ -24,9 +24,9 @@ def main():
     drone.ready()
     try:
         drone.takeoff()
-        drone.move_forward(1.0)
+        drone.move_forward(0.5)
         drone.hover()
-        drone.move_back(1.0)
+        drone.move_back(0.5)
         drone.hover()
     finally:
         if drone.mode == 'FLYING':
