@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import rosnode
 import rospy
 from pidrone_pkg.msg import State, StateGroundTruth, UkfStats
 import subprocess
@@ -137,6 +138,10 @@ class StateEstimator(object):
                 process_cmds.append(other_cmd)
             
         for p in process_cmds:
+            if (p == self.process_cmds_dict['ema'] and
+                    rosnode.rosnode_ping('/state_estimator_ema', max_count=1, verbose=False)):
+                print('Using existing EMA estimator')
+                continue
             print('Starting:', p)
             # NOTE: shell=True could be security hazard
             self.processes.append((p, subprocess.Popen(p, shell=True)))

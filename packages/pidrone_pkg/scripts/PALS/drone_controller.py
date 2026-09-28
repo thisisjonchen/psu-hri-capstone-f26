@@ -2,8 +2,13 @@
 """High-level ROS 1 control for the Duckiedrone DD24."""
 
 import math
+import os
+import subprocess
+import sys
+import tempfile
 import time
 
+import rosnode
 import rospy
 from geometry_msgs.msg import Pose, Twist, TwistStamped
 from pidrone_pkg.msg import Battery, Mode
@@ -92,6 +97,7 @@ class Drone(object):
             raise RuntimeError('Optical flow is missing/stale')
 
     def ready(self):
+        self._start_missing_nodes()
         deadline = time.time() + 90.0
         publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
                       self.heartbeat_pub)
@@ -122,6 +128,53 @@ class Drone(object):
                     ground_candidate = None
             rospy.sleep(0.1)
         raise RuntimeError('Flight nodes or sensors not ready, or drone not grounded')
+
+    def _start_missing_nodes(self):
+        """Start missing flight nodes locally, once before takeoff."""
+        if self.mode in ('ARMED', 'FLYING'):
+            raise RuntimeError('Node startup requires the drone to be disarmed')
+        if rosnode.rosnode_ping('/flight_controller_node', max_count=1, verbose=False):
+            mode = rospy.wait_for_message('/pidrone/mode', Mode, timeout=2.0)
+            if mode.mode != 'DISARMED':
+                raise RuntimeError('Node startup requires the drone to be disarmed')
+        scripts = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        launch = os.path.join(os.path.dirname(scripts), 'launch')
+        nodes = [
+            ('/raspicam_node', ['roslaunch', os.path.join(launch, 'raspicam_node.launch')]),
+            ('/vl53l1x', ['bash', '-c',
+                         'source "$HOME/catkin_ws/install/setup.bash" && exec roslaunch "$1"',
+                         'pals-tof', os.path.join(launch, 'tof.launch')]),
+            ('/optical_flow_node', [sys.executable, '-u', 'optical_flow_node.py']),
+            ('/state_estimator', [sys.executable, '-u', 'state_estimator.py', '-p', 'ema']),
+            ('/state_estimator_ema', [sys.executable, '-u', 'StateEstimators/state_estimator_ema.py']),
+            ('/pid_controller', [sys.executable, '-u', 'pid_controller.py']),
+            ('/flight_controller_node', [sys.executable, '-u', 'flight_controller_node.py']),
+        ]
+        for name, command in nodes:
+            if rospy.is_shutdown():
+                raise RuntimeError('ROS shut down during node startup')
+            if rosnode.rosnode_ping(name, max_count=1, verbose=False):
+                continue
+            # Detached processes remain available after this routine finishes.
+            # Each attempt has a separate log, including early startup failures.
+            with tempfile.NamedTemporaryFile(
+                    prefix='pals-' + name.strip('/') + '-', suffix='.log',
+                    delete=False) as log:
+                log_path = log.name
+                rospy.loginfo('Starting %s; log: %s', name, log_path)
+                with open(os.devnull, 'rb') as stdin:
+                    process = subprocess.Popen(
+                        command, cwd=scripts, stdin=stdin, stdout=log,
+                        stderr=subprocess.STDOUT, preexec_fn=os.setsid)
+            deadline = time.time() + 20.0
+            while time.time() < deadline and not rospy.is_shutdown():
+                if process.poll() is not None:
+                    raise RuntimeError('{} exited during startup; see {}'.format(name, log_path))
+                if rosnode.rosnode_ping(name, max_count=1, verbose=False):
+                    break
+                rospy.sleep(0.2)
+            else:
+                raise RuntimeError('{} did not become reachable; see {}'.format(name, log_path))
 
     def _set_mode(self, name):
         deadline = time.time() + 5.0
