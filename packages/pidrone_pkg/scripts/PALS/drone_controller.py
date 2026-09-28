@@ -14,11 +14,11 @@ from std_msgs.msg import Empty
 class Drone(object):
     """Small, high-level wrapper around the pidrone ROS topics."""
 
-    TAKEOFF_HEIGHT_M = 0.20  # Must match pid_controller.reset()
     MIN_START_V = 15.2  # 4-cell battery; verify against the actual pack before flight
     LOW_FLIGHT_V = 14.0
 
     def __init__(self):
+        self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
         self.mode = None
         self.mode_at = 0
         self.height = None
@@ -170,12 +170,12 @@ class Drone(object):
             self._check_battery()
             if self.height > 0.35:
                 raise RuntimeError('Takeoff rose above the expected height')
-            if abs(self.height - self.TAKEOFF_HEIGHT_M) <= 0.04:
+            if abs(self.height - self.takeoff_height) <= 0.04:
                 stable_since = stable_since or time.time()
                 if time.time() - stable_since >= 0.5:
                     self.right_m = 0.0
                     self.forward_m = 0.0
-                    self.target_height = self.TAKEOFF_HEIGHT_M
+                    self.target_height = self.takeoff_height
                     return
             else:
                 stable_since = None

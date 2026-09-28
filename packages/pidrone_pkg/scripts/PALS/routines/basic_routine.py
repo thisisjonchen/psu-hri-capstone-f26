@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off, move about 1 m forward and back, then land on DD24."""
+"""Take off, move about 0.5 m forward and back, then land on DD24."""
 
 import argparse
 import os
