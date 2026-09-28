@@ -220,7 +220,7 @@ class StateEstimator(object):
         """
         # TODO: Consider creating a new State message rather than modifying just
         #       one State message
-        self.state_msg.header.stamp = rospy.Time.now()
+        self.state_msg.header.stamp = msg.header.stamp
         if self.primary_estimator == 'ukf2d':
             # Use EMA data for x and y positions and velocities
             x = self.ema_state_msg.pose_with_covariance.pose.position.x

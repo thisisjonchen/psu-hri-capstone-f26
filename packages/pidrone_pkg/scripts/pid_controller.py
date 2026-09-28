@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+import copy
+import pid_class
+from altitude_safety import AltitudeConfig, finite, fresh
 import tf
 import sys
 import os
@@ -12,7 +15,7 @@ import command_values as cmds
 from pid_class import PID, PIDaxis
 from geometry_msgs.msg import Pose, Twist
 from pidrone_pkg.msg import Mode, RC, State
-from std_msgs.msg import Float32, Empty, Bool
+from std_msgs.msg import Float32, Empty, Bool, String
 from three_dim_vec import Position, Velocity, Error, RPY
 
 
@@ -23,8 +26,12 @@ class PIDController(object):
 
     def __init__(self):
         # Initialize the current and desired modes
-        self.current_mode = Mode('DISARMED')
-        self.desired_mode = Mode('DISARMED')
+        self.current_mode = 'DISARMED'
+        self.desired_mode = 'DISARMED'
+        self.altitude_config = AltitudeConfig()
+        self.safety_fault = None
+        self.faultpub = None
+        rospy.loginfo('PID sources: controller=%s pid=%s commands=%s', __file__, pid_class.__file__, cmds.__file__)
 
         # Initialize in velocity control
         self.position_control = False
@@ -32,8 +39,9 @@ class PIDController(object):
 
         # Initialize the current and desired positions
         self.current_position = Position()
-        self.desired_position = Position(z=0.1)
-        self.last_desired_position = Position(z=0.1)
+        self.altitude_sample = (0.0, 0.0)
+        self.desired_position = Position(z=self.altitude_config.takeoff)
+        self.last_desired_position = Position(z=self.altitude_config.takeoff)
 
         # Initialize the position error
         self.position_error = Error()
@@ -114,25 +122,28 @@ class PIDController(object):
         self.previous_state = self.current_state
         self.current_state = state
         self.state_to_three_dim_vec_structs()
+        self.altitude_sample = (state.pose_with_covariance.pose.position.z * 100,
+                                state.header.stamp.to_sec())
 
     def desired_pose_callback(self, msg):
         """ Update the desired pose """
         # store the previous desired position
-        self.last_desired_position = self.desired_position
+        self.last_desired_position = copy.copy(self.desired_position)
         # set the desired positions equal to the desired pose message
         if self.absolute_desired_position:
             self.desired_position.x = msg.position.x
             self.desired_position.y = msg.position.y
-            # the desired z must be above z and below the range of the ir sensor (.55meters)
-            self.desired_position.z = msg.position.z if 0 <= desired_z <= 0.5 else self.last_desired_position.z
+            # Setpoints must stay below the configured emergency threshold.
+            desired_z = msg.position.z
+            self.desired_position.z = desired_z if 0 <= desired_z < self.altitude_config.limit else self.last_desired_position.z
         # set the desired positions relative to the current position (except for z to make it more responsive)
         else:
             self.desired_position.x = self.current_position.x + msg.position.x
             self.desired_position.y = self.current_position.y + msg.position.y
             # set the disired z position relative to the last desired position (doesn't limit the mag of the error)
-            # the desired z must be above z and below the range of the ir sensor (.55meters)
+            # Setpoints must stay below the configured emergency threshold.
             desired_z = self.last_desired_position.z + msg.position.z
-            self.desired_position.z = desired_z if 0 <= desired_z <= 0.5 else self.last_desired_position.z
+            self.desired_position.z = desired_z if 0 <= desired_z < self.altitude_config.limit else self.last_desired_position.z
 
         if self.desired_position != self.last_desired_position:
             # the drone is moving between desired positions
@@ -152,7 +163,14 @@ class PIDController(object):
 
     def current_mode_callback(self, msg):
         """ Update the current mode """
+        previous = self.current_mode
         self.current_mode = msg.mode
+        if previous != msg.mode:
+            rospy.loginfo('PID mode %s -> %s', previous, msg.mode)
+            if msg.mode in ('ARMED', 'FLYING'):
+                self.reset()
+                if msg.mode == 'ARMED' and hasattr(self, 'position_control_pub'):
+                    self.position_control_pub.publish(False)
 
     def desired_mode_callback(self, msg):
         """ Update the desired mode """
@@ -161,8 +179,8 @@ class PIDController(object):
     def position_control_callback(self, msg):
         """ Set whether or not position control is enabled """
         self.position_control = msg.data
-        if self.position_control:
-            self.desired_position = self.current_position
+        if self.position_control and not self.last_position_control:
+            self.desired_position = Position(self.current_position.x, self.current_position.y, self.desired_position.z)
         if (self.position_control != self.last_position_control):
             print("Position Control", self.position_control)
             self.last_position_control = self.position_control
@@ -171,7 +189,7 @@ class PIDController(object):
         """ Reset the desired and current poses of the drone and set
         desired velocities to zero """
         self.current_position = Position(z=self.current_position.z)
-        self.desired_position = self.current_position
+        self.desired_position = Position(self.current_position.x, self.current_position.y, self.desired_position.z)
         self.desired_velocity.x = 0
         self.desired_velocity.y = 0
 
@@ -197,7 +215,8 @@ class PIDController(object):
         if self.desired_velocity.magnitude() > 0 or abs(self.desired_yaw_velocity) > 0:
             self.adjust_desired_velocity()
 
-        return self.pid.step(self.pid_error, self.desired_yaw_velocity)
+        return self.pid.step(self.pid_error, self.desired_yaw_velocity,
+                             self.altitude_sample)
 
     # HELPER METHODS
     ################
@@ -307,7 +326,8 @@ class PIDController(object):
         '''
         # reset position control variables
         self.position_error = Error(0,0,0)
-        self.desired_position = Position(self.current_position.x,self.current_position.y,0.20)
+        self.desired_position = Position(self.current_position.x, self.current_position.y, self.altitude_config.takeoff)
+        rospy.loginfo("PID reset target=%s m source=%s", self.desired_position.z, __file__)
         # reset velocity control_variables
         self.velocity_error = Error(0,0,0)
         self.desired_velocity = Velocity(0,0,0)
@@ -321,8 +341,28 @@ class PIDController(object):
         print('Caught ctrl-c\n Stopping Controller')
         sys.exit()
 
+    def altitude_fault(self):
+        z = self.current_position.z
+        if not finite(z) or not fresh(self.current_state.header.stamp, rospy.get_time(), self.altitude_config.timeout):
+            return 'PID altitude invalid or stale'
+        if z > self.altitude_config.limit:
+            return 'PID estimated height exceeds emergency limit'
+        return None
+
+    def check_altitude_safety(self):
+        reason = self.altitude_fault()
+        if reason and self.current_mode in ('ARMED', 'FLYING'):
+            self.safety_fault = reason
+        if self.safety_fault:
+            self.faultpub.publish(String(data=self.safety_fault))
+            rospy.logerr_throttle(1, self.safety_fault)
+            return False
+        return reason is None
+
     def publish_cmd(self, cmd):
         """Publish the controls to /pidrone/fly_commands """
+        if self.safety_fault:
+            return
         msg = RC()
         msg.roll = cmd[0]
         msg.pitch = cmd[1]
@@ -364,6 +404,7 @@ def main(ControllerClass):
     # Publishers
     ############
     pid_controller.cmdpub = rospy.Publisher('/pidrone/fly_commands', RC, queue_size=1)
+    pid_controller.faultpub = rospy.Publisher('/pidrone/safety/altitude_fault', String, queue_size=1, latch=True)
     pid_controller.position_control_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
     pid_controller.heartbeat_pub = rospy.Publisher('/pidrone/heartbeat/pid_controller', Empty, queue_size=1)
 
@@ -391,30 +432,15 @@ def main(ControllerClass):
 
         # Steps the PID. If we are not flying, this can be used to
         # examine the behavior of the PID based on published values
-        fly_command = pid_controller.step()
+        altitude_ok = pid_controller.check_altitude_safety()
+        fly_command = pid_controller.step() if altitude_ok else cmds.disarm_cmd[:4]
+        rospy.loginfo_throttle(1, "PID target=%s estimated=%s valid=%s" % (pid_controller.desired_position.z, pid_controller.current_position.z, altitude_ok))
 
-        # reset the pids after arming and start up in velocity control
-        if pid_controller.current_mode == 'DISARMED':
-            if pid_controller.desired_mode == 'ARMED':
-                pid_controller.reset()
-                pid_controller.position_control_pub.publish(False)
-        # reset the pids right before flying
-        if pid_controller.current_mode == 'ARMED':
-            if pid_controller.desired_mode == 'FLYING':
-                pid_controller.reset()
-        # if the drone is flying, send the fly_command
-        elif pid_controller.current_mode == 'FLYING':
+        if pid_controller.current_mode == 'FLYING':
             if pid_controller.desired_mode == 'FLYING':
 
-                # Safety check to ensure drone does not fly too high
-                if (pid_controller.current_state.pose_with_covariance.pose.position.z >
-                0.7):
-                    fly_command = cmds.disarm_cmd
-                    print("\n disarming because drone is too high \n")
-                    break
-
-                # Publish the ouput of pid step method
-                pid_controller.publish_cmd(fly_command)
+                if altitude_ok:
+                    pid_controller.publish_cmd(fly_command)
             # after flying, take the converged low i terms and set these as the
             # initial values, this allows the drone to "learn" and get steadier
             # with each flight until it converges

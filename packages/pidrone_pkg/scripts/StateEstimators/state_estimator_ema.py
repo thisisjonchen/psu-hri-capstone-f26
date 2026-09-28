@@ -3,6 +3,8 @@
 import tf
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from altitude_safety import AltitudeConfig, RangeMonitor, finite
 import rospy
 import signal
 import numpy as np
@@ -29,6 +31,9 @@ class EMAStateEstimator(object):
     def __init__(self):
         ''' A constructor for EMAStateEstimator
         '''
+        self.altitude_config = AltitudeConfig()
+        self.range_monitor = RangeMonitor(self.altitude_config.timeout)
+        rospy.loginfo("EMA source=%s", __file__)
         # Initialize the State:
         #######################
         header = Header()
@@ -58,7 +63,7 @@ class EMAStateEstimator(object):
         Does not alter the angular velocities because these are set by imu
         """
         # update the header stamp
-        self.state.header.stamp = data.header.stamp
+        # Altitude timestamp is owned by the range callback.
         # update linear twist data
         # TODO TEST
         self.filter_twist(data.twist)
@@ -67,7 +72,7 @@ class EMAStateEstimator(object):
 
     def reset_callback(self, empty):
         """ Reset the current pose of the drone except for the z postion """
-        self.state.header.stamp = rospy.Time.now()
+        # Preserve altitude timestamp.
         print('Resetting position in x and y and orientation')
         self.state.pose_with_covariance.pose.position.x = 0
         self.state.pose_with_covariance.pose.position.y = 0
@@ -79,16 +84,29 @@ class EMAStateEstimator(object):
         by analyze_pose
         """
         # update the header stamp
-        self.state.header.stamp = data.header.stamp
+        # Altitude timestamp is owned by the range callback.
         # update the pose data
         self.filter_pose(data.pose)
 
     def range_callback(self, data):
         """ Update the z-position of the drone """
-        # update the z position
+        self.range_monitor.update(data)
+        if self.range_monitor.fault(rospy.get_time()):
+            self.state.pose_with_covariance.pose.position.z = float('nan')
+            self.received_range_data = False
+            return
         self.filter_range(data.range)
-        # set received range data to True
-        self.received_range_data = True
+        self.state.header.stamp = data.header.stamp
+        self.received_range_data = finite(self.state.pose_with_covariance.pose.position.z)
+
+    def publish_state(self, publisher):
+        reason = self.range_monitor.fault(rospy.get_time())
+        if reason:
+            self.state.pose_with_covariance.pose.position.z = float('nan')
+        rospy.loginfo_throttle(1, 'EMA raw=%s estimated=%s fault=%s' % (
+            self.range_monitor.message.range if self.range_monitor.message else None,
+            self.state.pose_with_covariance.pose.position.z, reason))
+        publisher.publish(self.state)
 
     # EMA Filtering Methods:
     ########################
@@ -143,9 +161,9 @@ class EMAStateEstimator(object):
         curr_altitude = range_reading * np.cos(r) * np.cos(p)
         prev_altitude = self.state.pose_with_covariance.pose.position.z
         # use an ema filter to smoothe the range reading
-        smoothed_altitude= alpha * curr_altitude + (1 - alpha) * prev_altitude
-        # ensure that the range value is between 0 and 0.55 m
-        smoothed_altitude = max(0, min(smoothed_altitude, 0.55))
+        smoothed_altitude = curr_altitude if alpha == 1 or not finite(prev_altitude) else alpha * curr_altitude + (1 - alpha) * prev_altitude
+        if not finite(smoothed_altitude) or smoothed_altitude < 0:
+            smoothed_altitude = float("nan")
         # update the current z position
         self.state.pose_with_covariance.pose.position.z = smoothed_altitude
 
@@ -206,15 +224,10 @@ def main():
 
     # set up ctrl-c handler
     signal.signal(signal.SIGINT, state_estimator.ctrl_c_handler)
-    print('waiting for velocity and range data')
-    while not state_estimator.received_twist_data and not state_estimator.received_range_data:
-        pass
-    print('Publishing State')
-
     # set the publishing rate (Hz)
     rate = rospy.Rate(60)
     while not rospy.is_shutdown():
-        statepub.publish(state_estimator.state)
+        state_estimator.publish_state(statepub)
         rate.sleep()
 
 
