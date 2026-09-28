@@ -162,7 +162,6 @@ class Drone(object):
         self.hover(0)
         self._set_mode('FLYING')
         deadline = time.time() + 10.0
-        stable_since = None
         while time.time() < deadline:
             if self.mode != 'FLYING':
                 raise RuntimeError('Flight mode changed during takeoff')
@@ -171,14 +170,11 @@ class Drone(object):
             if self.height > 0.35:
                 raise RuntimeError('Takeoff rose above the expected height')
             if abs(self.height - self.takeoff_height) <= 0.04:
-                stable_since = stable_since or time.time()
-                if time.time() - stable_since >= 0.5:
-                    self.right_m = 0.0
-                    self.forward_m = 0.0
-                    self.target_height = self.takeoff_height
-                    return
-            else:
-                stable_since = None
+                self.right_m = 0.0
+                self.forward_m = 0.0
+                self.target_height = self.takeoff_height
+                rospy.loginfo('Takeoff height reached; continuing routine')
+                return
             rospy.sleep(0.1)
         raise RuntimeError('Takeoff altitude was not reached')
 
