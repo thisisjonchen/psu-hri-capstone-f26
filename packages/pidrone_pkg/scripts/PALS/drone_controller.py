@@ -103,7 +103,19 @@ class Drone(object):
                       self.heartbeat_pub)
         ground_candidate = None
         candidate_at = 0
+        reason = 'Waiting for flight nodes'
+        reported_reason = None
+        last_report = 0
         while time.time() < deadline:
+            if rospy.is_shutdown():
+                raise RuntimeError('ROS shut down while waiting for readiness')
+            if self.mode != 'DISARMED':
+                reason = 'Waiting for DISARMED mode (received: {})'.format(self.mode)
+            elif time.time() - self.mode_at > 0.5:
+                reason = 'Flight controller mode is missing/stale'
+            else:
+                missing = [pub.name for pub in publishers if not pub.get_num_connections()]
+                reason = 'Waiting for subscribers: ' + ', '.join(missing) if missing else 'Waiting for steady ground height'
             if (self.mode == 'DISARMED' and
                     time.time() - self.mode_at <= 0.5 and
                     all(pub.get_num_connections() for pub in publishers)):
@@ -121,13 +133,20 @@ class Drone(object):
                                     'Battery voltage is too low to start ({:.1f} V)'.format(
                                         self.voltage))
                             self.ground_height = self.height
+                            rospy.loginfo('Flight nodes ready; ground height %.3f m', self.height)
                             return
                     else:
                         ground_candidate = None
-                except RuntimeError:
+                        reason = 'Waiting for ground height <= 0.12 m (received: {:.3f})'.format(self.height)
+                except RuntimeError as error:
                     ground_candidate = None
-            rospy.sleep(0.1)
-        raise RuntimeError('Flight nodes or sensors not ready, or drone not grounded')
+                    reason = str(error)
+            if reason != reported_reason or time.time() - last_report >= 5.0:
+                rospy.loginfo('%s', reason)
+                reported_reason = reason
+                last_report = time.time()
+            time.sleep(0.1)
+        raise RuntimeError('Readiness timed out: ' + reason)
 
     def _start_missing_nodes(self):
         """Start missing flight nodes locally, once before takeoff."""
@@ -137,6 +156,7 @@ class Drone(object):
 
         if self.mode in ('ARMED', 'FLYING'):
             raise RuntimeError('Node startup requires the drone to be disarmed')
+        rospy.loginfo('Checking flight-controller status')
         if running('/flight_controller_node'):
             mode = rospy.wait_for_message('/pidrone/mode', Mode, timeout=2.0)
             if mode.mode != 'DISARMED':
@@ -157,7 +177,9 @@ class Drone(object):
         for name, command in nodes:
             if rospy.is_shutdown():
                 raise RuntimeError('ROS shut down during node startup')
+            rospy.loginfo('Checking %s', name)
             if running(name):
+                rospy.loginfo('%s is running', name)
                 continue
             # Detached processes remain available after this routine finishes.
             # Each attempt has a separate log, including early startup failures.
@@ -168,15 +190,16 @@ class Drone(object):
                 rospy.loginfo('Starting %s; log: %s', name, log_path)
                 with open(os.devnull, 'rb') as stdin:
                     process = subprocess.Popen(
-                        command, cwd=scripts, stdin=stdin, stdout=log,
-                        stderr=subprocess.STDOUT, preexec_fn=os.setsid)
+                        ['setsid'] + command, cwd=scripts, stdin=stdin, stdout=log,
+                        stderr=subprocess.STDOUT)
             deadline = time.time() + 20.0
             while time.time() < deadline and not rospy.is_shutdown():
                 if process.poll() is not None:
                     raise RuntimeError('{} exited during startup; see {}'.format(name, log_path))
                 if running(name):
+                    rospy.loginfo('%s started', name)
                     break
-                rospy.sleep(0.2)
+                time.sleep(0.2)
             else:
                 raise RuntimeError('{} did not become reachable; see {}'.format(name, log_path))
 
