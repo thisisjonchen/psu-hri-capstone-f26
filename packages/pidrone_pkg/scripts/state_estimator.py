@@ -139,6 +139,7 @@ class StateEstimator(object):
             
         for p in process_cmds:
             if (p == self.process_cmds_dict['ema'] and
+                    '/state_estimator_ema' in rosnode.get_node_names() and
                     rosnode.rosnode_ping('/state_estimator_ema', max_count=1, verbose=False)):
                 print('Using existing EMA estimator')
                 continue

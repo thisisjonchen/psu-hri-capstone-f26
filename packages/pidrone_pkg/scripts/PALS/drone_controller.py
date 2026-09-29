@@ -131,9 +131,13 @@ class Drone(object):
 
     def _start_missing_nodes(self):
         """Start missing flight nodes locally, once before takeoff."""
+        def running(name):
+            return (name in rosnode.get_node_names() and
+                    rosnode.rosnode_ping(name, max_count=1, verbose=False))
+
         if self.mode in ('ARMED', 'FLYING'):
             raise RuntimeError('Node startup requires the drone to be disarmed')
-        if rosnode.rosnode_ping('/flight_controller_node', max_count=1, verbose=False):
+        if running('/flight_controller_node'):
             mode = rospy.wait_for_message('/pidrone/mode', Mode, timeout=2.0)
             if mode.mode != 'DISARMED':
                 raise RuntimeError('Node startup requires the drone to be disarmed')
@@ -153,7 +157,7 @@ class Drone(object):
         for name, command in nodes:
             if rospy.is_shutdown():
                 raise RuntimeError('ROS shut down during node startup')
-            if rosnode.rosnode_ping(name, max_count=1, verbose=False):
+            if running(name):
                 continue
             # Detached processes remain available after this routine finishes.
             # Each attempt has a separate log, including early startup failures.
@@ -170,7 +174,7 @@ class Drone(object):
             while time.time() < deadline and not rospy.is_shutdown():
                 if process.poll() is not None:
                     raise RuntimeError('{} exited during startup; see {}'.format(name, log_path))
-                if rosnode.rosnode_ping(name, max_count=1, verbose=False):
+                if running(name):
                     break
                 rospy.sleep(0.2)
             else:
