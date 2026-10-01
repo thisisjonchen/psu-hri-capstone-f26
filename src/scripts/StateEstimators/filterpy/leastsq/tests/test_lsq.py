@@ -25,8 +25,8 @@ import numpy as np
 from numpy import dot
 import numpy.random as random
 from scipy.linalg import inv
-from src.scripts.StateEstimators.filterpy.gh import GHFilter
-from src.scripts.StateEstimators.filterpy.leastsq import LeastSquaresFilter
+from filterpy.gh import GHFilter
+from filterpy.leastsq import LeastSquaresFilter
 
 
 def near_equal(x, y, e=1.e-14):

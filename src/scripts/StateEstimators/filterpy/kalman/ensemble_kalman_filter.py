@@ -25,7 +25,7 @@ from copy import deepcopy
 import numpy as np
 from numpy import array, zeros, eye, dot
 from numpy.random import multivariate_normal
-from src.scripts.StateEstimators.filterpy.common import pretty_str, outer_product_sum
+from filterpy.common import pretty_str, outer_product_sum
 
 
 class EnsembleKalmanFilter(object):

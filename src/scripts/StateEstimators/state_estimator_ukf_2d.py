@@ -14,8 +14,8 @@ from pidrone_pkg.msg import State
 # through ssh)
 import matplotlib
 matplotlib.use('Pdf')
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter
-from src.scripts.StateEstimators.filterpy.kalman import MerweScaledSigmaPoints
+from filterpy.kalman import UnscentedKalmanFilter
+from filterpy.kalman import MerweScaledSigmaPoints
 
 # Other imports
 import numpy as np

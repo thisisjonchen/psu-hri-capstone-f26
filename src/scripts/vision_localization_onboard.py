@@ -6,16 +6,16 @@ This file can run SLAM or localization on board, offline or online
 """
 
 
-from src.scripts.onboard_localization import *
-from src.scripts.onboard_slam import *
-from src.scripts.MATL import *
+from onboard_localization import *
+from onboard_slam import *
+from MATL import *
 from cv_bridge import CvBridge, CvBridgeError
 import sys
 import os
 import camera_info_manager
 import rospy
 from sensor_msgs.msg import Image, Range, CameraInfo
-from src.scripts.analyze_flow import AnalyzeFlow
+from analyze_flow import AnalyzeFlow
 from std_msgs.msg import Empty
 from pidrone_pkg.msg import State
 import argparse

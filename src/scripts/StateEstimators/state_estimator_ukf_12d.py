@@ -15,8 +15,8 @@ from std_msgs.msg import Header
 # through ssh)
 import matplotlib
 matplotlib.use('Pdf')
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter
-from src.scripts.StateEstimators.filterpy.kalman import MerweScaledSigmaPoints
+from filterpy.kalman import UnscentedKalmanFilter
+from filterpy.kalman import MerweScaledSigmaPoints
 
 # Other imports
 import numpy as np

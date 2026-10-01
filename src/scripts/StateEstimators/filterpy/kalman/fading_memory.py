@@ -26,8 +26,8 @@ import warnings
 import numpy as np
 from numpy import dot, zeros, eye
 import scipy.linalg as linalg
-from src.scripts.StateEstimators.filterpy.stats import logpdf
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.stats import logpdf
+from filterpy.common import pretty_str
 
 class FadingKalmanFilter(object):
     """

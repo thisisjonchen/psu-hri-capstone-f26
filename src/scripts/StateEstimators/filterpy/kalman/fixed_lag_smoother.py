@@ -22,7 +22,7 @@ from __future__ import (absolute_import, division, print_function,
 import numpy as np
 from numpy import dot, zeros, eye
 from scipy.linalg import inv
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 class FixedLagSmoother(object):
     """ Fixed Lag Kalman smoother.

@@ -13,7 +13,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, Range, CameraInfo
 import rospy
 import tf
-from src.scripts.localization_helper import LocalizationParticleFilter, create_map, PROB_THRESHOLD
+from localization_helper import LocalizationParticleFilter, create_map, PROB_THRESHOLD
 
 # ---------- map parameters ----------- #
 MAP_PIXEL_WIDTH = 3227  # in pixel

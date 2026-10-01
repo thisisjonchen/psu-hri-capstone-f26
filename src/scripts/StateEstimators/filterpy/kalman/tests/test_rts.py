@@ -19,7 +19,7 @@ from __future__ import (absolute_import, division, print_function,
 import numpy as np
 from numpy import random
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+from filterpy.kalman import KalmanFilter
 
 
 DO_PLOT = False

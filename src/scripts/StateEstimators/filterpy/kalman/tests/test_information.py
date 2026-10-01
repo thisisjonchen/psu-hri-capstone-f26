@@ -21,8 +21,8 @@ import numpy.random as random
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.scripts.StateEstimators.filterpy.common import Saver
-from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter, InformationFilter
+from filterpy.common import Saver
+from filterpy.kalman import KalmanFilter, InformationFilter
 
 
 DO_PLOT = False
@@ -156,8 +156,8 @@ def test_against_kf():
     P = inv(IM)
 
 
-    from src.scripts.StateEstimators.filterpy.kalman import InformationFilter
-    from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
+    from filterpy.kalman import InformationFilter
+    from filterpy.common import Q_discrete_white_noise
 
     #f = IF2(2, 1)
     r_std = .2

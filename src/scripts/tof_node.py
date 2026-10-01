@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 
 from sensor_msgs.msg import Range
-from src.scripts.dt_vl53l0x import Vl53l0xAccuracyMode
+from dt_vl53l0x import Vl53l0xAccuracyMode
 from std_msgs.msg import Header
 
 from dt_vl53l0x import \

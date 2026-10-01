@@ -26,8 +26,8 @@ import numpy as np
 from numpy import array
 from numpy.random import randn
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import IMMEstimator, KalmanFilter
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise, Saver
+from filterpy.kalman import IMMEstimator, KalmanFilter
+from filterpy.common import Q_discrete_white_noise, Saver
 
 
 DO_PLOT = False

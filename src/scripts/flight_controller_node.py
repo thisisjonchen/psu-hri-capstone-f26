@@ -13,9 +13,9 @@ import tf
 print("done tf import")
 
 
-import src.scripts.command_values as cmds
+import command_values as cmds
 from sensor_msgs.msg import Imu
-from src.scripts.h2rMultiWii import MultiWii
+from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty
 from geometry_msgs.msg import Quaternion

@@ -18,7 +18,7 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 
-from src.scripts.StateEstimators.filterpy.common import (linear_ode_discretation, Q_discrete_white_noise,
+from filterpy.common import (linear_ode_discretation, Q_discrete_white_noise,
                              kinematic_kf)
 from numpy import array
 

@@ -28,9 +28,9 @@ UKF code"""
 import numpy as np
 import scipy.linalg as linalg
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.examples.GetRadar import get_radar
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter as UKF
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
+from filterpy.examples.GetRadar import get_radar
+from filterpy.kalman import UnscentedKalmanFilter as UKF
+from filterpy.common import Q_discrete_white_noise
 
 
 

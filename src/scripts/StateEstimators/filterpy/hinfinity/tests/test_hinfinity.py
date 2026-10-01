@@ -19,7 +19,7 @@ from __future__ import (absolute_import, division, print_function,
 
 from numpy import array
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.hinfinity import HInfinityFilter
+from filterpy.hinfinity import HInfinityFilter
 
 
 

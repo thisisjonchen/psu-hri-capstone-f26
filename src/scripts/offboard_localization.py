@@ -14,7 +14,7 @@ import tf
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PoseStamped
 from pidrone_pkg.msg import State
-from src.scripts.localization_helper import LocalizationParticleFilter, create_map, PROB_THRESHOLD
+from localization_helper import LocalizationParticleFilter, create_map, PROB_THRESHOLD
 import os
 
 # ---------- map parameters ----------- #

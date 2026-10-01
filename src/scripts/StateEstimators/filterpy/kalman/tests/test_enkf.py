@@ -17,8 +17,8 @@ for more information.
 from numpy.random import randn
 import numpy as np
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import EnsembleKalmanFilter as EnKF
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise, Saver
+from filterpy.kalman import EnsembleKalmanFilter as EnKF
+from filterpy.common import Q_discrete_white_noise, Saver
 from math import cos, sin
 
 DO_PLOT = False

@@ -8,7 +8,7 @@ import sys
 import rospy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.scripts.PALS.drone_controller import Drone
+from drone_controller import Drone
 
 
 def main():

@@ -1,4 +1,10 @@
-from src.scripts.h2rMultiWii import MultiWii as MW
+import os
+import sys
+
+# Support direct execution from any working directory.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from h2rMultiWii import MultiWii as MW
 
 def voltage(data):
     return float(data['vbat'])/10.0

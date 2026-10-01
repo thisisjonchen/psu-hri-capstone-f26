@@ -14,7 +14,7 @@ This is licensed under an MIT license. See the readme.MD file
 for more information.
 """
 
-from src.scripts.StateEstimators.filterpy.discrete_bayes import predict, update, normalize
+from filterpy.discrete_bayes import predict, update, normalize
 from numpy.random import randn, randint
 import numpy as np
 

@@ -24,7 +24,7 @@ import warnings
 import numpy as np
 from numpy import dot, zeros, eye
 import scipy.linalg as linalg
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 
 class HInfinityFilter(object):

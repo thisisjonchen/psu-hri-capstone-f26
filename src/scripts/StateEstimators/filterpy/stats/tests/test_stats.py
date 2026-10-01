@@ -24,7 +24,7 @@ import numpy as np
 from numpy.linalg import inv
 import scipy
 from scipy.spatial.distance import mahalanobis as _scipy_mahalanobis
-from src.scripts.StateEstimators.filterpy.stats import (norm_cdf, multivariate_gaussian, logpdf,
+from filterpy.stats import (norm_cdf, multivariate_gaussian, logpdf,
                             mahalanobis)
 from scipy import linalg
 
@@ -157,7 +157,7 @@ def _is_inside_ellipse(x, y, ex, ey, orientation, width, height):
 def do_plot_test():
     import matplotlib.pyplot as plt
     from numpy.random import multivariate_normal as mnormal
-    from src.scripts.StateEstimators.filterpy.stats import covariance_ellipse, plot_covariance
+    from filterpy.stats import covariance_ellipse, plot_covariance
 
     p = np.array([[32, 15], [15., 40.]])
 
@@ -294,7 +294,7 @@ def test_logpdf2():
 
 def covariance_3d_plot_test():
     import matplotlib.pyplot as plt
-    from src.scripts.StateEstimators.filterpy.stats import plot_3d_covariance
+    from filterpy.stats import plot_3d_covariance
 
     mu = [13456.3,2320,672.5]
 

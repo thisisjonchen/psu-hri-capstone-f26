@@ -17,8 +17,8 @@ for more information.
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from src.scripts.StateEstimators.filterpy.common import Saver
-from src.scripts.StateEstimators.filterpy.gh import (GHFilter, GHKFilter, least_squares_parameters,
+from filterpy.common import Saver
+from filterpy.gh import (GHFilter, GHKFilter, least_squares_parameters,
                          optimal_noise_smoothing, GHFilterOrder)
 from numpy import array
 from numpy.random import randn

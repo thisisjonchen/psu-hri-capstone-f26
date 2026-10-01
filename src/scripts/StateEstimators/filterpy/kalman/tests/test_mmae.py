@@ -23,9 +23,9 @@ from __future__ import (absolute_import, division, print_function,
 import numpy.random as random
 import numpy as np
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter, MMAEFilterBank
+from filterpy.kalman import KalmanFilter, MMAEFilterBank
 from numpy import array
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise, Saver
+from filterpy.common import Q_discrete_white_noise, Saver
 import matplotlib.pyplot as plt
 from numpy.random import randn
 from math import sin, cos, radians

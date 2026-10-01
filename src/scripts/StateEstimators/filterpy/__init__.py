@@ -19,12 +19,12 @@ __version__ = "1.4.5"
 __all__ = ['common', 'discrete_bayes', 'gh', 'hinfinity',
            'kalman', 'leastsq', 'memory', 'monte_carlo', 'stats']
 
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import common
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import discrete_bayes
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import gh
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import hinfinity
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import kalman
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import leastsq
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import memory
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import monte_carlo
-from .....packages.pidrone_pkg.scripts.StateEstimators.filterpy import stats
+from . import common
+from . import discrete_bayes
+from . import gh
+from . import hinfinity
+from . import kalman
+from . import leastsq
+from . import memory
+from . import monte_carlo
+from . import stats

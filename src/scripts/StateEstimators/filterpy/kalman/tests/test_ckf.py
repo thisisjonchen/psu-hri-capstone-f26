@@ -5,10 +5,10 @@ Created on Sun Jun 26 08:03:07 2016
 @author: rlabbe
 """
 
-from src.scripts.StateEstimators.filterpy.common import Saver
+from filterpy.common import Saver
 from filterpy.kalman import CubatureKalmanFilter as CKF
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter as UKF
-from src.scripts.StateEstimators.filterpy.kalman import MerweScaledSigmaPoints
+from filterpy.kalman import UnscentedKalmanFilter as UKF
+from filterpy.kalman import MerweScaledSigmaPoints
 import numpy as np
 from numpy.random import randn
 from pytest import approx

@@ -21,7 +21,7 @@ for more information.
 from __future__ import absolute_import, division
 from math import sqrt
 import numpy as np
-from src.scripts.StateEstimators.filterpy.kalman import pretty_str
+from filterpy.kalman import pretty_str
 
 
 class LeastSquaresFilter(object):

@@ -4,7 +4,7 @@ from pidrone_pkg.msg import State
 from sensor_msgs.msg import Image
 from std_msgs.msg import Empty
 from geometry_msgs.msg import Pose
-from src.scripts.analyze_flow import AnalyzeFlow
+from analyze_flow import AnalyzeFlow
 from cv_bridge import CvBridge
 import rospy
 import picamera

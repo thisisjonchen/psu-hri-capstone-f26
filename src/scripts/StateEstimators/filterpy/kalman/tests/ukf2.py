@@ -24,13 +24,13 @@ import numpy.random as random
 from numpy.random import randn
 from numpy import asarray
 import numpy as np
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter as UKF
+from filterpy.kalman import UnscentedKalmanFilter as UKF
 from filterpy.kalman import (unscented_transform)
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
-import src.scripts.StateEstimators.filterpy.stats as stats
+from filterpy.common import Q_discrete_white_noise
+import filterpy.stats as stats
 from math import cos, sin
 
-from src.scripts.StateEstimators.filterpy.kalman import JulierSigmaPoints, MerweScaledSigmaPoints, SimplexSigmaPoints
+from filterpy.kalman import JulierSigmaPoints, MerweScaledSigmaPoints, SimplexSigmaPoints
 
 
 
@@ -1042,7 +1042,7 @@ def test_linear_2d_merwe():
         plt.plot(smooth_x[:,0], smooth_x[:,2], c='r')
         print(smooth_x)
 
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter2 as UKF2
+from filterpy.kalman import UnscentedKalmanFilter2 as UKF2
 
 def test_linear_2d_merwe_column():
     """ should work like a linear KF if problem is linear """
@@ -1361,7 +1361,7 @@ def test_fixed_lag():
 
 
 def test_circle():
-    from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+    from filterpy.kalman import KalmanFilter
     from math import radians
     def hx(x):
         radius = x[0]
@@ -1443,7 +1443,7 @@ def test_circle():
 
 
 def kf_circle():
-    from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+    from filterpy.kalman import KalmanFilter
     from math import radians
     import math
     def hx(x):
@@ -1525,7 +1525,7 @@ def two_radar():
     from numpy.random import randn
     from math import atan2, radians
 
-    from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
+    from filterpy.common import Q_discrete_white_noise
 
     class RadarStation(object):
 

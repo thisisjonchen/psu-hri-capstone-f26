@@ -140,7 +140,7 @@ def kinematic_kf(dim, order, dt=1., dim_z=1, order_by_dim=True, kf=None):
         than KalmanFilter.
     """
 
-    from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+    from filterpy.kalman import KalmanFilter
 
     if dim < 1:
         raise ValueError("dim must be >= 1")

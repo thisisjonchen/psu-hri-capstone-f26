@@ -22,7 +22,7 @@ from copy import deepcopy
 import numpy as np
 from numpy import dot, zeros, eye
 from scipy.linalg import cholesky, qr, pinv
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 
 class SquareRootKalmanFilter(object):

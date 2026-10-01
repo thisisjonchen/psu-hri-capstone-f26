@@ -30,12 +30,12 @@ import numpy as np
 from pytest import approx
 import scipy.linalg as linalg
 from scipy.spatial.distance import mahalanobis as scipy_mahalanobis
-from src.scripts.StateEstimators.filterpy.kalman import ExtendedKalmanFilter
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter
+from filterpy.kalman import ExtendedKalmanFilter
+from filterpy.kalman import UnscentedKalmanFilter
 from filterpy.kalman import (unscented_transform)
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise, Saver
-import src.scripts.StateEstimators.filterpy.stats as stats
-from src.scripts.StateEstimators.filterpy.kalman import JulierSigmaPoints, KalmanFilter, MerweScaledSigmaPoints, SimplexSigmaPoints
+from filterpy.common import Q_discrete_white_noise, Saver
+import filterpy.stats as stats
+from filterpy.kalman import JulierSigmaPoints, KalmanFilter, MerweScaledSigmaPoints, SimplexSigmaPoints
 
 DO_PLOT = False
 
@@ -602,7 +602,7 @@ def test_fixed_lag():
 
 
 def test_circle():
-    from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+    from filterpy.kalman import KalmanFilter
     from math import radians
 
     def hx(x):
@@ -682,7 +682,7 @@ def test_circle():
 
 
 def kf_circle():
-    from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+    from filterpy.kalman import KalmanFilter
     from math import radians
     import math
     def hx(x):
@@ -756,7 +756,7 @@ def two_radar():
     from numpy.random import randn
     from math import atan2
 
-    from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
+    from filterpy.common import Q_discrete_white_noise
 
     class RadarStation(object):
 
@@ -980,7 +980,7 @@ def test_linear_rts():
 
 def _test_log_likelihood():
 
-    from src.scripts.StateEstimators.filterpy.common import Saver
+    from filterpy.common import Saver
 
     def fx(x, dt):
         F = np.array([[1, dt, 0, 0],

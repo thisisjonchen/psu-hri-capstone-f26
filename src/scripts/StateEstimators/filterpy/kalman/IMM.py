@@ -8,7 +8,7 @@ Created on Mon Aug  6 07:53:34 2018
 from __future__ import (absolute_import, division)
 import numpy as np
 from numpy import dot, asarray, zeros, outer
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 
 class IMMEstimator(object):

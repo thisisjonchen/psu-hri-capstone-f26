@@ -25,7 +25,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import numpy as np
 from numpy import dot
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 
 class GHFilterOrder(object):

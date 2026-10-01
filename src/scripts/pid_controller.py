@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import copy
-import src.scripts.pid_class as pid_class
+import pid_class as pid_class
 import tf
 import sys
 import os
@@ -10,12 +10,12 @@ import signal
 import traceback
 import argparse
 import numpy as np
-import src.scripts.command_values as cmds
-from src.scripts.pid_class import PID, PIDaxis
+import command_values as cmds
+from pid_class import PID, PIDaxis
 from geometry_msgs.msg import Pose, Twist
 from pidrone_pkg.msg import Mode, RC, State
 from std_msgs.msg import Float32, Empty, Bool
-from src.scripts.three_dim_vec import Position, Velocity, Error, RPY
+from three_dim_vec import Position, Velocity, Error, RPY
 
 
 class PIDController(object):

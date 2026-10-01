@@ -8,7 +8,7 @@ Run this file for SLAM or localization offboard (run it on the pi)
 import numpy as np
 import picamera
 import picamera.array
-from src.scripts.analyze_flow import AnalyzeFlow
+from analyze_flow import AnalyzeFlow
 from sensor_msgs.msg import Image, Range, CameraInfo
 import rospy
 from cv_bridge import CvBridge, CvBridgeError

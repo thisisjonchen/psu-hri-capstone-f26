@@ -21,7 +21,7 @@ import numpy.random as random
 from numpy.random import randn
 import numpy as np
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter
+from filterpy.kalman import KalmanFilter
 from numpy import array, asarray
 
 DO_PLOT = False

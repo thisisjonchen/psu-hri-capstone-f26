@@ -22,9 +22,9 @@ from numpy import array, asarray
 from numpy.random import randn
 import matplotlib.pyplot as plt
 
-from src.scripts.StateEstimators.filterpy.kalman import UnscentedKalmanFilter as UKF
-from src.scripts.StateEstimators.filterpy.kalman import ScaledUnscentedKalmanFilter as SUKF
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise
+from filterpy.kalman import UnscentedKalmanFilter as UKF
+from filterpy.kalman import ScaledUnscentedKalmanFilter as SUKF
+from filterpy.common import Q_discrete_white_noise
 
 
 """ This is an example of the bearing only problem. You have a platform,

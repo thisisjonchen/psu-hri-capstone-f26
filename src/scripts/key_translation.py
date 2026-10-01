@@ -1,6 +1,6 @@
 import rospy
 from pidrone_pkg.msg import Mode
-import src.scripts.getch as getch
+import getch as getch
 import time
 import os
 

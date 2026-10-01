@@ -19,7 +19,7 @@ for more information.
 from __future__ import division
 import numpy as np
 from scipy.linalg import cholesky
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 class MerweScaledSigmaPoints(object):
 

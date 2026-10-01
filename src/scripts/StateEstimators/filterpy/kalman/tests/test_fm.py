@@ -20,8 +20,8 @@ from __future__ import (absolute_import, division, print_function,
 import numpy.random as random
 import numpy as np
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.kalman import FadingKalmanFilter
-from src.scripts.StateEstimators.filterpy.stats import mahalanobis
+from filterpy.kalman import FadingKalmanFilter
+from filterpy.stats import mahalanobis
 from pytest import approx
 
 DO_PLOT = False

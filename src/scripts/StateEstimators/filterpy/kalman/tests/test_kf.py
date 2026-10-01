@@ -22,9 +22,9 @@ from numpy.random import randn
 import numpy as np
 import matplotlib.pyplot as plt
 from pytest import approx
-from src.scripts.StateEstimators.filterpy.kalman import KalmanFilter, update, predict, batch_filter
-from src.scripts.StateEstimators.filterpy.common import Q_discrete_white_noise, kinematic_kf, Saver
-from src.scripts.StateEstimators.filterpy.stats import mahalanobis
+from filterpy.kalman import KalmanFilter, update, predict, batch_filter
+from filterpy.common import Q_discrete_white_noise, kinematic_kf, Saver
+from filterpy.stats import mahalanobis
 from scipy.linalg import block_diag, norm
 
 DO_PLOT = False

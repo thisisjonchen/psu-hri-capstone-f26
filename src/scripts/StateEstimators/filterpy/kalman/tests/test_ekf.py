@@ -22,11 +22,11 @@ from __future__ import (absolute_import, division, print_function,
 import matplotlib.pyplot as plt
 from math import sqrt
 import numpy as np
-from src.scripts.StateEstimators.filterpy.kalman import ExtendedKalmanFilter
+from filterpy.kalman import ExtendedKalmanFilter
 from numpy import array, eye, asarray
 
-from src.scripts.StateEstimators.filterpy.common import Saver
-from src.scripts.StateEstimators.filterpy.examples import RadarSim
+from filterpy.common import Saver
+from filterpy.examples import RadarSim
 from pytest import approx
 from scipy.spatial.distance import mahalanobis as scipy_mahalanobis
 

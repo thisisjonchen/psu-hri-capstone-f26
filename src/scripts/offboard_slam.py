@@ -13,7 +13,7 @@ import rospy
 import tf
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
-from src.scripts.slam_helper import FastSLAM
+from slam_helper import FastSLAM
 import os
 
 

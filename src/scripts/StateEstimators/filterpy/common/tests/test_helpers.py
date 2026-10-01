@@ -14,10 +14,10 @@ This is licensed under an MIT license. See the readme.MD file
 for more information.
 """
 
-from src.scripts.StateEstimators.filterpy.common import kinematic_kf, Saver, inv_diagonal, outer_product_sum
+from filterpy.common import kinematic_kf, Saver, inv_diagonal, outer_product_sum
 
 import numpy as np
-from src.scripts.StateEstimators.filterpy.kalman import (MerweScaledSigmaPoints, UnscentedKalmanFilter,
+from filterpy.kalman import (MerweScaledSigmaPoints, UnscentedKalmanFilter,
                              ExtendedKalmanFilter)
 
 def test_kinematic_filter():

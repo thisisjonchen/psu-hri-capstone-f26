@@ -19,7 +19,7 @@ from __future__ import absolute_import, division
 
 from copy import deepcopy
 import numpy as np
-from src.scripts.StateEstimators.filterpy.common import pretty_str
+from filterpy.common import pretty_str
 
 
 class MMAEFilterBank(object):

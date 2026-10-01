@@ -25,8 +25,8 @@ import sys
 import numpy as np
 from numpy import eye, zeros, dot, isscalar
 from scipy.linalg import inv, cholesky
-from src.scripts.StateEstimators.filterpy.stats import logpdf
-from src.scripts.StateEstimators.filterpy.common import pretty_str, outer_product_sum
+from filterpy.stats import logpdf
+from filterpy.common import pretty_str, outer_product_sum
 
 
 def spherical_radial_sigmas(x, P):

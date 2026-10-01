@@ -6,11 +6,11 @@ Implements fastSLAM for the pidrone
 
 import numpy as np
 import math
-import src.scripts.utils as utils
+import utils as utils
 import copy
 import cv2
 import threading
-from src.scripts.thread_queue import ThreadQueue
+from thread_queue import ThreadQueue
 
 # set one these to true to save the poses or weights from the flight
 POSE  = False

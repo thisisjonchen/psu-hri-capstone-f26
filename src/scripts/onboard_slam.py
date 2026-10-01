@@ -12,7 +12,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, Range, CameraInfo
 import rospy
 import tf
-from src.scripts.slam_helper import FastSLAM
+from slam_helper import FastSLAM
 
 # ---------- camera parameters DO NOT EDIT ----------- #
 CAMERA_WIDTH = 320

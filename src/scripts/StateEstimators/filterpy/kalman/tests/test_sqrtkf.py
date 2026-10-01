@@ -20,8 +20,8 @@ from __future__ import (absolute_import, division, print_function,
 import numpy.random as random
 import numpy as np
 import matplotlib.pyplot as plt
-from src.scripts.StateEstimators.filterpy.common import Saver
-from src.scripts.StateEstimators.filterpy.kalman import SquareRootKalmanFilter, KalmanFilter
+from filterpy.common import Saver
+from filterpy.kalman import SquareRootKalmanFilter, KalmanFilter
 
 DO_PLOT = False
 def test_noisy_1d():

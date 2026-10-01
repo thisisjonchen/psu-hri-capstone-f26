@@ -1,6 +1,6 @@
 
 
-from src.scripts.h2rMultiWii import MultiWii
+from h2rMultiWii import MultiWii
 import time
 
 def main():

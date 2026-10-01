@@ -21,8 +21,8 @@ from __future__ import (absolute_import, division, print_function,
 import matplotlib.pyplot as plt
 from numpy.random import randn
 import numpy as np
-from src.scripts.StateEstimators.filterpy.memory import FadingMemoryFilter
-from src.scripts.StateEstimators.filterpy.gh import GHKFilter
+from filterpy.memory import FadingMemoryFilter
+from filterpy.gh import GHKFilter
 
 
 def dotest_2d_data():
