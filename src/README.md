@@ -65,7 +65,7 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ```
 5. Create a symlink from our repo as the new `pidrone_pkg`
    ```
-   ln -s ~/catkin_ws/psu-hri-capstone-f26/packages/pidrone_pkg \
+   ln -s ~/catkin_ws/psu-hri-capstone-f26/src \
       ~/catkin_ws/src/pidrone_pkg
    ```
 6. Check the symlink works
