@@ -28,8 +28,8 @@ Assuming that the base environment is already set up on the DD24 by following th
    screen -wipe
    screen -c pi.screenrc
    ```
-7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
-8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
+7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, 1$ FC is the flight controller.
+8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the 1$ FC screen and run the flight_controller_node.py. 
 10. To control it, on your laptop/base station, clone this repo. Open the website at `packages/pidrone_pkg/web/index.html`.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
