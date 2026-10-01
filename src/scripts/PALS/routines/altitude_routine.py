@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off, hover at 0.20, 0.30, 0.40, and 0.25 m, with relative X/Y hold, then land on DD24."""
+"""Take off, hover at 0.10, 0.30, 0.45, and 0.20 m, with relative X/Y hold, then land on DD24."""
 
 import argparse
 import os
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-ALTITUDES = (0.20, 0.30, 0.40, 0.25)  # Downward range readings in meters.
+ALTITUDES = (0.10, 0.30, 0.45, 0.20)  # Downward range readings in meters.
 
 
 def main():
