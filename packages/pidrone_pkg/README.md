@@ -70,7 +70,7 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ls -l ~/catkin_ws/src/pidrone_pkg
    readlink -f ~/catkin_ws/src/pidrone_pkg
    ```
-7. You are now ready to go. Take a look at **Branch Changing**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
+7. You are now ready to go. Take a look at **Changing Branches**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
 
 ## Camera Out of Focus
 The camera may be out of focus. Here are some steps to fix that.
