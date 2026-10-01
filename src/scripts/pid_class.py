@@ -95,7 +95,9 @@ class PID:
                                   0.02, # I
                                   0.25, # D
                                   i_range=(-10, 10), control_range=(1200, 1700),
-                                  d_range=(-40, 40), midpoint=1500)
+                                  # The acquisition-timed D term already holds between
+                                  # samples; the legacy smoother adds lag at 10 Hz.
+                                  d_range=(-40, 40), midpoint=1500, smoothing=False)
                  ):
 
         self.trim_controller_cap_plane = 0.05

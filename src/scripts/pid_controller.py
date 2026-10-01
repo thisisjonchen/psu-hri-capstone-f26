@@ -381,13 +381,14 @@ def main(ControllerClass):
 
     # Publishers
     ############
-    pid_controller.cmdpub = rospy.Publisher('/pidrone/fly_commands', RC, queue_size=1)
+    pid_controller.cmdpub = rospy.Publisher('/pidrone/fly_commands', RC, queue_size=1, tcp_nodelay=True)
     pid_controller.position_control_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
     pid_controller.heartbeat_pub = rospy.Publisher('/pidrone/heartbeat/pid_controller', Empty, queue_size=1)
 
     # Subscribers
     #############
-    rospy.Subscriber('/pidrone/state', State, pid_controller.current_state_callback)
+    rospy.Subscriber('/pidrone/state', State, pid_controller.current_state_callback,
+                     queue_size=1, tcp_nodelay=True)
     rospy.Subscriber('/pidrone/desired/pose', Pose, pid_controller.desired_pose_callback)
     rospy.Subscriber('/pidrone/desired/twist', Twist, pid_controller.desired_twist_callback)
     rospy.Subscriber('/pidrone/mode', Mode, pid_controller.current_mode_callback)
