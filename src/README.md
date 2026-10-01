@@ -68,9 +68,8 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ln -s ~/catkin_ws/psu-hri-capstone-f26/src \
       ~/catkin_ws/src/pidrone_pkg
    ```
-6. Check the symlink works
+6. Check the symlink works (should print `/home/duckie/catkin_ws/psu-hri-capstone-f26/src`)
    ```
-   ls -l ~/catkin_ws/src/pidrone_pkg
    readlink -f ~/catkin_ws/src/pidrone_pkg
    ```
 7. You are now ready to go. Take a look at **Changing Branches**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
