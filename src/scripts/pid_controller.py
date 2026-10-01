@@ -28,6 +28,8 @@ class PIDController(object):
         self.current_mode = 'DISARMED'
         self.desired_mode = 'DISARMED'
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
+        self.takeoff_ramp = None
+        self.altitude_target = self.takeoff_height
         self.measurement_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         rospy.loginfo('PID sources: controller=%s pid=%s commands=%s', __file__, pid_class.__file__, cmds.__file__)
 
@@ -125,6 +127,7 @@ class PIDController(object):
 
     def desired_pose_callback(self, msg):
         """ Update the desired pose """
+        self.takeoff_ramp = None
         # store the previous desired position
         self.last_desired_position = copy.copy(self.desired_position)
         # set the desired positions equal to the desired pose message
@@ -164,9 +167,12 @@ class PIDController(object):
         previous = self.current_mode
         self.current_mode = msg.mode
         if previous != msg.mode:
+            self.takeoff_ramp = None
             rospy.loginfo('PID mode %s -> %s', previous, msg.mode)
             if msg.mode in ('ARMED', 'FLYING'):
                 self.reset()
+                if msg.mode == 'FLYING':
+                    self.takeoff_ramp = (rospy.get_time(), self.current_position.z)
                 if msg.mode == 'ARMED' and hasattr(self, 'position_control_pub'):
                     self.position_control_pub.publish(False)
 
@@ -285,7 +291,14 @@ class PIDController(object):
         # calculate the velocity error
         self.velocity_error = self.desired_velocity - self.current_velocity
         # calculate the z position error
-        dz = self.desired_position.z - self.current_position.z
+        self.altitude_target = self.desired_position.z
+        if self.takeoff_ramp is not None:
+            started, initial_height = self.takeoff_ramp
+            ramp_height = initial_height + 0.10 * max(0.0, rospy.get_time() - started)
+            self.altitude_target = min(self.desired_position.z, ramp_height)
+            if ramp_height >= self.desired_position.z:
+                self.takeoff_ramp = None
+        dz = self.altitude_target - self.current_position.z
         # calculate the pid_error from the above values
         self.pid_error.x = self.velocity_error.x
         self.pid_error.y = self.velocity_error.y
@@ -420,7 +433,7 @@ def main(ControllerClass):
             continue
         pid_controller.heartbeat_pub.publish(Empty())
         fly_command = pid_controller.step()
-        rospy.loginfo_throttle(1, "PID target=%s estimated=%s" % (pid_controller.desired_position.z, pid_controller.current_position.z))
+        rospy.loginfo_throttle(1, "PID target=%s estimated=%s" % (pid_controller.altitude_target, pid_controller.current_position.z))
 
         if pid_controller.current_mode == 'FLYING':
             if pid_controller.desired_mode == 'FLYING':
