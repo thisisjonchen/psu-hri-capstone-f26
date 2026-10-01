@@ -3,11 +3,12 @@ Working with the DD24 can be hard :/
 
 Here are some steps to make life with the DD24 a little simpler.
 
+
 ## Standard Operation + Control
 Assuming that the base environment is already set up on the DD24 by following the instructions [here](https://docs.duckietown.com/daffy/opmanual-dd24/preliminaries/environment-setup.html), feel free to continue.
 
 1. Turn the drone on
-2. Enable a mobile hotspot. This can be done via a Windows laptop or a phone's hotspot, but ensure the following. Ensure that both the control base station and the drone are on the same network:
+2. Enable a mobile hotspot. This can be done on a Windows laptop or via a phone hotspot, but ensure the following. Ensure that both the control base station and the drone are on the same network:
    1. Network name: **duckietown**
    2. Network password: **quackquack**
 3. SSH onto the DD24 with the following command. Replace [drone] with drone1 or drone2.
@@ -33,6 +34,8 @@ Assuming that the base environment is already set up on the DD24 by following th
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
+
+Note: Everything done on the drone is through this `pidrone_pkg`. Add any custom scripts or code to `~/.../pidrone_pkg/scripts/PALS`.
 
 ## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
