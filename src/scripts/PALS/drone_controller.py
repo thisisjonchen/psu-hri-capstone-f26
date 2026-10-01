@@ -263,7 +263,8 @@ class Drone(object):
     def disarm(self):
         self._set_mode('DISARMED')
 
-    def takeoff(self):
+    def takeoff(self, hold_xy=False):
+        """Take off, optionally holding relative X/Y as soon as airborne."""
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self._check_sensors()
@@ -288,12 +289,19 @@ class Drone(object):
             self._check_battery()
             if self.height > 0.35:
                 raise RuntimeError('Takeoff rose above the expected height')
+            if hold_xy:
+                if self.xy_anchor is None and self.height >= max(0.08, self.ground_height + 0.05):
+                    self.lock_xy()
+                if self.xy_anchor is not None:
+                    self.twist_pub.publish(self._xy_hold_command())
             if abs(self.height - self.takeoff_height) <= 0.04:
                 if settled_since is None:
                     settled_since = time.time()
                 if time.time() - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
-                    self.right_m = 0.0
-                    self.forward_m = 0.0
+                    # Keep the airborne anchor in the same coordinate frame.
+                    if self.xy_anchor is None:
+                        self.right_m = 0.0
+                        self.forward_m = 0.0
                     self.target_height = self.takeoff_height
                     rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
                                   self.ALTITUDE_SETTLE_SECONDS)

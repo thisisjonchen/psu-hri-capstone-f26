@@ -23,8 +23,7 @@ def main():
     drone = Drone()
     drone.ready()
     try:
-        drone.takeoff()
-        drone.lock_xy()
+        drone.takeoff(hold_xy=True)
         rospy.loginfo('Holding altitude %.2f m for 10 seconds with relative X/Y hold',
                       drone.takeoff_height)
         drone.hover(10.0)

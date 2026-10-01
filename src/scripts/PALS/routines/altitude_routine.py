@@ -26,8 +26,7 @@ def main():
     drone = Drone()
     drone.ready()
     try:
-        drone.takeoff()
-        drone.lock_xy()
+        drone.takeoff(hold_xy=True)
         for altitude in ALTITUDES:
             rospy.loginfo('Moving to altitude %.2f m', altitude)
             # move() takes a displacement from the current measured height.
