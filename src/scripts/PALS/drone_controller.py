@@ -29,6 +29,9 @@ class Drone(object):
         self.ground_height = None
         self.target_height = None
         self.flow_at = 0
+        self.flow_valid = False
+        self.xy_anchor = None
+        self.xy_hold_valid = True
         self.voltage = None
         self.battery_at = 0
         self.low_voltage_at = None
@@ -59,8 +62,12 @@ class Drone(object):
         now = time.time()
         vx = msg.twist.linear.x
         vy = msg.twist.linear.y
-        if (self.flow_at and now - self.flow_at < 0.2 and
-                abs(vx) <= 0.5 and abs(vy) <= 0.5):
+        self.flow_valid = abs(vx) <= 0.5 and abs(vy) <= 0.5
+        continuous = self.flow_at and 0 < now - self.flow_at < 0.2
+        if self.xy_anchor is not None and (not self.flow_valid or not continuous):
+            # A missed displacement cannot be recovered by later good samples.
+            self.xy_hold_valid = False
+        if continuous and self.flow_valid:
             dt = now - self.flow_at
             self.right_m += vx * dt
             self.forward_m += vy * dt
@@ -91,8 +98,8 @@ class Drone(object):
             raise RuntimeError('Flight controller mode is missing/stale')
         if now - self.height_at > 1.0:
             raise RuntimeError('Downward range is missing/stale')
-        if need_flow and now - self.flow_at > 0.5:
-            raise RuntimeError('Optical flow is missing/stale')
+        if need_flow and (now - self.flow_at > 0.5 or not self.flow_valid):
+            raise RuntimeError('Optical flow is missing, stale or invalid')
 
     def ready(self):
         self._start_missing_nodes()
@@ -210,6 +217,37 @@ class Drone(object):
             rospy.sleep(0.1)
         raise RuntimeError('Mode {} was not confirmed'.format(name))
 
+    def lock_xy(self):
+        """Hold the current optical-flow position while yaw stays unchanged.
+
+        This is relative dead reckoning, not an absolute camera position fix.
+        """
+        if self.mode != 'FLYING':
+            raise RuntimeError('Take off before locking X/Y')
+        self._check_sensors()
+        self.xy_anchor = (self.right_m, self.forward_m)
+        self.xy_hold_valid = True
+        rospy.loginfo('Relative X/Y hold enabled')
+
+    def unlock_xy(self):
+        self.xy_anchor = None
+        self.twist_pub.publish(Twist())
+
+    def _xy_hold_command(self):
+        command = Twist()
+        if self.xy_anchor is None:
+            return command
+        self._check_sensors()
+        if not self.xy_hold_valid:
+            raise RuntimeError('X/Y hold lost optical-flow continuity')
+        command.linear.x = 0.5 * (self.xy_anchor[0] - self.right_m)
+        command.linear.y = 0.5 * (self.xy_anchor[1] - self.forward_m)
+        speed = math.hypot(command.linear.x, command.linear.y)
+        if speed > 0.10:
+            command.linear.x *= 0.10 / speed
+            command.linear.y *= 0.10 / speed
+        return command
+
     def hover(self, seconds=1.0):
         self.twist_pub.publish(Twist())
         deadline = time.time() + seconds
@@ -218,7 +256,8 @@ class Drone(object):
                 raise RuntimeError('Flight mode changed during hover')
             self._check_sensors(need_flow=False)
             self._check_battery()
-            rospy.sleep(min(0.1, deadline - time.time()))
+            self.twist_pub.publish(self._xy_hold_command())
+            rospy.sleep(max(0.0, min(0.1, deadline - time.time())))
 
     def disarm(self):
         self._set_mode('DISARMED')
@@ -266,6 +305,8 @@ class Drone(object):
         if x == 0 and y == 0 and z == 0:
             return
         horizontal = math.hypot(x, y)
+        if horizontal and self.xy_anchor is not None:
+            raise ValueError('Unlock X/Y before commanding horizontal movement')
         self._check_sensors(need_flow=horizontal > 0)
         start_x, start_y, start_z = self.right_m, self.forward_m, self.height
         target_x, target_y, target_z = start_x + x, start_y + y, start_z + z
@@ -306,7 +347,7 @@ class Drone(object):
                         raise RuntimeError('No horizontal movement detected')
                     if z and (self.height - start_z) * (1 if z > 0 else -1) < 0.02:
                         raise RuntimeError('No vertical movement detected')
-                command = Twist()
+                command = self._xy_hold_command()
                 if horizontal:
                     for error, axis in ((ex, 'x'), (ey, 'y')):
                         if abs(error) > 0.06:
@@ -335,6 +376,8 @@ class Drone(object):
         self.move(y=-meters)
 
     def land(self):
+        # Landing must remain possible when optical-flow hold has failed.
+        self.unlock_xy()
         self.hover(0)
         if self.ground_height is None:
             raise RuntimeError('Ground height was not measured before takeoff')

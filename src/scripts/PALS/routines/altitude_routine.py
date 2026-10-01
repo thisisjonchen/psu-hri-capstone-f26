@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off, hover at 0.20, 0.30, 0.40, and 0.25 m, then land on DD24."""
+"""Take off, hover at 0.20, 0.30, 0.40, and 0.25 m, with relative X/Y hold, then land on DD24."""
 
 import argparse
 import os
@@ -27,6 +27,7 @@ def main():
     drone.ready()
     try:
         drone.takeoff()
+        drone.lock_xy()
         for altitude in ALTITUDES:
             rospy.loginfo('Moving to altitude %.2f m', altitude)
             # move() takes a displacement from the current measured height.
