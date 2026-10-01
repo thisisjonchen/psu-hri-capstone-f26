@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-"""High-level ROS 1 control for the Duckiedrone DD24."""
 
 import math
 import os
@@ -17,9 +16,8 @@ from std_msgs.msg import Empty
 
 
 class Drone(object):
-    """Small, high-level wrapper around the pidrone ROS topics."""
 
-    MIN_START_V = 15.2  # 4-cell battery; verify against the actual pack before flight
+    MIN_START_V = 15.2
     LOW_FLIGHT_V = 14.0
 
     def __init__(self):
