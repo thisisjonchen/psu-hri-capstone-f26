@@ -91,11 +91,11 @@ class PID:
                  yaw=PIDaxis(0.0, 0.0, 0.0),
 
                  # Kv 2300 motors have midpoint 1300, Kv 2550 motors have midpoint 1250
-                 throttle=PIDaxis(1,  # P
-                                  0, # I
-                                  1, # D
+                 throttle=PIDaxis(0.2,  # P
+                                  0.02, # I
+                                  0.25, # D
                                   i_range=(-10, 10), control_range=(1200, 1700),
-                                  d_range=(-40, 40), midpoint=1500)
+                                  d_range=(-40, 40), midpoint=1500, smoothing=False)
                  ):
 
         self.trim_controller_cap_plane = 0.05

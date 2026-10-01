@@ -94,7 +94,7 @@ class StateEstimator(object):
         self.simulator_topic = '/pidrone/state/ground_truth'
 
         self.state_pub = rospy.Publisher('/pidrone/state', State, queue_size=1,
-                                         tcp_nodelay=False)
+                                         tcp_nodelay=True)
 
         self.setup_ukf_with_ground_truth()
         self.start_estimator_subprocess_cmds()
@@ -123,7 +123,8 @@ class StateEstimator(object):
         elif self.primary_estimator == 'ukf12d':
             rospy.Subscriber(self.ukf_topics[12], State, self.state_callback)
         elif self.primary_estimator == 'ema':
-            rospy.Subscriber(self.ema_topic, State, self.state_callback)
+            rospy.Subscriber(self.ema_topic, State, self.state_callback,
+                             queue_size=1, tcp_nodelay=True)
         elif self.primary_estimator == 'mocap':
             rospy.Subscriber(self.mocap_topic, State, self.state_callback)
         elif self.primary_estimator == 'simulator':
