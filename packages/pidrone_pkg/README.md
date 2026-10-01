@@ -27,14 +27,14 @@ Assuming that the base environment is already set up on the DD24 by following th
    screen -wipe
    screen -c pi.screenrc
    ```
-7. Your terminal should have changed to show a variety of different controls. Use [`'#] to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
+7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
 8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
 10. To control it, on your laptop/base station, clone this repo. Open the website at `packages/pidrone_pkg/web/index.html`.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
 
-## Branch Changing
+## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
 1. Follow the procedure above (Standard Operation + Control) **until Step 4**. You should be SSH'd and logged in.
 2. Go to the directory where we have the repo: `cd ~/catkin_ws/src/pidrone_pkg`
@@ -44,7 +44,7 @@ If the repo has been cloned on the drone and you wish to change the branch the d
 6. Continue from **Step 5** in **Standard Operation + Control**.
    
    
-## Repo Cloning
+## Cloning the Repo
 If the DD24 does not have the repo cloned yet, here are instructions for doing so.
 
 1. Follow the procedure in **Standard Operation + Control**, **up to Step 4**. You should be SSH'd and logged in.
