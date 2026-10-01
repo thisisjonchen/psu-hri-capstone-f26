@@ -19,6 +19,7 @@ class Drone(object):
 
     MIN_START_V = 15.2
     LOW_FLIGHT_V = 14.0
+    ALTITUDE_SETTLE_SECONDS = 1.0
 
     def __init__(self):
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
@@ -279,6 +280,7 @@ class Drone(object):
         self.hover(0)
         self._set_mode('FLYING')
         deadline = time.time() + 10.0
+        settled_since = None
         while time.time() < deadline:
             if self.mode != 'FLYING':
                 raise RuntimeError('Flight mode changed during takeoff')
@@ -287,13 +289,19 @@ class Drone(object):
             if self.height > 0.35:
                 raise RuntimeError('Takeoff rose above the expected height')
             if abs(self.height - self.takeoff_height) <= 0.04:
-                self.right_m = 0.0
-                self.forward_m = 0.0
-                self.target_height = self.takeoff_height
-                rospy.loginfo('Takeoff height reached; continuing routine')
-                return
+                if settled_since is None:
+                    settled_since = time.time()
+                if time.time() - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
+                    self.right_m = 0.0
+                    self.forward_m = 0.0
+                    self.target_height = self.takeoff_height
+                    rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
+                                  self.ALTITUDE_SETTLE_SECONDS)
+                    return
+            else:
+                settled_since = None
             rospy.sleep(0.1)
-        raise RuntimeError('Takeoff altitude was not reached')
+        raise RuntimeError('Takeoff altitude did not settle within 10 seconds')
 
     def move(self, x=0.0, y=0.0, z=0.0):
         """Move relative to the drone: x right, y forward, z up (meters).
@@ -322,6 +330,8 @@ class Drone(object):
         commanded_distance = 0.0
         last_command_at = started
         last_command_speed = 0.0
+        best_vertical_progress = 0.0
+        settled_since = None
         try:
             while time.time() < deadline:
                 if self.mode != 'FLYING':
@@ -338,14 +348,24 @@ class Drone(object):
                 ez = target_z - self.height
                 horizontal_done = (not horizontal or
                                    (abs(ex) <= 0.06 and abs(ey) <= 0.06))
-                if horizontal_done and (not z or abs(ez) <= 0.03):
+                if z:
+                    progress_z = (self.height - start_z) * (1 if z > 0 else -1)
+                    best_vertical_progress = max(best_vertical_progress, progress_z)
+                    if abs(ez) <= 0.03:
+                        if settled_since is None:
+                            settled_since = now
+                    else:
+                        settled_since = None
+                vertical_done = (not z or (settled_since is not None and
+                                 now - settled_since >= self.ALTITUDE_SETTLE_SECONDS))
+                if horizontal_done and vertical_done:
                     return
                 if time.time() - started > 3.0:
                     progress_xy = ((self.right_m - start_x) * x +
                                    (self.forward_m - start_y) * y)
                     if horizontal and progress_xy / horizontal < 0.03:
                         raise RuntimeError('No horizontal movement detected')
-                    if z and (self.height - start_z) * (1 if z > 0 else -1) < 0.02:
+                    if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
                 if horizontal:
@@ -361,6 +381,11 @@ class Drone(object):
                 self.twist_pub.publish(command)
                 last_command_speed = planar_speed
                 rospy.sleep(0.1)
+            if z:
+                raise RuntimeError(
+                    'Altitude did not settle: target={:.3f} m, measured={:.3f} m, '
+                    'best vertical progress={:.3f} m'.format(
+                        target_z, self.height, best_vertical_progress))
             raise RuntimeError('Movement timed out')
         finally:
             self.hover(0)
