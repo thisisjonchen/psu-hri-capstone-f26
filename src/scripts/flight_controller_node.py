@@ -340,8 +340,7 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
-    rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
-                     queue_size=1, tcp_nodelay=True)
+    rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback)
     # heartbeat subscribers
     rospy.Subscriber("/pidrone/range", Range, fc.heartbeat_infrared_callback)
     rospy.Subscriber("/pidrone/heartbeat/web_interface", Empty, fc.heartbeat_web_interface_callback)
