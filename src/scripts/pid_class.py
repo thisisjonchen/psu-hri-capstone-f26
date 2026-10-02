@@ -94,7 +94,7 @@ class PID:
                  throttle=PIDaxis(0.30, # P
                                   0.15, # I
                                   0.45, # D
-                                  i_range=(-10, 10), control_range=(1200, 1700),
+                                  i_range=(-10, 15), control_range=(1200, 1700),
                                   d_range=(-40, 40), midpoint=1492, smoothing=False)
                  ):
 
