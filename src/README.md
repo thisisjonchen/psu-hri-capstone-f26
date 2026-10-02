@@ -82,7 +82,7 @@ The camera may be out of focus. Here are some steps to fix that.
 3. Congrats, you focused the camera!
 
 ## Tips + Tricks
-- Use `d + [enter] to exit out of the container
+- Use `d + [enter] to exit out of a screen session
 - If you come across an issue with the screen session, run:
    ```
    screen -ls
