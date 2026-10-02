@@ -93,7 +93,7 @@ class PID:
                  # Kv 2300 motors have midpoint 1300, Kv 2550 motors have midpoint 1250
                  throttle=PIDaxis(0.30, # P
                                   0.00, # I
-                                  0.40, # D
+                                  0.45, # D
                                   i_range=(-10, 10), control_range=(1200, 1700),
                                   d_range=(-40, 40), midpoint=1500, smoothing=False)
                  ):
