@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Hover for 10 seconds at the configured takeoff altitude (default 0.25 m)."""
+"""Hover for 5 seconds at the configured takeoff altitude (default 0.25 m)."""
 
 import argparse
 import os
@@ -24,9 +24,9 @@ def main():
     drone.ready()
     try:
         drone.takeoff(hold_xy=True)
-        rospy.loginfo('Holding altitude %.2f m for 10 seconds with relative X/Y hold',
+        rospy.loginfo('Holding altitude %.2f m for 5 seconds with relative X/Y hold',
                       drone.takeoff_height)
-        drone.hover(10.0)
+        drone.hover(5.0)
     finally:
         if drone.mode == 'FLYING':
             try:
