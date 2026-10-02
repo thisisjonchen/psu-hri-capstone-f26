@@ -1,5 +1,10 @@
+#!/usr/bin/env bash
+set -e
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+
 static_ip=192.168.42.1
-ip_addr="`ip addr show wlan0 | grep 'inet ' | awk '{print $2}' | cut -f1 -d '/'`"
+ip_addr="$(ip addr show wlan0 | grep 'inet ' | awk '{print $2}' | cut -f1 -d '/')"
 
 echo "IP address is: ${ip_addr}"
 if [[ "${ip_addr}" == "${static_ip}" ]]; then
@@ -10,6 +15,4 @@ else
     cp setup_for_managed_mode.sh setup.sh
 fi
 
-sleep 2
-
-screen -c pi.screenrc
+exec screen -c "$PWD/pi.screenrc"

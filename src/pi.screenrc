@@ -28,55 +28,19 @@ multiuser on
 # the initiating user is allowed automatically, but add both so either can
 # run this script without modification.
 
-# Starts a new screen with title " MAKE"
-# this is basically equivalent to pressing the following from within screen:
-# `c (starts a new window)
-# `:title " MAKE" (sets the title to " MAKE")
-#screen -t " MAKE"
-
-#stuff "unset STY\n"
-#stuff "screen\n"
-
-screen -t "rcore"
-stuff "roscore\n"
-stuff ""
-
-
-screen -t "FC"
-stuff "cd $(rospack find pidrone_pkg)/scripts/\n"
-stuff "python flight_controller_node.py" # We require this be started manually
-
-screen -t "PID"
-stuff "cd $(rospack find pidrone_pkg)/scripts/\n"
-stuff "python pid_controller.py\n"
-
-screen -t "SE"
-stuff "cd $(rospack find pidrone_pkg)/scripts/\n"
-stuff "python state_estimator.py -p ema\n"
-
-screen -t "Vision"
-stuff "cd $(rospack find pidrone_pkg)/scripts\n"
-stuff "roslaunch --wait pidrone_pkg raspicam_node.launch\n"
-
-screen -t "Optical Flow"
-stuff "cd $(rospack find pidrone_pkg)/scripts\n"
-stuff "python optical_flow_node.py\n"
-
-screen -t "Rigid Transform"
-stuff "cd $(rospack find pidrone_pkg)/scripts\n"
-stuff "python rigid_transform_node.py"
-
-screen -t "TOF"
-stuff "source ~/catkin_ws/install/setup.bash && roslaunch launch/tof.launch\n"
-
-screen -t "rosbridge"
-stuff "roslaunch --wait rosbridge_server rosbridge_websocket.launch\n"
-
-screen -t "web_vid_serv"
-stuff "rosrun web_video_server web_video_server\n"
-
-screen -t "free1"
-stuff "cd $(rospack find pidrone_pkg)/scripts/\n"
-
-screen -t "free2"
-stuff "cd $(rospack find pidrone_pkg)/scripts/\n"
+# Run from the package directory, as before. Interactive bash loads the
+# container's ROS/camera environment before executing each command. Unlike
+# `stuff`, these commands cannot race shell initialization or terminal input.
+# Keep a shell and the failure output available when a command exits.
+screen -t "rcore" /bin/bash -ic 'source scripts/screen_node.sh core; exec /bin/bash --norc -i'
+screen -t "FC" /bin/bash -ic 'source scripts/screen_node.sh fc; exec /bin/bash --norc -i'
+screen -t "PID" /bin/bash -ic 'source scripts/screen_node.sh pid; exec /bin/bash --norc -i'
+screen -t "SE" /bin/bash -ic 'source scripts/screen_node.sh se; exec /bin/bash --norc -i'
+screen -t "Vision" /bin/bash -ic 'source scripts/screen_node.sh vision; exec /bin/bash --norc -i'
+screen -t "Optical Flow" /bin/bash -ic 'source scripts/screen_node.sh flow; exec /bin/bash --norc -i'
+screen -t "Rigid Transform" /bin/bash -ic 'source scripts/screen_node.sh rigid; exec /bin/bash --norc -i'
+screen -t "TOF" /bin/bash -ic 'source scripts/screen_node.sh tof; exec /bin/bash --norc -i'
+screen -t "rosbridge" /bin/bash -ic 'source scripts/screen_node.sh bridge; exec /bin/bash --norc -i'
+screen -t "web_vid_serv" /bin/bash -ic 'source scripts/screen_node.sh video; exec /bin/bash --norc -i'
+screen -t "free1" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
+screen -t "free2" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
