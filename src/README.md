@@ -80,3 +80,13 @@ The camera may be out of focus. Here are some steps to fix that.
 1. Follow **Standard Operation + Control**. You should have the drone connected to the interface and see a camera image.
 2. Take a look at the drone's camera: you should see a black ring. Twist it until it comes into focus, but not too much that it becomes blurry again.
 3. Congrats, you focused the camera!
+
+## Tips + Tricks
+- Use `d + [enter] to exit out of the container
+- If you come across an issue with the screen session, run:
+   ```
+   screen -ls
+   screen -S <session-id> -X quit
+   cd ~/catkin_ws/src/pidrone_pkg
+   screen -c pi.screenrc
+   ```
