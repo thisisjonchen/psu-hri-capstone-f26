@@ -9,7 +9,7 @@ pidrone_screen_node() {
     cd -- "$package_dir/scripts" || return
 
     case "$node" in
-        fc|rigid|shell) ;;
+        fc|shell) ;;
         *) echo "Retry after stopping this command: bash screen_node.sh $node" ;;
     esac
 
@@ -19,10 +19,7 @@ pidrone_screen_node() {
             echo 'Manual start: python flight_controller_node.py'
             return 0
             ;;
-        rigid)
-            echo 'Manual start: python rigid_transform_node.py'
-            return 0
-            ;;
+        rigid) command=(python -u rigid_transform_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u pid_controller.py) ;;
         se) command=(python -u state_estimator.py -p ema) ;;
