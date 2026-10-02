@@ -95,7 +95,7 @@ class PID:
                                   0.00, # I
                                   0.45, # D
                                   i_range=(-10, 10), control_range=(1200, 1700),
-                                  d_range=(-40, 40), midpoint=1495, smoothing=False)
+                                  d_range=(-40, 40), midpoint=1497, smoothing=False)
                  ):
 
         self.trim_controller_cap_plane = 0.05
