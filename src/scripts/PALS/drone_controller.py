@@ -223,8 +223,8 @@ class Drone(object):
 
         This is relative dead reckoning, not an absolute camera position fix.
         """
-        if self.mode != 'FLYING':
-            raise RuntimeError('Take off before locking X/Y')
+        if self.mode not in ('ARMED', 'FLYING'):
+            raise RuntimeError('Arm before locking X/Y')
         self._check_sensors()
         self.xy_anchor = (self.right_m, self.forward_m)
         self.xy_hold_valid = True
@@ -250,7 +250,7 @@ class Drone(object):
         return command
 
     def hover(self, seconds=1.0):
-        self.twist_pub.publish(Twist())
+        self.twist_pub.publish(self._xy_hold_command())
         deadline = time.time() + seconds
         while time.time() < deadline:
             if self.mode != 'FLYING':
@@ -262,9 +262,10 @@ class Drone(object):
 
     def disarm(self):
         self._set_mode('DISARMED')
+        self.unlock_xy()
 
     def takeoff(self, hold_xy=False):
-        """Take off, optionally holding relative X/Y as soon as airborne."""
+        """Take off, optionally holding relative X/Y from before liftoff."""
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self._check_sensors()
@@ -279,6 +280,8 @@ class Drone(object):
         self._check_sensors(need_flow=False)
         self._check_battery()
         self.hover(0)
+        if hold_xy:
+            self.lock_xy()
         self._set_mode('FLYING')
         deadline = time.time() + 10.0
         settled_since = None
@@ -290,10 +293,7 @@ class Drone(object):
             if self.height > 0.40:
                 raise RuntimeError('Takeoff rose above the expected height')
             if hold_xy:
-                if self.xy_anchor is None and self.height >= max(0.08, self.ground_height + 0.05):
-                    self.lock_xy()
-                if self.xy_anchor is not None:
-                    self.twist_pub.publish(self._xy_hold_command())
+                self.twist_pub.publish(self._xy_hold_command())
             if abs(self.height - self.takeoff_height) <= 0.04:
                 if settled_since is None:
                     settled_since = time.time()
@@ -408,10 +408,10 @@ class Drone(object):
             raise ValueError('meters must be positive')
         self.move(y=-meters)
 
-    def land(self):
-        # Landing must remain possible when optical-flow hold has failed.
-        self.unlock_xy()
-        self.hover(0)
+    def land(self, hold_xy=False):
+        """Descend, optionally retaining the existing relative X/Y anchor."""
+        if not hold_xy:
+            self.unlock_xy()
         if self.ground_height is None:
             raise RuntimeError('Ground height was not measured before takeoff')
         deadline = time.time() + 20.0
@@ -419,10 +419,19 @@ class Drone(object):
         grounded_at = None
         while time.time() < deadline:
             if self.mode == 'DISARMED':
+                self.unlock_xy()
                 return
             if self.mode != 'FLYING':
                 raise RuntimeError('Flight mode changed during landing')
             self._check_sensors(need_flow=False)
+            if hold_xy:
+                try:
+                    self.twist_pub.publish(self._xy_hold_command())
+                except RuntimeError as error:
+                    # Landing must remain possible after optical-flow failure.
+                    rospy.logwarn('Releasing X/Y hold during landing: %s', error)
+                    self.unlock_xy()
+                    hold_xy = False
             now = time.time()
             if self.height <= self.ground_height + 0.02:
                 grounded_at = grounded_at or now

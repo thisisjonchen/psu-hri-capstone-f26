@@ -36,7 +36,7 @@ def main():
     finally:
         if drone.mode == 'FLYING':
             try:
-                drone.land()
+                drone.land(hold_xy=True)
             except Exception as error:
                 rospy.logerr('Landing needs manual recovery: %s', error)
                 # Keep the heartbeat active for manual landing.
