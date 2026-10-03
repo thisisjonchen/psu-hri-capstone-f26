@@ -67,6 +67,8 @@ class PIDController(object):
 
         # Initialize the primary PID
         self.pid = PID()
+        self.hover_throttle_midpoint = self.pid.throttle.midpoint
+        self.takeoff_throttle_midpoint = 1492
 
         # Initialize the error used for the PID which is vx, vy, z where vx and
         # vy are velocities, and z is the error in the altitude of the drone
@@ -298,6 +300,15 @@ class PIDController(object):
             self.altitude_target = min(self.desired_position.z, ramp_height)
             if ramp_height >= self.desired_position.z:
                 self.takeoff_ramp = None
+        # Reduce initial thrust only while the altitude target is ramping.
+        # A pose command (including landing) cancels the ramp above.
+        midpoint = (self.takeoff_throttle_midpoint
+                    if self.current_mode == 'FLYING' and self.takeoff_ramp is not None
+                    else self.hover_throttle_midpoint)
+        if self.pid.throttle.midpoint != midpoint:
+            self.pid.throttle.midpoint = midpoint
+            rospy.loginfo('Altitude throttle midpoint=%.1f; takeoff ramp=%s',
+                          midpoint, self.takeoff_ramp is not None)
         dz = self.altitude_target - self.current_position.z
         # calculate the pid_error from the above values
         self.pid_error.x = self.velocity_error.x
@@ -344,6 +355,7 @@ class PIDController(object):
         self.desired_velocity = Velocity(0,0,0)
         # reset the pids
         self.pid.reset()
+        self.pid.throttle.midpoint = self.hover_throttle_midpoint
         self.lr_pid.reset()
         self.fb_pid.reset()
 
