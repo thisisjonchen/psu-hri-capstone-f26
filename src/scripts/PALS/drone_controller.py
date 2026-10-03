@@ -287,7 +287,7 @@ class Drone(object):
                 raise RuntimeError('Flight mode changed during takeoff')
             self._check_sensors(need_flow=False)
             self._check_battery()
-            if self.height > 0.35:
+            if self.height > 0.40:
                 raise RuntimeError('Takeoff rose above the expected height')
             if hold_xy:
                 if self.xy_anchor is None and self.height >= max(0.08, self.ground_height + 0.05):
