@@ -68,7 +68,7 @@ class PIDController(object):
         # Initialize the primary PID
         self.pid = PID()
         self.hover_throttle_midpoint = self.pid.throttle.midpoint
-        self.takeoff_throttle_midpoint = 1485
+        self.takeoff_throttle_midpoint = 1490
 
         # Initialize the error used for the PID which is vx, vy, z where vx and
         # vy are velocities, and z is the error in the altitude of the drone
