@@ -129,6 +129,11 @@ class PIDController(object):
 
     def desired_pose_callback(self, msg):
         """ Update the desired pose """
+        desired_z = (msg.position.z if self.absolute_desired_position else
+                     self.desired_position.z + msg.position.z)
+        if not np.isfinite(desired_z) or desired_z < 0:
+            rospy.logwarn('Ignoring invalid altitude target: %s', desired_z)
+            return
         self.takeoff_ramp = None
         # store the previous desired position
         self.last_desired_position = copy.copy(self.desired_position)
@@ -136,17 +141,11 @@ class PIDController(object):
         if self.absolute_desired_position:
             self.desired_position.x = msg.position.x
             self.desired_position.y = msg.position.y
-            # Preserve the existing commanded-height range.
-            desired_z = msg.position.z
-            self.desired_position.z = desired_z if 0 <= desired_z <= 0.5 else self.last_desired_position.z
         # set the desired positions relative to the current position (except for z to make it more responsive)
         else:
             self.desired_position.x = self.current_position.x + msg.position.x
             self.desired_position.y = self.current_position.y + msg.position.y
-            # set the disired z position relative to the last desired position (doesn't limit the mag of the error)
-            # Preserve the existing commanded-height range.
-            desired_z = self.last_desired_position.z + msg.position.z
-            self.desired_position.z = desired_z if 0 <= desired_z <= 0.5 else self.last_desired_position.z
+        self.desired_position.z = desired_z
 
         if self.desired_position != self.last_desired_position:
             # the drone is moving between desired positions

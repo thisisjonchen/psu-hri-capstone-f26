@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Hold 0.15, 0.40, and 0.15 m for 5 seconds each with relative X/Y hold, then land."""
+"""Hold 0.15, 0.50, and 0.15 m for 3 seconds each with relative X/Y hold, then land."""
 
 import argparse
 import os
@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-ALTITUDES = (0.15, 0.40, 0.15)  # Downward range readings in meters.
-HOLD_SECONDS = 5.0
+ALTITUDES = (0.15, 0.50, 0.15)  # Downward range readings in meters.
+HOLD_SECONDS = 3.0
 
 
 def main():
@@ -31,8 +31,7 @@ def main():
         for stage, altitude in enumerate(ALTITUDES, 1):
             rospy.loginfo('Altitude stage %d/%d: moving to %.2f m',
                           stage, len(ALTITUDES), altitude)
-            # move() takes a displacement from the current measured height.
-            drone.move(z=altitude - drone.height)
+            drone.move_to_altitude(altitude)
             rospy.loginfo('Altitude stage %d/%d: holding %.2f m for %.0f seconds',
                           stage, len(ALTITUDES), altitude, HOLD_SECONDS)
             drone.hover(HOLD_SECONDS)
