@@ -1,0 +1,18 @@
+{
+  "environment": [0, 0, 20, 20],
+  "zones": {
+    "pickup": [5, 5, 6, 6],
+    "delivery": [13, 13, 14, 14]
+  },
+  "max_map_error_m": 0.15,
+  "survey_complete": true,
+  "clearance_areas_fully_observed": true,
+  "metric_map_valid": true,
+  "both_camera_streams_valid": true,
+  "obstacles": [
+    {
+      "id": "test_box",
+      "bounds": [8, 5, 9, 6]
+    }
+  ]
+}
