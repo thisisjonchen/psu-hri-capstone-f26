@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Hold 0.15, 0.50, and 0.15 m for 3 seconds each with relative X/Y hold, then land."""
+"""Hold 0.25, 0.50, and 0.25 m for 3 seconds each with relative X/Y hold, then land."""
 
 import argparse
 import os
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-ALTITUDES = (0.15, 0.50, 0.15)  # Downward range readings in meters.
+ALTITUDES = (0.25, 0.50, 0.25)  # Downward range readings in meters.
 HOLD_SECONDS = 3.0
 
 
