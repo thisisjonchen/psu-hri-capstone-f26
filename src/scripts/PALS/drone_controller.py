@@ -25,6 +25,7 @@ class Drone(object):
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
     LAND_STEP_M = 0.05 # Target height decrease per landing step (meters)
     LAND_STEP_SECONDS = 1.0 # Time between landing steps (seconds)
+    LAND_DISARM_CLEARANCE_M = 0.02 # Disarm this far above the measured ground
 
     def __init__(self):
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
@@ -410,20 +411,25 @@ class Drone(object):
         self.move(y=-meters)
 
     def land(self, hold_xy=False):
-        """Descend, optionally retaining the existing relative X/Y anchor."""
+        """Descend and disarm at the ground threshold, optionally holding X/Y."""
         if not hold_xy:
             self.unlock_xy()
         if self.ground_height is None:
             raise RuntimeError('Ground height was not measured before takeoff')
         steps = math.ceil(max(0.0, self.height - self.ground_height) / self.LAND_STEP_M)
         deadline = time.time() + max(20.0, (steps + 1) * self.LAND_STEP_SECONDS + 5.0)
+        disarm_height = self.ground_height + self.LAND_DISARM_CLEARANCE_M
         last_step = 0
-        grounded_at = None
         while time.time() < deadline:
             if self.mode == 'DISARMED':
                 self.unlock_xy()
                 return
             self._check_flight('landing', check_battery=False)
+            if self.height <= disarm_height:
+                rospy.loginfo('Landing height %.3f m reached disarm threshold %.3f m',
+                              self.height, disarm_height)
+                self.disarm()
+                return
             if hold_xy:
                 try:
                     self.twist_pub.publish(self._xy_hold_command())
@@ -433,15 +439,8 @@ class Drone(object):
                     self.unlock_xy()
                     hold_xy = False
             now = time.time()
-            if self.height <= self.ground_height + 0.02:
-                grounded_at = grounded_at or now
-                if now - grounded_at >= 1.0:
-                    self.disarm()
-                    return
-            else:
-                grounded_at = None
-                if now - last_step >= self.LAND_STEP_SECONDS:
-                    self._set_altitude(max(0.0, self.target_height - self.LAND_STEP_M))
-                    last_step = now
+            if now - last_step >= self.LAND_STEP_SECONDS:
+                self._set_altitude(max(0.0, self.target_height - self.LAND_STEP_M))
+                last_step = now
             rospy.sleep(0.1)
         raise RuntimeError('Landing was not confirmed; drone is still armed')
