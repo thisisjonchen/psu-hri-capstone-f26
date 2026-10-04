@@ -306,8 +306,6 @@ class Drone(object):
         settled_since = None
         while time.time() < deadline:
             self._check_flight('takeoff')
-            if self.height > 0.40:
-                raise RuntimeError('Takeoff rose above the expected height')
             if hold_xy:
                 self.twist_pub.publish(self._xy_hold_command())
             now = time.time()

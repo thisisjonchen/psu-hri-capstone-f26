@@ -23,8 +23,6 @@ class PIDController(object):
     error calculated by the desired and current velocity and position of the drone
     '''
 
-    MIDPOINT_TRANSITION_SECONDS = 1.0
-
     def __init__(self):
         # Initialize the current and desired modes
         self.current_mode = 'DISARMED'
@@ -301,26 +299,15 @@ class PIDController(object):
             self.altitude_target = min(self.desired_position.z, ramp_height)
             if ramp_height >= self.desired_position.z:
                 self.takeoff_ramp = None
-        # Keep takeoff thrust low during the target ramp, then bring the
-        # midpoint up to its hover value over one second without filtering PID.
-        midpoint = self.hover_throttle_midpoint
-        if self.current_mode == 'FLYING':
-            if self.takeoff_ramp is not None:
-                midpoint = self.takeoff_throttle_midpoint
-            else:
-                max_change = (abs(self.hover_throttle_midpoint - self.takeoff_throttle_midpoint)
-                              * max(0.0, pose_dt) / self.MIDPOINT_TRANSITION_SECONDS)
-                midpoint = self.pid.throttle.midpoint + np.clip(
-                    self.hover_throttle_midpoint - self.pid.throttle.midpoint,
-                    -max_change, max_change)
+        # Reduce initial thrust only while the altitude target is ramping.
+        # A pose command (including landing) cancels the ramp above.
+        midpoint = (self.takeoff_throttle_midpoint
+                    if self.current_mode == 'FLYING' and self.takeoff_ramp is not None
+                    else self.hover_throttle_midpoint)
         if self.pid.throttle.midpoint != midpoint:
             self.pid.throttle.midpoint = midpoint
-            if midpoint in (self.takeoff_throttle_midpoint, self.hover_throttle_midpoint):
-                rospy.loginfo('Altitude throttle midpoint=%.1f; takeoff ramp=%s',
-                              midpoint, self.takeoff_ramp is not None)
-            else:
-                rospy.loginfo_throttle(0.5, 'Altitude throttle midpoint=%.1f; transitioning to hover'
-                                       % midpoint)
+            rospy.loginfo('Altitude throttle midpoint=%.1f; takeoff ramp=%s',
+                          midpoint, self.takeoff_ramp is not None)
         dz = self.altitude_target - self.current_position.z
         # calculate the pid_error from the above values
         self.pid_error.x = self.velocity_error.x
