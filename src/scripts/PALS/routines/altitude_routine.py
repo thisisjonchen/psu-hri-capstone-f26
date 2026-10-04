@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-ALTITUDES = (0.25, 0.50, 0.25)  # Downward range readings in meters.
-HOLD_SECONDS = 3.0
+ALTITUDES = (0.25, 0.50, 0.25)
+HOLD_SECONDS = 2.0
 
 
 def main():
