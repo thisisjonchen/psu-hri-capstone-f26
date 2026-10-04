@@ -309,7 +309,7 @@ class Drone(object):
             if hold_xy:
                 self.twist_pub.publish(self._xy_hold_command())
             now = time.time()
-            settled_since = self._settled_since(self.takeoff_height, 0.04, settled_since, now)
+            settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
                 # Keep the anchor in the same coordinate frame.
                 if self.xy_anchor is None:
@@ -361,7 +361,7 @@ class Drone(object):
                 if z:
                     progress_z = (self.height - start_z) * (1 if z > 0 else -1)
                     best_vertical_progress = max(best_vertical_progress, progress_z)
-                    settled_since = self._settled_since(target_z, 0.03, settled_since, now)
+                    settled_since = self._settled_since(target_z, 0.05, settled_since, now)
                 vertical_done = (not z or (settled_since is not None and
                                  now - settled_since >= self.ALTITUDE_SETTLE_SECONDS))
                 if horizontal_done and vertical_done:
