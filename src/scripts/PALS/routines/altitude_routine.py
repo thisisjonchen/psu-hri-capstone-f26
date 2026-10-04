@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Hold 0.25, 0.50, and 0.25 m for 3 seconds each with relative X/Y hold, then land."""
+"""Hold 0.25, 0.50, and 0.25 m for 2 seconds each with relative X/Y hold, then land."""
 
 import argparse
 import os
