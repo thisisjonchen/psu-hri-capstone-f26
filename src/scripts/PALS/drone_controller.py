@@ -25,7 +25,7 @@ class Drone(object):
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
     LAND_STEP_M = 0.05 # Target height decrease per landing step (meters)
     LAND_STEP_SECONDS = 1.0 # Time between landing steps (seconds)
-    LAND_DISARM_CLEARANCE_M = 0.02 # Disarm this far above the measured ground
+    LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
 
     def __init__(self):
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
