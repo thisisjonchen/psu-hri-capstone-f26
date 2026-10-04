@@ -27,7 +27,7 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 35px); font-weight: 750; letter-spac
 .connection-actions .btn { height: 49px; padding: 0 18px; font-size: 13px; }
 .btn-outline-secondary { color: #53627a; border-color: #dce3ed; }
 .btn-outline-secondary:hover { background: #eef2f8; color: var(--ink); border-color: #cbd5e2; }
-.status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 18px 0 34px; }
+.status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 18px 0 34px; }
 .status-card { min-height: 104px; border-radius: 14px; padding: 20px 22px; display: flex; align-items: center; gap: 16px; }
 .status-icon { width: 42px; height: 42px; border-radius: 12px; flex: none; display: grid; place-items: center; font-size: 20px; }
 .connection-icon { background: #fff0ed; color: #e46555; }
