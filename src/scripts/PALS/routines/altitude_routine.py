@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off, hover at 0.10, 0.30, 0.45, and 0.20 m, with relative X/Y hold, then land on DD24."""
+"""Hold 0.15, 0.40, and 0.15 m for 5 seconds each with relative X/Y hold, then land."""
 
 import argparse
 import os
@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-ALTITUDES = (0.10, 0.30, 0.45, 0.20)  # Downward range readings in meters.
+ALTITUDES = (0.15, 0.40, 0.15)  # Downward range readings in meters.
+HOLD_SECONDS = 5.0
 
 
 def main():
@@ -27,12 +28,14 @@ def main():
     drone.ready()
     try:
         drone.takeoff(hold_xy=True)
-        for altitude in ALTITUDES:
-            rospy.loginfo('Moving to altitude %.2f m', altitude)
+        for stage, altitude in enumerate(ALTITUDES, 1):
+            rospy.loginfo('Altitude stage %d/%d: moving to %.2f m',
+                          stage, len(ALTITUDES), altitude)
             # move() takes a displacement from the current measured height.
             drone.move(z=altitude - drone.height)
-            rospy.loginfo('Holding altitude %.2f m for 2 seconds', altitude)
-            drone.hover(2.0)
+            rospy.loginfo('Altitude stage %d/%d: holding %.2f m for %.0f seconds',
+                          stage, len(ALTITUDES), altitude, HOLD_SECONDS)
+            drone.hover(HOLD_SECONDS)
     finally:
         if drone.mode == 'FLYING':
             try:
