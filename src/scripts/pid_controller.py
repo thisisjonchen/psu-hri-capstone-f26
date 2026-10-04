@@ -319,8 +319,8 @@ class PIDController(object):
                 rospy.loginfo('Altitude throttle midpoint=%.1f; takeoff ramp=%s',
                               midpoint, self.takeoff_ramp is not None)
             else:
-                rospy.loginfo_throttle(0.5, 'Altitude throttle midpoint=%.1f; transitioning to hover',
-                                       midpoint)
+                rospy.loginfo_throttle(0.5, 'Altitude throttle midpoint=%.1f; transitioning to hover'
+                                       % midpoint)
         dz = self.altitude_target - self.current_position.z
         # calculate the pid_error from the above values
         self.pid_error.x = self.velocity_error.x
