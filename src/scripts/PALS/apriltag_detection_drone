@@ -23,10 +23,10 @@ TAG_ZONES = {
 # -----------------------------------
 
 # For testing with your laptop webcam:
-CAMERA_SOURCE = 0
+# CAMERA_SOURCE = 0
 
 # For testing on the drone camera
-#CAMERA_SOURCE = ("http://drone1.local:8080/stream?topic=raspicam_node/imgae_raw&type=mjpeg&quality=70")
+CAMERA_SOURCE = ("http://drone2.local:8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed")
 
 # Information shared with the web interface
 latest_detection = {
