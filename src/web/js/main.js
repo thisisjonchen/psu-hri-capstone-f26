@@ -1588,7 +1588,7 @@ $(document).keydown(function(event){
 });
 
 function updateDetectedZone() {
-  fetch('duckie@drone2.local')
+  fetch('http://127.0.0.1:5000/zone')
     .then(function(response) {
       return response.json();
     })
