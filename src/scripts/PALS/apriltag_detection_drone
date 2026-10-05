@@ -16,8 +16,17 @@ TAG_ZONES = {
 
 # Camera configuration
 
+# -----------------------------------
+# ONLY USE ONE CAMER SOURCE AT ONCE
+# it won't really break anything it
+# just won't work correctly. thx :)
+# -----------------------------------
+
 # For testing with your laptop webcam:
 CAMERA_SOURCE = 0
+
+# For testing on the drone camera
+#CAMERA_SOURCE = ("http://drone1.local:8080/stream?topic=raspicam_node/imgae_raw&type=mjpeg&quality=70")
 
 # Information shared with the web interface
 latest_detection = {
