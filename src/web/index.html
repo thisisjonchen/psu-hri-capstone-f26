@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight dashboard</title>
+  <link rel="stylesheet" href="css/bootstrap.css">
+  <link rel="stylesheet" href="css/main.css">
+  <script src="js/three.js"></script>
+  <script src="js/quaternion.min.js"></script>
+  <script src="js/eventemitter2.min.js"></script>
+  <script src="js/roslib.js"></script>
+  <script src="js/ros3d.js"></script>
+  <script src="js/Chart.bundle.min.js"></script>
+  <script src="js/mjpegcanvas.js"></script>
+  <script src="js/jquery-3.3.1.min.js"></script>
+  <script src="js/bootstrap.js"></script>
+  <script src="js/main.js"></script>
+</head>
+<body>
+  <div class="dashboard-shell">
+    <main>
+      <div class="page-intro">
+        <h1>Flight Dashboard</h1>
+      </div>
+
+      <section class="connection-panel" aria-label="Drone connection">
+        <fieldset class="drone-select">
+          <legend>Select drone</legend>
+          <div class="drone-options">
+            <label class="drone-option"><input type="radio" name="drone" value="duckie@drone1.local" checked onchange="selectDrone()"><span><strong>Drone 1</strong><small>duckie@drone1.local</small></span></label>
+            <label class="drone-option"><input type="radio" name="drone" value="duckie@drone2.local" onchange="selectDrone()"><span><strong>Drone 2</strong><small>duckie@drone2.local</small></span></label>
+          </div>
+        </fieldset>
+        <div class="connection-actions">
+          <button class="btn btn-primary" type="button" onclick="connect()">Connect</button>
+          <button class="btn btn-outline-secondary" type="button" onclick="closeSession()">Disconnect</button>
+        </div>
+      </section>
+
+      <section class="status-grid" aria-label="Drone status">
+        <div class="status-card"><span class="status-icon connection-icon" id="connectionIcon" aria-hidden="true">●</span><div><p>Connection status</p><div class="alert alert-danger status-value" id="statusMessage" role="status" aria-live="polite">Disconnected</div></div></div>
+        <div class="status-card"><span class="status-icon battery-icon" aria-hidden="true">ϟ</span><div><p>Battery voltage</p><div class="alert alert-danger status-value" id="vbat" role="status" aria-live="polite">???</div></div></div>
+        <div class="status-card"><span class="status-icon mode-icon" aria-hidden="true">◎</span><div><p>Control mode</p><div class="mode-value" id="position_state" role="status" aria-live="polite">Awaiting connection</div></div></div>
+      </section>
+
+      <div class="workspace-grid">
+        <section class="overview-section" aria-label="Telemetry and camera">
+          <div class="section-heading"><h2>Telemetry</h2></div>
+          <div class="overview-grid">
+            <article class="panel chart-panel" id="heightchart">
+              <div class="panel-header"><h3>Height</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="heightPauseBtn" onclick="togglePauseHeightChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis" name="ukfAnalysisBtn" onclick="toggleUkfAnalysis(this)"></div></div>
+              <div class="canvas-wrap"><canvas id="heightChart" width="520" height="280" aria-label="Height chart"></canvas></div>
+              <div class="chart-settings"><label for="heightMin">Min height <span>m</span></label><input type="number" step="0.05" id="heightMin" value="0" onchange="changeHeightChartYScaleMin()"><label for="heightMax">Max height <span>m</span></label><input type="number" step="0.05" id="heightMax" value="0.6" onchange="changeHeightChartYScaleMax()"></div>
+            </article>
+            <article class="panel chart-panel" id="velocitychart">
+              <div class="panel-header"><h3>Speed</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="velocityPauseBtn" onclick="togglePauseVelocityChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis (TODO)" name="velukfAnalysisBtn" disabled title="Velocity UKF analysis is not implemented yet"></div></div>
+              <div class="canvas-wrap"><canvas id="velocityChart" width="520" height="280" aria-label="Speed chart"></canvas></div>
+            </article>
+            <article class="panel camera-panel">
+              <div class="panel-header"><h3>Camera image</h3></div>
+              <div class="camera-frame"><img id="cameraImage" alt="Drone camera image" src="nocamera.jpg" width="320"></div>
+              <p id="imagetopicHelp" class="panel-help">Start <code>rosrun web_video_server web_video_server</code> and the image stream to view live video.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="flight-section" aria-label="Flight controls and XY map">
+          <div class="flight-grid">
+          <article class="panel control-panel">
+            <div class="panel-header"><h3>Controls</h3></div>
+            <p class="field-label">Control mode</p>
+            <div class="btn-group btn-group-toggle mode-switch" data-toggle="buttons" role="group" aria-label="Control mode"><label id="velocityBtn" class="btn btn-secondary active"><input type="radio" name="controlMode" checked>Velocity</label><label id="positionBtn" class="btn btn-secondary"><input type="radio" name="controlMode">Position</label></div>
+            <p class="field-label coordinate-label">Command coordinates</p>
+            <div class="coordinate-grid"><label for="controlX">X <span>axis</span><input type="number" step="0.1" id="controlX" value="0"></label><label for="controlY">Y <span>axis</span><input type="number" step="0.1" id="controlY" value="0"></label><label for="controlZ">Z <span>axis</span><input type="number" step="0.1" id="controlZ" value="0"></label></div>
+            <input class="btn btn-primary set-button" type="button" value="Set controls" name="controlSetBtn" onclick="setControls()">
+          </article>
+          <article class="panel topview-panel" id="xychart">
+            <div class="panel-header"><h3>XY map</h3><input class="btn btn-light btn-sm" type="button" value="Pause (TODO)" name="xyPauseBtn" disabled title="Top view pause is not implemented yet"></div>
+            <div class="canvas-wrap"><canvas id="xyChart" width="400" height="400" aria-label="Top view chart"></canvas></div>
+          </article>
+          </div>
+        </section>
+      </div>
+
+      <section class="keyboard-dock" aria-label="Keyboard controls">
+        <div class="keyboard-dock-inner">
+          <h2>Keyboard controls</h2>
+          <div class="shortcut-grid">
+            <div><kbd>;</kbd><span>Arm</span></div><div><kbd>Space</kbd><span>Disarm</span></div><div><kbd>T</kbd><span>Takeoff</span></div>
+            <div><kbd>A</kbd><span>Yaw left</span></div><div><kbd>D</kbd><span>Yaw right</span></div><div><kbd>W</kbd><span>Up</span></div><div><kbd>S</kbd><span>Down</span></div>
+            <div><kbd>J</kbd><span>Left</span></div><div><kbd>L</kbd><span>Right</span></div><div><kbd>I</kbd><span>Forward</span></div><div><kbd>K</kbd><span>Backward</span></div>
+            <div><kbd>R</kbd><span>Reset position hold</span></div><div><kbd>P</kbd><span>Position hold</span></div><div><kbd>V</kbd><span>Velocity control</span></div><div><kbd>M</kbd><span>Toggle mapping</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

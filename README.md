@@ -40,13 +40,6 @@ The planning and control subsystem is responsible for:
 - optical-flow sensors
 - shared cable and payload mechanism
 
-### Software
-- **Python** — autonomy, perception, and coordination
-- **ROS 2** — onboard and inter-drone communication
-- **MAVROS / MAVLink** — flight-controller interface
-- **PX4** — low-level flight control
-- **OpenCV / AprilTag** — visual localization
-
 ## Acknowledgments
 ### PJ1E Team
 - **Arjun Gupta**, Computer Engineer​

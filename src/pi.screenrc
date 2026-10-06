@@ -1,0 +1,46 @@
+#
+# various settings suggested by other users
+#
+# derived from the Paradox pair programming screenrc, UChicago 2010
+#   ~ yes, we are all total newbs ~
+#
+shell /bin/bash
+startup_message off
+
+#defscrollback 5000
+defscrollback 5000
+
+escape ``
+
+# this hard status was stolen from the net, all credit goes to its originator
+hardstatus             alwayslastline
+#hardstatus string '%{= mK}%-Lw%{= KW}%50>%n%f* %t%{= mK}%+Lw%< %{= kG}%-=%D %d %M %Y %c:%s%{-}'
+hardstatus string '%{= kG}[ %{G}%H %{g}][%= %{= kw}%?%-Lw%?%{r}(%{W}%n*%f%t%?(%u)%?%{r})%{w}%?%+Lw%?%?%= %{g}][%{B} %d/%m %{W}%c %{g}]'
+
+# A hint for using multiuser mode:  make sure that both parties have identically
+# sized terminals, otherwise there could be graphical mismatches and undrawn text
+# for one party :(  .
+
+# turn multiuser mode on so others can connect.
+multiuser on
+
+# add the specified user to this screen session so that they can connect.
+# the initiating user is allowed automatically, but add both so either can
+# run this script without modification.
+
+# Run from the package directory, as before. Interactive bash loads the
+# container's ROS/camera environment before executing each command. Unlike
+# `stuff`, these commands cannot race shell initialization or terminal input.
+# Keep a shell and the failure output available when a command exits.
+screen -t "rcore" /bin/bash -ic 'source scripts/screen_node.sh core; exec /bin/bash --norc -i'
+screen -t "FC" /bin/bash -ic 'source scripts/screen_node.sh fc; exec /bin/bash --norc -i'
+screen -t "PID" /bin/bash -ic 'source scripts/screen_node.sh pid; exec /bin/bash --norc -i'
+screen -t "SE" /bin/bash -ic 'source scripts/screen_node.sh se; exec /bin/bash --norc -i'
+screen -t "Vision" /bin/bash -ic 'source scripts/screen_node.sh vision; exec /bin/bash --norc -i'
+screen -t "Optical Flow" /bin/bash -ic 'source scripts/screen_node.sh flow; exec /bin/bash --norc -i'
+screen -t "Rigid Transform" /bin/bash -ic 'source scripts/screen_node.sh rigid; exec /bin/bash --norc -i'
+screen -t "TOF" /bin/bash -ic 'source scripts/screen_node.sh tof; exec /bin/bash --norc -i'
+screen -t "rosbridge" /bin/bash -ic 'source scripts/screen_node.sh bridge; exec /bin/bash --norc -i'
+screen -t "web_vid_serv" /bin/bash -ic 'source scripts/screen_node.sh video; exec /bin/bash --norc -i'
+screen -t "free1" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
+screen -t "free2" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
