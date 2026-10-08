@@ -1586,3 +1586,24 @@ $(document).keydown(function(event){
     //console.log('undefined key: ' + event.keyCode);
   }
 });
+
+function updateDetectedZone() {
+  fetch('http://127.0.0.1:5000/zone')
+    .then(function(response) {
+      return response.json();
+    })
+    .then(function(data) {
+      document.getElementById('detectedZone').textContent = data.zone;
+    })
+    .catch(function(error) {
+      document.getElementById('detectedZone').textContent = 'Detector offline';
+    });
+}
+
+window.addEventListener('DOMContentLoaded', function() {
+  updateDetectedZone();
+
+  setInterval(function() {
+    updateDetectedZone();
+  }, 250);
+});
