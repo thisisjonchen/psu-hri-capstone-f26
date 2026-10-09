@@ -1,0 +1,10 @@
+{
+  "network_id": "0x1234",
+  "update_rate_100ms": 1,
+  "anchors": {
+    "A0": {"initiator": true,  "pos": [0.0, 0.0, 0.0]},
+    "A1": {"initiator": false, "pos": [3.0, 0.0, 0.0]},
+    "A2": {"initiator": false, "pos": [3.0, 6.0, 0.0]},
+    "A3": {"initiator": false, "pos": [0.0, 6.0, 0.0]}
+  }
+}
