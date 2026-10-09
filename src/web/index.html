@@ -3,98 +3,107 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flight dashboard</title>
+  <title>PALS Flight Dashboard</title>
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/main.css">
-  <script src="js/three.js"></script>
-  <script src="js/quaternion.min.js"></script>
-  <script src="js/eventemitter2.min.js"></script>
-  <script src="js/roslib.js"></script>
-  <script src="js/ros3d.js"></script>
-  <script src="js/Chart.bundle.min.js"></script>
-  <script src="js/mjpegcanvas.js"></script>
-  <script src="js/jquery-3.3.1.min.js"></script>
-  <script src="js/bootstrap.js"></script>
-  <script src="js/main.js"></script>
+  <script src="js/quaternion.min.js" defer></script>
+  <script src="js/eventemitter2.min.js" defer></script>
+  <script src="js/roslib.js" defer></script>
+  <script src="js/Chart.bundle.min.js" defer></script>
+  <script src="js/main.js" defer></script>
 </head>
 <body>
-  <div class="dashboard-shell">
-    <main>
-      <div class="page-intro">
-        <h1>Flight Dashboard</h1>
-      </div>
-
-      <section class="connection-panel" aria-label="Drone connection">
-        <fieldset class="drone-select">
-          <legend>Select drone</legend>
-          <div class="drone-options">
-            <label class="drone-option"><input type="radio" name="drone" value="duckie@drone1.local" checked onchange="selectDrone()"><span><strong>Drone 1</strong><small>duckie@drone1.local</small></span></label>
-            <label class="drone-option"><input type="radio" name="drone" value="duckie@drone2.local" onchange="selectDrone()"><span><strong>Drone 2</strong><small>duckie@drone2.local</small></span></label>
-          </div>
-        </fieldset>
-        <div class="connection-actions">
-          <button class="btn btn-primary" type="button" onclick="connect()">Connect</button>
-          <button class="btn btn-outline-secondary" type="button" onclick="closeSession()">Disconnect</button>
+  <main class="dashboard-shell">
+    <div class="page-intro"><div><h1>PALS Flight Dashboard</h1></div>
+    <section class="panel connection-panel" aria-label="Drone connection">
+      <fieldset class="drone-select">
+        <legend>Select drones</legend>
+        <div class="drone-options">
+          <label class="drone-option"><input type="radio" name="droneSelection" value="drone1" checked><span class="drone-option-content" id="drone1-connectionStatus" aria-label="Drone 1 disconnected"><strong>Drone 1<span class="state-icon" data-state-icon data-state="disconnected" role="img" aria-label="Disconnected" title="Disconnected">○</span></strong><small data-connection-text role="status">Disconnected</small></span></label>
+          <label class="drone-option"><input type="radio" name="droneSelection" value="drone2"><span class="drone-option-content" id="drone2-connectionStatus" aria-label="Drone 2 disconnected"><strong>Drone 2<span class="state-icon" data-state-icon data-state="disconnected" role="img" aria-label="Disconnected" title="Disconnected">○</span></strong><small data-connection-text role="status">Disconnected</small></span></label>
         </div>
-      </section>
-
-      <section class="status-grid" aria-label="Drone status">
-        <div class="status-card"><span class="status-icon connection-icon" id="connectionIcon" aria-hidden="true">●</span><div><p>Connection status</p><div class="alert alert-danger status-value" id="statusMessage" role="status" aria-live="polite">Disconnected</div></div></div>
-        <div class="status-card"><span class="status-icon battery-icon" aria-hidden="true">ϟ</span><div><p>Battery voltage</p><div class="alert alert-danger status-value" id="vbat" role="status" aria-live="polite">???</div></div></div>
-        <div class="status-card"><span class="status-icon mode-icon" aria-hidden="true">◎</span><div><p>Control mode</p><div class="mode-value" id="position_state" role="status" aria-live="polite">Awaiting connection</div></div></div>
-      </section>
-
-      <div class="workspace-grid">
-        <section class="overview-section" aria-label="Telemetry and camera">
-          <div class="section-heading"><h2>Telemetry</h2></div>
-          <div class="overview-grid">
-            <article class="panel chart-panel" id="heightchart">
-              <div class="panel-header"><h3>Height</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="heightPauseBtn" onclick="togglePauseHeightChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis" name="ukfAnalysisBtn" onclick="toggleUkfAnalysis(this)"></div></div>
-              <div class="canvas-wrap"><canvas id="heightChart" width="520" height="280" aria-label="Height chart"></canvas></div>
-              <div class="chart-settings"><label for="heightMin">Min height <span>m</span></label><input type="number" step="0.05" id="heightMin" value="0" onchange="changeHeightChartYScaleMin()"><label for="heightMax">Max height <span>m</span></label><input type="number" step="0.05" id="heightMax" value="0.6" onchange="changeHeightChartYScaleMax()"></div>
-            </article>
-            <article class="panel chart-panel" id="velocitychart">
-              <div class="panel-header"><h3>Speed</h3><div class="panel-actions"><input class="btn btn-light btn-sm" type="button" value="Pause" name="velocityPauseBtn" onclick="togglePauseVelocityChart(this)"><input class="btn btn-light btn-sm" type="button" value="UKF Analysis (TODO)" name="velukfAnalysisBtn" disabled title="Velocity UKF analysis is not implemented yet"></div></div>
-              <div class="canvas-wrap"><canvas id="velocityChart" width="520" height="280" aria-label="Speed chart"></canvas></div>
-            </article>
-            <article class="panel camera-panel">
-              <div class="panel-header"><h3>Camera image</h3></div>
-              <div class="camera-frame"><img id="cameraImage" alt="Drone camera image" src="nocamera.jpg" width="320"></div>
-              <p id="imagetopicHelp" class="panel-help">Start <code>rosrun web_video_server web_video_server</code> and the image stream to view live video.</p>
-            </article>
-          </div>
-        </section>
-
-        <section class="flight-section" aria-label="Flight controls and XY map">
-          <div class="flight-grid">
-          <article class="panel control-panel">
-            <div class="panel-header"><h3>Controls</h3></div>
-            <p class="field-label">Control mode</p>
-            <div class="btn-group btn-group-toggle mode-switch" data-toggle="buttons" role="group" aria-label="Control mode"><label id="velocityBtn" class="btn btn-secondary active"><input type="radio" name="controlMode" checked>Velocity</label><label id="positionBtn" class="btn btn-secondary"><input type="radio" name="controlMode">Position</label></div>
-            <p class="field-label coordinate-label">Command coordinates</p>
-            <div class="coordinate-grid"><label for="controlX">X <span>axis</span><input type="number" step="0.1" id="controlX" value="0"></label><label for="controlY">Y <span>axis</span><input type="number" step="0.1" id="controlY" value="0"></label><label for="controlZ">Z <span>axis</span><input type="number" step="0.1" id="controlZ" value="0"></label></div>
-            <input class="btn btn-primary set-button" type="button" value="Set controls" name="controlSetBtn" onclick="setControls()">
-          </article>
-          <article class="panel topview-panel" id="xychart">
-            <div class="panel-header"><h3>XY map</h3><input class="btn btn-light btn-sm" type="button" value="Pause (TODO)" name="xyPauseBtn" disabled title="Top view pause is not implemented yet"></div>
-            <div class="canvas-wrap"><canvas id="xyChart" width="400" height="400" aria-label="Top view chart"></canvas></div>
-          </article>
-          </div>
-        </section>
+      </fieldset>
+      <div class="connection-actions"><button class="btn btn-primary" data-connect="selected">Connect</button><button class="btn btn-outline-secondary" data-disconnect="selected">Disconnect</button></div>
+    </section></div>
+    <section class="panel fleet-controls" id="fleetControls" aria-label="Flight controls">
+      <div class="panel-header fleet-controls-header"><h2 id="controlsHeading">Flight controls</h2>
+      <div class="command-buttons" data-controller="shared">
+              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
+              <button class="btn btn-danger" data-command="disarm">Disarm all</button>
+            </div></div>
+      <div class="flight-controls-layout"><div class="control-cameras">
+        <article class="camera-panel" id="drone1-cameraPanel"><div class="panel-header"><h3>Drone 1 camera</h3></div>
+          <div class="camera-frame"><img id="drone1-camera" data-field="camera" alt="Drone 1 camera" src="nocamera.jpg" width="240" height="320"></div>
+          <p class="detection-status"><span>Detected</span><strong id="drone1-detection" data-state="checking" role="status" aria-live="polite">Checking…</strong></p>
+        </article>
+        <article class="camera-panel" id="drone2-cameraPanel"><div class="panel-header"><h3>Drone 2 camera</h3></div>
+          <div class="camera-frame"><img id="drone2-camera" data-field="camera" alt="Drone 2 camera" src="nocamera.jpg" width="240" height="320"></div>
+          <p class="detection-status"><span>Detected</span><strong id="drone2-detection" data-state="checking" role="status" aria-live="polite">Checking…</strong></p>
+        </article>
       </div>
-
-      <section class="keyboard-dock" aria-label="Keyboard controls">
-        <div class="keyboard-dock-inner">
-          <h2>Keyboard controls</h2>
-          <div class="shortcut-grid">
-            <div><kbd>;</kbd><span>Arm</span></div><div><kbd>Space</kbd><span>Disarm</span></div><div><kbd>T</kbd><span>Takeoff</span></div>
-            <div><kbd>A</kbd><span>Yaw left</span></div><div><kbd>D</kbd><span>Yaw right</span></div><div><kbd>W</kbd><span>Up</span></div><div><kbd>S</kbd><span>Down</span></div>
-            <div><kbd>J</kbd><span>Left</span></div><div><kbd>L</kbd><span>Right</span></div><div><kbd>I</kbd><span>Forward</span></div><div><kbd>K</kbd><span>Backward</span></div>
-            <div><kbd>R</kbd><span>Reset position hold</span></div><div><kbd>P</kbd><span>Position hold</span></div><div><kbd>V</kbd><span>Velocity control</span></div><div><kbd>M</kbd><span>Toggle mapping</span></div>
+      <section class="control-map" aria-label="Shared XY map">
+        <div class="panel-header"><h3>XY map</h3></div>
+        <div class="canvas-wrap flight-map-wrap"><canvas id="fleet-xyChart" aria-label="Both drones XY map"></canvas></div>
+        <div class="map-legend"><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span></div>
+        <div class="map-sources"><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span></div>
+      </section></div>
+      <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
+    </section>
+    <div class="fleet-grid" id="fleetGrid" data-count="0"><section class="drone-dashboard" id="drone1" aria-labelledby="drone1-heading">
+          <div class="drone-heading"><div><h2 id="drone1-heading">Drone 1</h2></div>
+            <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
           </div>
-        </div>
-      </section>
-    </main>
-  </div>
+          <div class="status-grid" aria-label="Drone 1 status">
+            <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
+            <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
+              <summary aria-label="Drone 1 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <div class="metric-content"><article class="metric-chart">
+              <div class="canvas-wrap"><canvas id="drone1-heightChart" data-field="heightChart" aria-label="Drone 1 height chart"></canvas></div>
+              <div class="metric-chart-actions"><button class="btn btn-outline-secondary" data-analysis="drone1" aria-pressed="false">UKF analysis</button></div>
+            </article></div>
+            </details>
+            <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
+              <summary aria-label="Drone 1 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <div class="metric-content"><article class="metric-chart">
+              <div class="canvas-wrap"><canvas id="drone1-speedChart" data-field="speedChart" aria-label="Drone 1 speed chart"></canvas></div>
+            </article></div>
+            </details>
+          </div>
+          <article class="panel control-panel"><div class="panel-header"><h3>Drone 1 controls</h3></div><div class="command-buttons" data-controller="drone1">
+              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
+              <button class="btn btn-danger" data-command="disarm">Disarm</button>
+            </div></article>
+        </section><section class="drone-dashboard" id="drone2" aria-labelledby="drone2-heading">
+          <div class="drone-heading"><div><h2 id="drone2-heading">Drone 2</h2></div>
+            <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
+          </div>
+          <div class="status-grid" aria-label="Drone 2 status">
+            <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
+            <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
+              <summary aria-label="Drone 2 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <div class="metric-content"><article class="metric-chart">
+              <div class="canvas-wrap"><canvas id="drone2-heightChart" data-field="heightChart" aria-label="Drone 2 height chart"></canvas></div>
+              <div class="metric-chart-actions"><button class="btn btn-outline-secondary" data-analysis="drone2" aria-pressed="false">UKF analysis</button></div>
+            </article></div>
+            </details>
+            <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
+              <summary aria-label="Drone 2 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <div class="metric-content"><article class="metric-chart">
+              <div class="canvas-wrap"><canvas id="drone2-speedChart" data-field="speedChart" aria-label="Drone 2 speed chart"></canvas></div>
+            </article></div>
+            </details>
+          </div>
+          <article class="panel control-panel"><div class="panel-header"><h3>Drone 2 controls</h3></div><div class="command-buttons" data-controller="drone2">
+              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
+              <button class="btn btn-danger" data-command="disarm">Disarm</button>
+            </div></article>
+        </section></div>
+    <section class="keyboard-dock" aria-label="Keyboard controls"><div class="keyboard-dock-inner"><h2>Keyboard controls</h2><div class="shortcut-grid"><div><kbd>;</kbd><span>Arm</span></div><div><kbd>Space</kbd><span>Disarm all</span></div><div><kbd>T</kbd><span>Takeoff</span></div><div><kbd>A</kbd><span>Yaw left</span></div><div><kbd>D</kbd><span>Yaw right</span></div><div><kbd>W</kbd><span>Up</span></div><div><kbd>S</kbd><span>Down</span></div><div><kbd>J</kbd><span>Left</span></div><div><kbd>L</kbd><span>Right</span></div><div><kbd>I</kbd><span>Forward</span></div><div><kbd>K</kbd><span>Backward</span></div><div><kbd>R</kbd><span>Reset position hold</span></div><div><kbd>P</kbd><span>Position hold</span></div><div><kbd>V</kbd><span>Velocity control</span></div><div><kbd>M</kbd><span>Toggle mapping</span></div></div></div></section>
+  </main>
 </body>
 </html>

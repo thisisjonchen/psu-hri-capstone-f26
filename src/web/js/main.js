@@ -1,1588 +1,627 @@
-/**
-* Setup all visualization elements when the page is loaded.
-*/
+'use strict';
 
-function empty(element) {
-    while (element.firstChild) {
-      element.removeChild(element.firstChild);
-    }
+const xySources = [
+  ['groundTruth', 'Ground truth', []],
+  ['ukf', 'UKF', [6, 3]],
+  ['camera', 'Camera pose', [2, 3]]
+];
+
+function configureXYChart(chart) {
+  const xAxis = chart.options.scales.xAxes[0];
+  xAxis.display = true;
+  Object.assign(xAxis.ticks, { min: -1.6, max: 1.6, stepSize: 0.4, maxRotation: 0 });
+  Object.assign(xAxis.scaleLabel, { display: true, labelString: 'X position (m)' });
+  Object.assign(chart.options.scales.yAxes[0].ticks, { min: -1.6, max: 1.6, stepSize: 0.4 });
+  chart.options.legend.display = false;
+  chart.update();
 }
 
-function printProperties(obj) {
-    for(var propt in obj){
-      console.log(propt + ': ' + obj[propt]);
-    }
-}
-
-function myround(number, precision) {
-  var factor = Math.pow(10, precision);
-  var tempNumber = number * factor;
-  var roundedTempNumber = Math.round(tempNumber);
-  return roundedTempNumber / factor;
-};
-
-var markerClient;
-var ros;
-var modepub;
-var modeMsg;
-var positionMsg;
-var twistMsg;
-var poseMsg;
-var positionPub;
-var positionControlPub;
-var velocityControlPub;
-var heartbeatPub;
-var heightChart;
-var velocityChart;
-var windowSize = 5;
-var gotFirstHeight = false;
-var gotFirstVelocity = false;
-var startTime;
-var heightChartPaused = false;
-var velocityChartPaused = false;
-var showingUkfAnalysis = false;
-var spanningFullWindow = false;
-var heartbeatInterval;
-var controlModeListenersBound = false;
-
-function selectedDroneHost() {
-  var selected = document.querySelector('input[name="drone"]:checked');
-  // The displayed address includes the SSH user; browser URLs need only the host.
-  return selected.value.split('@').pop();
-}
-
-function selectDrone() {
-  closeSession();
-  document.getElementById('vbat').textContent = '???';
-  $('#vbat').addClass('alert-danger').removeClass('alert-success');
-  document.getElementById('position_state').textContent = 'Awaiting connection';
-  document.getElementById('cameraImage').src = 'nocamera.jpg';
-}
-
-function closeSession(){
-  console.log("Closing connections.");
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-    heartbeatInterval = null;
+class FleetMap {
+  constructor() {
+    const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
+      [0, 1, 2].map(i => ({
+        droneId: drone.id, key: key + i, label: 'Drone ' + drone.id.slice(-1) + ' · ' + label,
+        data: [], borderColor: drone.id === 'drone1' ? '#0072b2' : '#d55e00',
+        borderDash: dash, borderWidth: 2.5, pointRadius: 0, fill: false, lineTension: 0
+      }))));
+    this.chart = new Chart(document.getElementById('fleet-xyChart').getContext('2d'), {
+      type: 'line', data: { datasets }, options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+        scales: {
+          xAxes: [{ type: 'linear', ticks: {}, scaleLabel: {} }],
+          yAxes: [{ ticks: {}, scaleLabel: { display: true, labelString: 'Y position (m)' } }]
+        }, legend: { display: false }
+      }
+    });
+    configureXYChart(this.chart);
   }
-  if (ros) {
-    ros.close();
-    ros = null;
+
+  render() {
+    this.chart.data.datasets.forEach(dataset => {
+      dataset.data = drones[dataset.droneId].series[dataset.key].map(point => ({ ...point }));
+    });
+    this.chart.update();
   }
-  document.getElementById('statusMessage').textContent = 'Disconnected';
-  $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
-  $('#connectionIcon').removeClass('is-connected');
-  return false;
+
+  clearDrone(id) {
+    // Remove only the departed drone's markers.
+    this.chart.data.datasets.filter(dataset => dataset.droneId === id).forEach(dataset => { dataset.data = []; });
+    this.chart.update();
+  }
 }
 
-/* This code runs when you click 'connect' */
-function connect() {
-    // Connect to ROS.
-    if(ros && ros.isConnected) {
-	return
+// Each bridge uses the same topic names; all ROS and chart state belongs to its session.
+class DroneSession {
+  constructor(id) {
+    this.id = id;
+    this.host = id + '.local';
+    this.detectorUrl = 'http://127.0.0.1:' + (id === 'drone1' ? 5001 : 5002) + '/zone';
+    this.detectionPending = null;
+    this.detectorStartPending = null;
+    this.detectorStartingUntil = 0;
+    this.root = document.getElementById(id);
+    this.ros = null;
+    this.publishers = {};
+    this.subscribers = [];
+    this.heartbeat = null;
+    this.positionMode = false;
+    this.startTime = null;
+    this.latestTime = 0;
+    this.verticalHeightSamples = [];
+    this.verticalSampleAt = null;
+    this.analysis = false;
+    this.series = {};
+    this.heightChart = this.makeChart('heightChart', this.heightDatasets(), 'Height (m)', 0, 0.6);
+    this.speedChart = this.makeChart('speedChart', [
+      this.dataset('speed', 'Horizontal speed', '#e46555'),
+      this.dataset('verticalSpeed', 'Vertical velocity', '#49368c')
+    ], 'Speed (m/s)', undefined, undefined);
+    xySources.forEach(([key]) => {
+      [0, 1, 2].forEach(i => { this.series[key + i] = []; });
+    });
+    ['height', 'speed'].forEach(kind => {
+      this.field(kind + 'Details').addEventListener('toggle', () => {
+        if (!this.field(kind + 'Details').open) return;
+        this[kind + 'Chart'].resize();
+        this.render(kind);
+      });
+    });
+    this.field('camera').addEventListener('error', () => {
+      // Stop retrying a missing stream until the next connection.
+      if (this.field('camera').getAttribute('src') !== 'nocamera.jpg') {
+        this.field('camera').src = 'nocamera.jpg';
+      }
+    });
+  }
+
+  field(name) {
+    if (name === 'camera') return document.getElementById(this.id + '-camera');
+    if (name === 'detection') return document.getElementById(this.id + '-detection');
+    return this.root.querySelector('[data-field="' + name + '"]');
+  }
+  get connected() { return !!(this.ros && this.ros.isConnected); }
+
+  startDetector(ros) {
+    if (this.detectorStartPending) return this.detectorStartPending;
+    this.detectorStartingUntil = Date.now() + 10000;
+    this.field('detection').textContent = 'Starting detector…';
+    this.field('detection').dataset.state = 'checking';
+    this.detectorStartPending = this.requestDetectorStart(ros).finally(() => { this.detectorStartPending = null; });
+    return this.detectorStartPending;
+  }
+
+  async requestDetectorStart(ros) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch('/api/detectors/' + this.id + '/start', {
+        method: 'POST', signal: controller.signal, cache: 'no-store'
+      });
+      if (!response.ok) throw new Error('Detector launcher unavailable');
+      const result = await response.json();
+      if (result.drone_id !== this.id || !['starting', 'running'].includes(result.status)) throw new Error('Invalid detector launcher response');
+    } catch (error) {
+      if (this.ros !== ros) return;
+      this.detectorStartingUntil = 0;
+      this.field('detection').textContent = 'Detector offline';
+      this.field('detection').dataset.state = 'offline';
+      feedback('Drone ' + this.id.slice(-1) + ' detector could not start. Open the dashboard using its local server.');
+      console.error(this.id + ' detector startup failed', error);
+    } finally {
+      clearTimeout(timeout);
     }
-    if (ros) {
-      closeSession();
-    }
-    
-    var url = 'ws://' + selectedDroneHost() + ':9090'
-    ros = new ROSLIB.Ros({
-        url : url
-    });
-    var connection = ros;
+  }
 
-    if (!controlModeListenersBound) {
-      document.getElementById('velocityBtn').addEventListener("click", publishVelocityMode, false);
-      document.getElementById('positionBtn').addEventListener("click", publishPositionMode, false);
-      controlModeListenersBound = true;
-    }
+  updateDetection() {
+    if (this.detectionPending) return this.detectionPending;
+    this.detectionPending = this.fetchDetection().finally(() => { this.detectionPending = null; });
+    return this.detectionPending;
+  }
 
-    ros.on('error', function(error) {
-      if (ros !== connection) return;
-      console.log('ROS Master:  Error, check console.');
-      //printProperties(error);
-      document.getElementById('statusMessage').innerHTML='Error detected; check console.';
-      $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
-      $('#connectionIcon').removeClass('is-connected');
-    });
-
-    ros.on('connection', function() {
-      if (ros !== connection) return;
-      console.log('ROS Master:  Connected.');
-      //printProperties(error);
-      document.getElementById('statusMessage').innerHTML="Connected";
-      $('#statusMessage').addClass('alert-success').removeClass('alert-danger');
-      $('#connectionIcon').addClass('is-connected');
-    });
-
-    ros.on('close', function() {
-      if (ros !== connection) return;
-      console.log('ROS Master:  Connection closed.');
-      //printProperties(error);
-      document.getElementById('statusMessage').innerHTML="Disconnected";
-      $('#statusMessage').addClass('alert-danger').removeClass('alert-success');
-      $('#connectionIcon').removeClass('is-connected');
-    });
-
-    /*
-     * ROS Messages
-     */
-
-    modeMsg = new ROSLIB.Message({
-      mode: "DISARMED",
-     });
-
-    emptyMsg = new ROSLIB.Message({
-    });
-
-    positionMsg = new ROSLIB.Message({
-        // default is velocity mode
-        data : false
-    });
-
-    poseMsg = new ROSLIB.Message({
-        position : {
-            x : 0.0,
-            y : 0.0,
-            z : 0.0
-        },
-        orientation : {
-            x : 0.0,
-            y : 0.0,
-            z : 0.0,
-            w : 0.0
-        }
-    });
-
-    twistMsg = new ROSLIB.Message({
-        linear : {
-            x : 0.0,
-            y : 0.0,
-            z : 0.0
-        },
-        angular : {
-            x : 0.0,
-            y : 0.0,
-            z : 0.0
-        }
-    });
-
-    /*
-     * ROS Publishers
-     */
-
-    modepub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/desired/mode',
-      messageType : 'pidrone_pkg/Mode'
-    });
-
-    heartbeatPub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/heartbeat/web_interface',
-      messageType : 'std_msgs/Empty'
-    });
-
-    heartbeatInterval = setInterval(function(){
-      heartbeatPub.publish(emptyMsg);
-      //console.log("heartbeat");
-    }, 1000);
-
-    positionPub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/position_control',
-        messageType : 'std_msgs/Bool'
-    });
-
-    velocityControlPub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/desired/twist',
-        messageType : 'geometry_msgs/Twist'
-    });
-
-    positionControlPub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/desired/pose',
-        messageType : 'geometry_msgs/Pose'
-    });
-
-    resetpub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/reset_transform',
-      messageType : 'std_msgs/Empty'
-    });
-
-    mappub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/map',
-        messageType : 'std_msgs/Empty'
-    })
-
-    togglepub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/toggle_transform',
-      messageType : 'std_msgs/Empty'
-    });
-
-    /*
-     * ROS Subscribers
-     */
-
-    positionSub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/position_control',
-        messageType : 'std_msgs/Bool',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-
-    // TODO: Merge with code that has Battery.msg
-    // (published from flight controller node)
-    batterysub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/battery',
-      messageType : 'pidrone_pkg/Battery',
-      queue_length : 2,
-      throttle_rate : 2
-    });
-
-    irsub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/range',
-      messageType : 'sensor_msgs/Range',
-      queue_length : 2,
-      throttle_rate : 80
-    });
-
-
-    velsub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/picamera/twist',
-      messageType : 'geometry_msgs/TwistStamped',
-      queue_length : 2,
-      throttle_rate : 80
-    });
-
-    ukf2dsub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/state/ukf_2d',
-        messageType : 'pidrone_pkg/State',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-    
-    ukf7dsub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/state/ukf_7d',
-        messageType : 'pidrone_pkg/State',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-
-    cameraPoseSub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/picamera/pose',
-        messageType : 'geometry_msgs/PoseStamped',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-
-    emaIrSub = new ROSLIB.Topic({
-      ros : ros,
-      name : '/pidrone/state/ema',
-      messageType : 'pidrone_pkg/State',
-      queue_length : 2,
-      throttle_rate : 80
-    });
-
-    stateGroundTruthSub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/state/ground_truth',
-        messageType : 'pidrone_pkg/StateGroundTruth',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-    
-    ukfStatsSub = new ROSLIB.Topic({
-        ros : ros,
-        name : '/pidrone/ukf_stats',
-        messageType : 'pidrone_pkg/UkfStats',
-        queue_length : 2,
-        throttle_rate : 80
-    });
-
-    /*
-     * ROS Subscriber Callbacks
-     */
-
-     positionSub.subscribe(function(message) {
-        var position = message.data;
-        var text = "";
-        if (position) {
-            text = "Position Mode";
-        } else {
-            text = "Velocity Mode";
-        }
-        element = document.getElementById("position_state");
-        element.textContent = text;
-     });
-
-    batterysub.subscribe(function(message) {
-      //printProperties(message);
-      var mynumber = myround(message.vbat, 2);
-      document.getElementById('vbat').innerHTML=mynumber
-      if (message.vbat <= 11.3) {
-        document.getElementById('vbat').innerHTML=mynumber + " EMPTY!";
-        $('#vbat').addClass('alert-danger').removeClass('alert-success');
+  async fetchDetection() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const status = this.field('detection');
+    try {
+      const response = await fetch(this.detectorUrl, { signal: controller.signal, cache: 'no-store' });
+      if (!response.ok) throw new Error('Detection API unavailable');
+      const detection = await response.json();
+      if (detection.drone_id && detection.drone_id !== this.id) throw new Error('Wrong drone detector');
+      if (detection.tag_id === null) {
+        status.textContent = 'No tag detected';
+        status.dataset.state = 'none';
       } else {
-        document.getElementById('vbat').innerHTML=mynumber;
-        $('#vbat').addClass('alert-success').removeClass('alert-danger');
+        if (!Number.isInteger(detection.tag_id) || detection.tag_id < 0 || typeof detection.zone !== 'string' || !detection.zone.trim()) {
+          throw new Error('Invalid detection');
+        }
+        status.textContent = detection.zone + ' · Tag ' + detection.tag_id;
+        status.dataset.state = 'detected';
       }
+      this.detectorStartingUntil = 0;
+    } catch (error) {
+      if (this.detectorStartPending || Date.now() < this.detectorStartingUntil) return;
+      status.textContent = 'Detector offline';
+      status.dataset.state = 'offline';
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 
-    });
+  dataset(key, label, color, extra = {}) {
+    if (!this.series[key]) this.series[key] = [];
+    return Object.assign({
+      key, label, data: this.series[key].slice(), borderColor: color,
+      backgroundColor: color, borderWidth: 1.5, pointRadius: 0,
+      fill: false, lineTension: 0
+    }, extra);
+  }
 
-    var heightChartMinTime;
-    var heightChartMaxTime;
-    irsub.subscribe(function(message) {
-      //printProperties(message);
-      //console.log("Range: " + message.range);
-      currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-      if (!gotFirstHeight) {
-          gotFirstHeight = true;
-          startTime = currTime;
-      }
-      tVal = currTime - startTime;
-      // Have the plot scroll in time, showing a window of windowSize seconds
-      if (tVal > windowSize) {
-          spanningFullWindow = true;
-          heightChartMinTime = tVal - windowSize;
-          heightChartMaxTime = tVal;
-          // Remove first element of array while difference compared to current
-          // time is greater than the windowSize
-          while (rawIrData.length > 0 &&
-                 (tVal - rawIrData[0].x > windowSize)) {
-              rawIrData.splice(0, 1);
-          }
-      }
-      // Add new range reading to end of the data array
-      // x-y pair
-      var xyPair = {
-          x: tVal,
-          y: message.range
-      }
-      rawIrData.push(xyPair)
-      if (!heightChartPaused && !showingUkfAnalysis) {
-          heightChart.options.scales.xAxes[0].ticks.min = heightChartMinTime;
-          heightChart.options.scales.xAxes[0].ticks.max = heightChartMaxTime;
-          heightChart.data.datasets[0].data = rawIrData.slice();
-          heightChart.update();
-      } else if (!showingUkfAnalysis) {
-          pulseIr();
-      }
-      //console.log("Data: " + heightChart.data.datasets[0].data);
-      //console.log('tVal: ' + tVal)
-    });
+  heightDatasets() {
+    if (this.analysis) return [
+      this.dataset('error', 'UKF − ground truth', '#d1513a'),
+      this.dataset('sigmaPlus', '+1 sigma', '#49368c', { fill: '+1', backgroundColor: '#49368c22' }),
+      this.dataset('sigmaMinus', '−1 sigma', '#49368c')
+    ];
+    return [
+      this.dataset('range', 'Raw range', '#e46555'),
+      this.dataset('ukfHeight', 'UKF height', '#49368c'),
+      this.dataset('ukfPlus', 'UKF +sigma', '#49368c', { band: true, borderWidth: 0, fill: '+1', backgroundColor: '#49368c22' }),
+      this.dataset('ukfMinus', 'UKF −sigma', '#49368c', { band: true, borderWidth: 0 }),
+      this.dataset('ema', 'EMA height', '#fc46ad'),
+      this.dataset('truthHeight', 'Ground truth', '#172337')
+    ];
+  }
 
-
-
-
-    var velocityChartMinTime;
-    var velocityChartMaxTime;
-    velsub.subscribe(function(message) {
-      //printProperties(message);
-	//console.log("Range: " + message.twist.linear.x);
-	//console.log("Range: " + message.twist.linear.y);
-	vel = Math.sqrt(message.twist.linear.x**2 + message.twist.linear.y**2)
-      currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-      if (!gotFirstVelocity) {
-          gotFirstVelocity = true;
-          startTime = currTime;
-      }
-      tVal = currTime - startTime;
-      // Have the plot scroll in time, showing a window of windowSize seconds
-      if (tVal > windowSize) {
-          spanningFullWindow = true;
-          velocityChartMinTime = tVal - windowSize;
-          velocityChartMaxTime = tVal;
-          // Remove first element of array while difference compared to current
-          // time is greater than the windowSize
-          while (rawVelocityData.length > 0 &&
-                 (tVal - rawVelocityData[0].x > windowSize)) {
-              rawVelocityData.splice(0, 1);
-          }
-      }
-      // Add new range reading to end of the data array
-      // x-y pair
-      var xyPair = {
-          x: tVal,
-          y: vel
-      }
-      rawVelocityData.push(xyPair)
-      if (!velocityChartPaused && !showingUkfAnalysis) {
-          velocityChart.options.scales.xAxes[0].ticks.min = velocityChartMinTime;
-          velocityChart.options.scales.xAxes[0].ticks.max = velocityChartMaxTime;
-          velocityChart.data.datasets[0].data = rawVelocityData.slice();
-          velocityChart.update();
+  makeChart(field, datasets, axisLabel, min, max) {
+    return new Chart(this.field(field).getContext('2d'), {
+      type: 'line', data: { datasets }, options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+        scales: {
+          yAxes: [{ ticks: { min, max }, scaleLabel: { display: true, labelString: axisLabel } }],
+          xAxes: [{ type: 'linear', display: false, ticks: { min: 0, max: 5 } }]
+        },
+        legend: { labels: { filter: (item, data) => {
+          const dataset = data.datasets[item.datasetIndex];
+          return !dataset.band && dataset.data.length > 0;
+        } } }
       }
     });
+  }
 
-    function ukfCallback(message) {
-      //printProperties(message);
-      currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-      if (!gotFirstHeight) {
-          gotFirstHeight = true;
-          startTime = currTime;
-      }
-      tVal = currTime - startTime;
-      // Have the plot scroll in time, showing a window of windowSize seconds
-      if (tVal > windowSize) {
-          spanningFullWindow = true;
-          // Avoid changing axis limits too often, to avoid shaky plotting?
-          // heightChartMinTime = tVal - windowSize;
-          // heightChartMaxTime = tVal;
+  setStatus(text, connected = false) {
+    const state = connected ? 'connected' : text === 'Connecting…' ? 'connecting' : text === 'Connection error' ? 'error' : 'disconnected';
+    [document.getElementById(this.id + '-connectionStatus'), this.field('connectionStatus')].forEach(status => {
+      status.dataset.state = state;
+      status.querySelector('[data-connection-text]').textContent = text;
+      const icon = status.querySelector('[data-state-icon]');
+      icon.dataset.state = state;
+      icon.textContent = { connected: '●', connecting: '', error: '!', disconnected: '○' }[state];
+      icon.setAttribute('aria-label', text);
+      icon.title = text;
+      status.setAttribute('aria-label', 'Drone ' + this.id.slice(-1) + ' ' + text);
+    });
+  }
 
-          // Remove first element of array while difference compared to current
-          // time is greater than the windowSize
-          while (ukfData.length > 0 &&
-                 (tVal - ukfData[0].x > windowSize)) {
-              ukfData.splice(0, 1);
-              ukfPlusSigmaData.splice(0, 1);
-              ukfMinusSigmaData.splice(0, 1);
-          }
-      }
-      // Add new height estimate to end of the data array
-      // x-y pair
-      var zEstimate = message.pose_with_covariance.pose.position.z;
-      var xyPair = {
-          x: tVal,
-          y: zEstimate
-      }
-      ukfData.push(xyPair);
-      // Also plot +/- one standard deviation:
-      var heightVariance = message.pose_with_covariance.covariance[14];
-      var heightStdDev = Math.sqrt(heightVariance);
-      var xyPairStdDevPlus = {
-          x: tVal,
-          y: zEstimate + heightStdDev
-      }
-      var xyPairStdDevMinus = {
-          x: tVal,
-          y: zEstimate - heightStdDev
-      }
-      ukfPlusSigmaData.push(xyPairStdDevPlus);
-      ukfMinusSigmaData.push(xyPairStdDevMinus);
-      updateUkfXYChart(message);
-      if (!heightChartPaused && !showingUkfAnalysis) {
-          // heightChart.options.scales.xAxes[0].ticks.min = heightChartMinTime;
-          // heightChart.options.scales.xAxes[0].ticks.max = heightChartMaxTime;
-          heightChart.data.datasets[1].data = ukfData.slice();
-          heightChart.data.datasets[2].data = ukfPlusSigmaData.slice();
-          heightChart.data.datasets[3].data = ukfMinusSigmaData.slice();
-          // Avoid updating too often, to avoid shaky plotting?
-          // heightChart.update();
-      }
+  resetTelemetry() {
+    this.startTime = null;
+    this.latestTime = 0;
+    this.positionMode = false;
+    this.verticalHeightSamples = [];
+    this.verticalSampleAt = null;
+    ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed'].forEach(name => {
+      this.field(name).textContent = '—';
+      this.field(name).classList.remove('alert-success', 'alert-danger');
+    });
+    this.field('camera').src = 'nocamera.jpg';
+    Object.keys(this.series).forEach(key => { this.series[key] = []; });
+    [this.heightChart, this.speedChart].forEach(chart => {
+      chart.data.datasets.forEach(dataset => { dataset.data = []; });
+      Object.assign(chart.options.scales.xAxes[0].ticks, { min: 0, max: 5 });
+      chart.update();
+    });
+    if (fleetMap) fleetMap.clearDrone(this.id);
+  }
+
+  connect() {
+    // A pending socket is also a session; repeated clicks must not create duplicates.
+    if (this.ros) return;
+    this.resetTelemetry();
+    this.setStatus('Connecting…');
+    const ros = new ROSLIB.Ros();
+    this.ros = ros;
+    ros.on('connection', () => {
+      if (this.ros !== ros) return;
+      this.setStatus('Connected', true);
+      this.setupTopics(ros);
+      this.field('camera').src = 'http://' + this.host + ':8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed';
+      updateLayout();
+      this.startDetector(ros);
+    });
+    ros.on('error', error => {
+      if (this.ros !== ros) return;
+      console.error(this.id + ' ROS connection error', error);
+      this.disconnect('Connection error');
+    });
+    ros.on('close', () => {
+      if (this.ros !== ros) return;
+      this.disconnect();
+    });
+    ros.connect('ws://' + this.host + ':9090');
+  }
+
+  disconnect(status = 'Disconnected') {
+    const ros = this.ros;
+    // Invalidate first, so callbacks from a replaced socket cannot update this drone.
+    this.ros = null;
+    if (this.heartbeat !== null) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    if (ros && ros.isConnected) {
+      this.subscribers.forEach(topic => topic.unsubscribe());
+      Object.values(this.publishers).forEach(topic => topic.unadvertise());
+    }
+    this.subscribers = [];
+    this.publishers = {};
+    if (ros) ros.close();
+    this.resetTelemetry();
+    this.setStatus(status);
+    updateLayout();
+  }
+
+  setupTopics(ros) {
+    const publisher = (key, name, messageType) => {
+      this.publishers[key] = new ROSLIB.Topic({ ros, name, messageType });
     };
+    publisher('mode', '/pidrone/desired/mode', 'pidrone_pkg/Mode');
+    publisher('heartbeat', '/pidrone/heartbeat/web_interface', 'std_msgs/Empty');
+    publisher('positionMode', '/pidrone/position_control', 'std_msgs/Bool');
+    publisher('twist', '/pidrone/desired/twist', 'geometry_msgs/Twist');
+    publisher('pose', '/pidrone/desired/pose', 'geometry_msgs/Pose');
+    publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
+    publisher('map', '/pidrone/map', 'std_msgs/Empty');
+    this.publish('heartbeat', {});
+    this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
-    ukf2dsub.subscribe(ukfCallback);
-    ukf7dsub.subscribe(ukfCallback);
-    
-    ukfStatsSub.subscribe(function(message) {
-        currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-        if (!gotFirstHeight) {
-            gotFirstHeight = true;
-            startTime = currTime;
-        }
-        tVal = currTime - startTime;
-        // Have the plot scroll in time, showing a window of windowSize seconds
-        if (tVal > windowSize) {
-            spanningFullWindow = true;
-            heightChartMinTime = tVal - windowSize;
-            heightChartMaxTime = tVal;
-            
-            // Remove first element of array while difference compared to current
-            // time is greater than the windowSize
-            while (residualData.length > 0 &&
-                   (tVal - residualData[0].x > windowSize)) {
-                residualData.splice(0, 1);
-                plusSigmaData.splice(0, 1);
-                minusSigmaData.splice(0, 1);
-            }
-        }
-        // Add new height error to end of the data array
-        // x-y pair
-        var zError = message.error;
-        var xyPair = {
-            x: tVal,
-            y: zError
-        }
-        residualData.push(xyPair);
-        // Also plot +/- one standard deviation:
-        var heightStdDev = message.stddev;
-        var xyPairStdDevPlus = {
-            x: tVal,
-            y: heightStdDev
-        }
-        var xyPairStdDevMinus = {
-            x: tVal,
-            y: -heightStdDev
-        }
-        plusSigmaData.push(xyPairStdDevPlus);
-        minusSigmaData.push(xyPairStdDevMinus);
-        if (!heightChartPaused && showingUkfAnalysis) {
-            heightChart.options.scales.xAxes[0].ticks.min = heightChartMinTime;
-            heightChart.options.scales.xAxes[0].ticks.max = heightChartMaxTime;
-            heightChart.data.datasets[0].data = residualData.slice();
-            heightChart.data.datasets[1].data = plusSigmaData.slice();
-            heightChart.data.datasets[2].data = minusSigmaData.slice();
-            heightChart.update();
-        }
+    const subscribe = (name, messageType, callback) => {
+      const topic = new ROSLIB.Topic({ ros, name, messageType, queue_length: 2, throttle_rate: 80 });
+      topic.subscribe(message => { if (this.ros === ros && this.connected) callback(message); });
+      this.subscribers.push(topic);
+    };
+    subscribe('/pidrone/battery', 'pidrone_pkg/Battery', message => {
+      if (!Number.isFinite(message.vbat)) return;
+      const battery = this.field('battery');
+      battery.textContent = message.vbat.toFixed(1) + ' V' + (message.vbat <= 11.3 ? ' EMPTY!' : '');
+      battery.classList.toggle('alert-danger', message.vbat <= 11.3);
+      battery.classList.toggle('alert-success', message.vbat > 11.3);
     });
-    
-    cameraPoseSub.subscribe(function(message) {
-        updateCameraPoseXYChart(message);
+    subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => { this.field('flightMode').textContent = message.mode; });
+    subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
+      this.positionMode = !!message.data;
     });
+    subscribe('/pidrone/range', 'sensor_msgs/Range', message => {
+      const time = this.time(message);
+      const valid = Number.isFinite(message.range) && message.range >= 0 &&
+        (message.min_range === undefined || message.range >= message.min_range) &&
+        (message.max_range === undefined || message.range <= message.max_range);
+      if (valid) this.addPoint('range', time, message.range);
+      this.field('height').textContent = valid ? message.range.toFixed(2) + ' m' : '—';
+      this.updateVerticalSpeed(time, valid ? message.range : NaN);
+      this.render('height');
+    });
+    subscribe('/pidrone/picamera/twist', 'geometry_msgs/TwistStamped', message => {
+      const speed = Math.hypot(message.twist.linear.x, message.twist.linear.y);
+      this.addPoint('speed', this.time(message), speed);
+      if (Number.isFinite(speed)) {
+        this.field('speed').textContent = speed.toFixed(2) + ' m/s';
+      }
+      this.render('speed');
+    });
+    const ukf = message => {
+      const time = this.time(message);
+      const pose = message.pose_with_covariance.pose;
+      const sigma = Math.sqrt(message.pose_with_covariance.covariance[14]);
+      this.addPoint('ukfHeight', time, pose.position.z);
+      this.addPoint('ukfPlus', time, pose.position.z + sigma);
+      this.addPoint('ukfMinus', time, pose.position.z - sigma);
+      this.updateXY('ukf', pose);
+      this.render('height');
+    };
+    subscribe('/pidrone/state/ukf_2d', 'pidrone_pkg/State', ukf);
+    subscribe('/pidrone/state/ukf_7d', 'pidrone_pkg/State', ukf);
+    subscribe('/pidrone/state/ema', 'pidrone_pkg/State', message => {
+      this.addPoint('ema', this.time(message), message.pose_with_covariance.pose.position.z);
+      this.render('height');
+    });
+    subscribe('/pidrone/state/ground_truth', 'pidrone_pkg/StateGroundTruth', message => {
+      this.addPoint('truthHeight', this.time(message), message.pose.position.z);
+      this.updateXY('groundTruth', message.pose);
+      this.render('height');
+    });
+    subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => { this.updateXY('camera', message.pose); });
+    subscribe('/pidrone/ukf_stats', 'pidrone_pkg/UkfStats', message => {
+      const time = this.time(message);
+      this.addPoint('error', time, message.error);
+      this.addPoint('sigmaPlus', time, message.stddev);
+      this.addPoint('sigmaMinus', time, -message.stddev);
+      this.render('height');
+    });
+  }
 
-    function updateGroundTruthXYChart(msg) {
-        xPos = msg.pose.position.x;
-        yPos = msg.pose.position.y;
-        qx = msg.pose.orientation.x;
-        qy = msg.pose.orientation.y;
-        qz = msg.pose.orientation.z;
-        qw = msg.pose.orientation.w;
+  time(message) {
+    const stamp = message.header.stamp;
+    const now = stamp.secs + stamp.nsecs / 1e9;
+    if (!Number.isFinite(now) || now <= 0) return NaN;
+    if (this.startTime === null) this.startTime = now;
+    const time = now - this.startTime;
+    this.latestTime = Math.max(this.latestTime, time);
+    return time;
+  }
 
-        if (xPos != null &&
-            yPos != null &&
-            qx != null &&
-            qy != null &&
-            qz != null &&
-            qw != null) {
+  clearVerticalSpeed() {
+    this.verticalHeightSamples = [];
+    this.verticalSampleAt = null;
+    this.series.verticalSpeed = [];
+    this.field('verticalSpeed').textContent = '—';
+    this.render('speed');
+  }
 
-            // Quaternion with which to rotate vectors to show the yaw of the
-            // drone (and perhaps also the roll and pitch)
-            global_to_body_quat = new Quaternion([qw, qx, qy, qz]);
-            // v1 = [1, 1, 0];
-            // v2 = [1, -1, 0];
-            // Drone marker vectors
-            v1 = [0.03, 0.03, 0];
-            v2 = [0.03, -0.03, 0];
-            v3 = [0.0, 0.05, 0];
-            rotatedv1 = global_to_body_quat.rotateVector(v1);
-            rotatedv2 = global_to_body_quat.rotateVector(v2);
-            rotatedv3 = global_to_body_quat.rotateVector(v3);
-            xyChart.data.datasets[0].data = [{
-                x: (xPos - rotatedv1[0]),
-                y: (yPos - rotatedv1[1])
-            },
-            {
-                x: (xPos + rotatedv1[0]),
-                y: (yPos + rotatedv1[1])
-            }
-            ];
-            xyChart.data.datasets[1].data = [{
-                x: (xPos - rotatedv2[0]),
-                y: (yPos - rotatedv2[1])
-            },
-            {
-                x: (xPos + rotatedv2[0]),
-                y: (yPos + rotatedv2[1])
-            }
-            ];
-            xyChart.data.datasets[2].data = [{
-                x: xPos,
-                y: yPos
-            },
-            {
-                x: (xPos + rotatedv3[0]),
-                y: (yPos + rotatedv3[1])
-            }
-            ];
-            xyChart.update()
-        }
+  refreshVerticalSpeed() {
+    if (this.verticalSampleAt !== null && Date.now() - this.verticalSampleAt > 500) this.clearVerticalSpeed();
+  }
+
+  updateVerticalSpeed(time, height) {
+    if (!Number.isFinite(time) || !Number.isFinite(height)) return this.clearVerticalSpeed();
+    const previous = this.verticalHeightSamples.at(-1);
+    // Duplicate/out-of-order sensor stamps cannot describe a new velocity.
+    if (previous && time <= previous.time) return;
+    if (previous && time - previous.time > 0.5) this.clearVerticalSpeed();
+    this.verticalSampleAt = Date.now();
+    this.verticalHeightSamples.push({ time, height });
+    this.verticalHeightSamples = this.verticalHeightSamples.filter(sample => sample.time >= time - 0.3).slice(-20);
+    const samples = this.verticalHeightSamples;
+    if (samples.length < 2 || time - samples[0].time < 0.1) return;
+    // Fit a short height/time slope instead of amplifying noise between two frames.
+    const meanTime = samples.reduce((sum, sample) => sum + sample.time, 0) / samples.length;
+    const meanHeight = samples.reduce((sum, sample) => sum + sample.height, 0) / samples.length;
+    const numerator = samples.reduce((sum, sample) => sum + (sample.time - meanTime) * (sample.height - meanHeight), 0);
+    const denominator = samples.reduce((sum, sample) => sum + (sample.time - meanTime) ** 2, 0);
+    const velocity = numerator / denominator;
+    this.addPoint('verticalSpeed', time, velocity);
+    const rounded = Math.round(Math.abs(velocity) * 100) / 100;
+    const direction = rounded === 0 ? '' : velocity > 0 ? ' ↑' : ' ↓';
+    this.field('verticalSpeed').textContent = rounded.toFixed(2) + ' m/s' + direction;
+    this.render('speed');
+  }
+
+  addPoint(key, time, value) {
+    if (!Number.isFinite(time) || !Number.isFinite(value)) return;
+    const series = this.series[key] || [];
+    series.push({ x: time, y: value });
+    // Bound every stream, including stopped timestamps.
+    this.series[key] = series.filter(point => point.x >= this.latestTime - 5).slice(-1000);
+  }
+
+  render(kind) {
+    const chart = this[kind + 'Chart'];
+    chart.data.datasets.forEach(dataset => {
+      dataset.data = this.series[dataset.key].filter(point => point.x >= this.latestTime - 5);
+    });
+    chart.options.scales.xAxes[0].ticks.min = Math.max(0, this.latestTime - 5);
+    chart.options.scales.xAxes[0].ticks.max = Math.max(5, this.latestTime);
+    chart.update();
+  }
+
+  updateXY(key, pose) {
+    const { position: p, orientation: q } = pose;
+    if (![p.x, p.y, q.w, q.x, q.y, q.z].every(Number.isFinite)) return;
+    const rotation = new Quaternion([q.w, q.x, q.y, q.z]);
+    [[0.09, 0.09, 0], [0.09, -0.09, 0], [0, 0.15, 0]].forEach((vector, i) => {
+      const rotated = rotation.rotateVector(vector);
+      this.series[key + i] = [
+        { x: p.x - (i === 2 ? 0 : rotated[0]), y: p.y - (i === 2 ? 0 : rotated[1]) },
+        { x: p.x + rotated[0], y: p.y + rotated[1] }
+      ];
+    });
+    if (fleetMap) fleetMap.render();
+  }
+
+  toggleAnalysis(button) {
+    this.analysis = !this.analysis;
+    button.textContent = this.analysis ? 'Standard view' : 'UKF analysis';
+    button.setAttribute('aria-pressed', String(this.analysis));
+    this.heightChart.data.datasets = this.heightDatasets();
+    Object.assign(this.heightChart.options.scales.yAxes[0].ticks, this.analysis ? { min: undefined, max: undefined } : { min: 0, max: 0.6 });
+    this.render('height');
+  }
+
+  publish(key, data) {
+    // ROSLIB queues sends while disconnected; flight commands must never be queued.
+    if (!this.connected || !this.publishers[key]) return false;
+    this.publishers[key].publish(new ROSLIB.Message(data));
+    return true;
+  }
+
+  setMode(position) {
+    if (this.publish('positionMode', { data: position })) this.positionMode = position;
+  }
+
+  twist(x = 0, y = 0, z = 0, yaw = 0) {
+    this.publish('twist', { linear: { x, y, z }, angular: { x: 0, y: 0, z: yaw } });
+  }
+
+  pose(x = 0, y = 0, z = 0) {
+    this.publish('pose', { position: { x, y, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } });
+  }
+
+  command(action) {
+    if (!this.connected) return;
+    if (action === 'position') return this.setMode(true);
+    if (action === 'velocity') return this.setMode(false);
+    if (action === 'reset' || action === 'map') return this.publish(action, {});
+    if (action === 'stop') return this.twist();
+    if (action === 'arm' || action === 'disarm' || action === 'takeoff') {
+      this.twist();
+      if (this.positionMode) this.pose();
+      return this.publish('mode', { mode: { arm: 'ARMED', disarm: 'DISARMED', takeoff: 'FLYING' }[action] });
     }
-
-    function updateCameraPoseXYChart(msg) {
-        xPos = msg.pose.position.x;
-        yPos = msg.pose.position.y;
-        qx = msg.pose.orientation.x;
-        qy = msg.pose.orientation.y;
-        qz = msg.pose.orientation.z;
-        qw = msg.pose.orientation.w;
-
-        if (xPos != null &&
-            yPos != null &&
-            qx != null &&
-            qy != null &&
-            qz != null &&
-            qw != null) {
-
-            // Quaternion with which to rotate vectors to show the yaw of the
-            // drone (and perhaps also the roll and pitch)
-            global_to_body_quat = new Quaternion([qw, qx, qy, qz]);
-            // v1 = [1, 1, 0];
-            // v2 = [1, -1, 0];
-            // Drone marker vectors
-            v1 = [0.03, 0.03, 0];
-            v2 = [0.03, -0.03, 0];
-            v3 = [0.0, 0.05, 0];
-            rotatedv1 = global_to_body_quat.rotateVector(v1);
-            rotatedv2 = global_to_body_quat.rotateVector(v2);
-            rotatedv3 = global_to_body_quat.rotateVector(v3);
-            xyChart.data.datasets[6].data = [{
-                x: (xPos - rotatedv1[0]),
-                y: (yPos - rotatedv1[1])
-            },
-            {
-                x: (xPos + rotatedv1[0]),
-                y: (yPos + rotatedv1[1])
-            }
-            ];
-            xyChart.data.datasets[7].data = [{
-                x: (xPos - rotatedv2[0]),
-                y: (yPos - rotatedv2[1])
-            },
-            {
-                x: (xPos + rotatedv2[0]),
-                y: (yPos + rotatedv2[1])
-            }
-            ];
-            xyChart.data.datasets[8].data = [{
-                x: xPos,
-                y: yPos
-            },
-            {
-                x: (xPos + rotatedv3[0]),
-                y: (yPos + rotatedv3[1])
-            }
-            ];
-            xyChart.update()
-        }
-    }
-
-    function updateUkfXYChart(msg) {
-        xPos = msg.pose_with_covariance.pose.position.x;
-        yPos = msg.pose_with_covariance.pose.position.y;
-        qx = msg.pose_with_covariance.pose.orientation.x;
-        qy = msg.pose_with_covariance.pose.orientation.y;
-        qz = msg.pose_with_covariance.pose.orientation.z;
-        qw = msg.pose_with_covariance.pose.orientation.w;
-
-        if (xPos != null &&
-            yPos != null &&
-            qx != null &&
-            qy != null &&
-            qz != null &&
-            qw != null) {
-
-            // Quaternion with which to rotate vectors to show the yaw of the
-            // drone (and perhaps also the roll and pitch)
-            global_to_body_quat = new Quaternion([qw, qx, qy, qz]);
-            // v1 = [1, 1, 0];
-            // v2 = [1, -1, 0];
-            // Drone marker vectors
-            v1 = [0.03, 0.03, 0];
-            v2 = [0.03, -0.03, 0];
-            v3 = [0.0, 0.05, 0];
-            rotatedv1 = global_to_body_quat.rotateVector(v1);
-            rotatedv2 = global_to_body_quat.rotateVector(v2);
-            rotatedv3 = global_to_body_quat.rotateVector(v3);
-            xyChart.data.datasets[3].data = [{
-                x: (xPos - rotatedv1[0]),
-                y: (yPos - rotatedv1[1])
-            },
-            {
-                x: (xPos + rotatedv1[0]),
-                y: (yPos + rotatedv1[1])
-            }
-            ];
-            xyChart.data.datasets[4].data = [{
-                x: (xPos - rotatedv2[0]),
-                y: (yPos - rotatedv2[1])
-            },
-            {
-                x: (xPos + rotatedv2[0]),
-                y: (yPos + rotatedv2[1])
-            }
-            ];
-            xyChart.data.datasets[5].data = [{
-                x: xPos,
-                y: yPos
-            },
-            {
-                x: (xPos + rotatedv3[0]),
-                y: (yPos + rotatedv3[1])
-            }
-            ];
-            xyChart.update()
-        }
-    }
-
-    emaIrSub.subscribe(function(message) {
-      //printProperties(message);
-      //console.log("Range: " + message.range);
-      currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-      if (!gotFirstHeight) {
-          gotFirstHeight = true;
-          startTime = currTime;
-      }
-      tVal = currTime - startTime;
-      // Have the plot scroll in time, showing a window of windowSize seconds
-      if (tVal > windowSize) {
-          spanningFullWindow = true;
-          // Avoid changing axis limits too often, to avoid shaky plotting?
-          // heightChartMinTime = tVal - windowSize;
-          // heightChartMaxTime = tVal;
-
-          // Remove first element of array while difference compared to current
-          // time is greater than the windowSize
-          while (emaData.length > 0 &&
-                 (tVal - emaData[0].x > windowSize)) {
-              emaData.splice(0, 1);
-          }
-      }
-      // Add new range reading to end of the data array
-      // x-y pair
-      var xyPair = {
-          x: tVal,
-          y: message.pose_with_covariance.pose.position.z
-      }
-      emaData.push(xyPair)
-      if (!heightChartPaused && !showingUkfAnalysis) {
-          // heightChart.options.scales.xAxes[0].ticks.min = heightChartMinTime;
-          // heightChart.options.scales.xAxes[0].ticks.max = heightChartMaxTime;
-          heightChart.data.datasets[4].data = emaData.slice();
-          // Avoid updating too often, to avoid shaky plotting?
-          // heightChart.update();
-      }
-    });
-
-    stateGroundTruthSub.subscribe(function(message) {
-      //printProperties(message);
-      currTime = message.header.stamp.secs + message.header.stamp.nsecs/1.0e9;
-      if (!gotFirstHeight) {
-          gotFirstHeight = true;
-          startTime = currTime;
-      }
-      tVal = currTime - startTime;
-      // Have the plot scroll in time, showing a window of windowSize seconds
-      if (tVal > windowSize) {
-          spanningFullWindow = true;
-          // Avoid changing axis limits too often, to avoid shaky plotting?
-          // heightChartMinTime = tVal - windowSize;
-          // heightChartMaxTime = tVal;
-
-          // Remove first element of array while difference compared to current
-          // time is greater than the windowSize
-          while (stateGroundTruthData.length > 0 &&
-                 (tVal - stateGroundTruthData[0].x > windowSize)) {
-              stateGroundTruthData.splice(0, 1);
-          }
-      }
-      // Add new height estimate to end of the data array
-      // x-y pair
-      var zEstimate = message.pose.position.z;
-      if (zEstimate != null) {
-          var xyPair = {
-              x: tVal,
-              y: zEstimate
-          }
-          stateGroundTruthData.push(xyPair);
-      }
-      updateGroundTruthXYChart(message);
-      if (!heightChartPaused && !showingUkfAnalysis) {
-          // heightChart.options.scales.xAxes[0].ticks.min = heightChartMinTime;
-          // heightChart.options.scales.xAxes[0].ticks.max = heightChartMaxTime;
-          heightChart.data.datasets[5].data = stateGroundTruthData.slice();
-          // Avoid updating too often, to avoid shaky plotting?
-          // heightChart.update();
-      }
-    });
-
-    imageStream();
-  }
-
-  function imageStream() {
-    var image = document.getElementById('cameraImage');
-    image.src = "http://" + selectedDroneHost() + ":8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed";
-
-  }
-
-  var irAlphaVal = 0;
-  var increasingAlpha = true;
-  function pulseIr() {
-      // Function to pulse the IR background color in the Height chart when
-      // paused, to indicate data are coming in
-      if (irAlphaVal <= 0.5 && increasingAlpha) {
-          irAlphaVal += 0.005
-      } else {
-          increasingAlpha = false;
-          irAlphaVal -= 0.005
-      }
-      if (irAlphaVal < 0) {
-          increasingAlpha = true;
-      }
-
-      // Change gradient depending on whether or not the entire chart window
-      // is spanned with data
-      if (spanningFullWindow) {
-          irBackgroundGradient = ctx.createLinearGradient(300, 0, 600, 0);
-      } else {
-          irBackgroundGradient = ctx.createLinearGradient(0, 0, 600, 0);
-      }
-
-      irBackgroundGradient.addColorStop(0, 'rgba(255, 80, 0, 0)');
-      irBackgroundGradient.addColorStop(1, 'rgba(255, 80, 0, '+irAlphaVal.toString()+')');
-      heightChart.data.datasets[0].backgroundColor = irBackgroundGradient;
-      heightChart.data.datasets[0].fill = true;
-      heightChart.update();
-  }
-
-/*
- * Key event functions
- */
-
-function publishResetTransform() {
-  console.log("reset transform");
-  resetpub.publish(emptyMsg);
-}
-
-function publishToPosition() {
-  console.log("to position");
-  positionMsg.data = true;
-  positionPub.publish(positionMsg);
-}
-
-function publishToVelocity() {
-  console.log("to velocity");
-  positionMsg.data = false;
-  positionPub.publish(positionMsg);
-}
-
-function publishToggleMap() {
-    console.log("toggle map")
-    mappub.publish(emptyMsg);
-}
-
-function publishArm() {
-  console.log("arm");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0
-    poseMsg.position.y = 0
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    velocityControlPub.publish(twistMsg)
-  }
-  modeMsg.mode = "ARMED"
-  modepub.publish(modeMsg);
-}
-
-function publishDisarm() {
-  console.log("disarm");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0
-    poseMsg.position.y = 0
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
-  }
-  modeMsg.mode = "DISARMED"
-  modepub.publish(modeMsg);
-}
-
-function publishTakeoff() {
-  console.log("takeoff");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0
-    poseMsg.position.y = 0
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
-  }
-  modeMsg.mode = "FLYING"
-  modepub.publish(modeMsg);
-}
-
-function publishTranslateLeft() {
-  console.log("translate left");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = -0.1
-    poseMsg.position.y = 0
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = -0.1
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
+    if (action === 'up' || action === 'down') return this.pose(0, 0, action === 'up' ? 0.05 : -0.05);
+    if (action === 'yawLeft' || action === 'yawRight') return this.twist(0, 0, 0, action === 'yawLeft' ? -50 : 50);
+    const offset = { left: [-0.1, 0], right: [0.1, 0], forward: [0, 0.1], backward: [0, -0.1] }[action];
+    if (offset) return this.positionMode ? this.pose(...offset, 0) : this.twist(...offset, 0);
   }
 }
 
-function publishTranslateRight() {
-  console.log("translate right");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0.1
-    poseMsg.position.y = 0
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0.1
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
+const drones = {};
+let fleetMap = null;
+const heldKeys = new Map();
+const movementKeys = { j: 'left', l: 'right', i: 'forward', k: 'backward', w: 'up', s: 'down', a: 'yawLeft', d: 'yawRight' };
+const actionKeys = { ';': 'arm', t: 'takeoff', r: 'reset', p: 'position', v: 'velocity', m: 'map' };
+
+function sessionsFor(target) { return target === 'both' ? Object.values(drones) : [drones[target]]; }
+function currentTarget() {
+  const connected = Object.values(drones).filter(drone => drone.connected);
+  return connected.length === 1 ? connected[0].id : 'both';
+}
+function selectedConnection() { return document.querySelector('input[name="droneSelection"]:checked').value; }
+function feedback(message) {
+  const status = document.getElementById('commandFeedback');
+  status.textContent = message;
+  status.hidden = !message;
+}
+
+function updateLayout() {
+  const connected = Object.values(drones).filter(drone => drone.connected);
+  const grid = document.getElementById('fleetGrid');
+  const countChanged = Number(grid.dataset.count) !== connected.length;
+  grid.dataset.count = String(connected.length);
+  Object.values(drones).forEach(drone => {
+    [drone.heightChart, drone.speedChart].forEach(chart => chart.resize());
+  });
+  document.getElementById('controlsHeading').textContent = connected.length === 2 ? 'Shared controls' : 'Flight controls';
+  if (fleetMap) fleetMap.chart.resize();
+  if (countChanged) {
+    stopHeldKeys();
+    feedback('');
   }
 }
 
-function publishTranslateForward() {
-  console.log("translate forward");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0
-    poseMsg.position.y = 0.1
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0.1
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
+function connectSelected() {
+  stopHeldKeys();
+  const selected = sessionsFor(selectedConnection());
+  // Connecting the selected drone adds it to the existing fleet.
+  selected.forEach(drone => drone.connect());
+}
+
+function dispatch(action, target = currentTarget()) {
+  const sessions = sessionsFor(target);
+  const available = sessions.filter(drone => drone.connected);
+  // Stop and disarm can still reach a remaining drone if its partner is offline.
+  if (!available.length || (available.length !== sessions.length && action !== 'disarm' && action !== 'stop')) {
+    feedback('Command not sent. Connect ' + sessions.filter(drone => !drone.connected).map(drone => drone.id).join(' and ') + ' first.');
+    return [];
   }
+  available.forEach(drone => drone.command(action));
+  const label = {
+    arm: 'Arm', disarm: 'Disarm', takeoff: 'Takeoff', stop: 'Stop motion',
+    position: 'Position mode',
+    velocity: 'Velocity mode', reset: 'Reset position hold', map: 'Toggle mapping',
+    up: 'Up', down: 'Down', yawLeft: 'Yaw left', yawRight: 'Yaw right',
+    left: 'Left', right: 'Right', forward: 'Forward', backward: 'Backward'
+  }[action];
+  feedback(label + ' sent to ' + available.map(drone => drone.id).join(' and ') + '.');
+  return available;
 }
 
-function publishTranslateBackward() {
-  console.log("translate backward");
-  if (positionMsg.data == true) {
-    poseMsg.position.x = 0
-    poseMsg.position.y = -0.1
-    poseMsg.position.z = 0
-    positionControlPub.publish(poseMsg)
-  } else {
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = -0.1
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
-  }
+function stopHeldKeys() {
+  const sessions = new Set();
+  heldKeys.forEach(targets => targets.forEach(drone => sessions.add(drone)));
+  sessions.forEach(drone => drone.command('stop'));
+  heldKeys.clear();
 }
-
-function publishTranslateUp() {
-  console.log("translate up");
-  poseMsg.position.x = 0
-  poseMsg.position.y = 0
-  poseMsg.position.z = 0.05
-  positionControlPub.publish(poseMsg)
-}
-
-function publishTranslateDown() {
-  console.log("translate down");
-  poseMsg.position.x = 0
-  poseMsg.position.y = 0
-  poseMsg.position.z = -0.05
-  positionControlPub.publish(poseMsg)
-}
-
-function publishYawLeft() {
-    console.log("yaw left")
-    modeMsg.mode = "FLYING"
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = -50
-    velocityControlPub.publish(twistMsg)
-}
-
-function publishYawRight() {
-    console.log("yaw right")
-    modeMsg.mode = "FLYING"
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 50
-    velocityControlPub.publish(twistMsg)
-}
-
-function publishZeroVelocity() {
-  console.log("zero velocity");
-    twistMsg.linear.x = 0
-    twistMsg.linear.y = 0
-    twistMsg.linear.z = 0
-    twistMsg.angular.z = 0
-    velocityControlPub.publish(twistMsg)
-}
-
-/*
- * Handle IR chart and UKF map
- */
-
-
-var rawIrDataset = {
-  label: 'Raw IR Readings',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(255, 80, 0, 0.8)',
-  backgroundColor: 'rgba(255, 80, 0, 0)',
-  lineTension: 0, // remove smoothing
-  itemID: 0
-};
-var rawIrData = Array(0);
-
-var rawVelocityDataset = {
-  label: 'Raw Velocity Readings',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(255, 80, 0, 0.8)',
-    backgroundColor: 'rgba(255, 80, 0, 0)',
-  lineTension: 0, // remove smoothing
-  itemID: 0
-};
-var rawVelocityData = Array(0);
-
-var ukfDataset = {
-  label: 'UKF Filtered Height',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(49, 26, 140, 0.8)',
-  backgroundColor: 'rgba(49, 26, 140, 0.1)',
-  lineTension: 0, // remove smoothing
-  itemID: 1
-}
-var ukfData = Array(0);
-
-var ukfPlusSigmaDataset = {
-  label: 'UKF +sigma',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 0,
-  pointRadius: 0,
-  fill: '+1', // fill to the next dataset
-  borderColor: 'rgba(49, 26, 140, 0)', // full transparency
-  backgroundColor: 'rgba(49, 26, 140, 0.1)',
-  lineTension: 0, // remove smoothing
-  itemID: 2
-}
-var ukfPlusSigmaData = Array(0);
-
-var ukfMinusSigmaDataset = {
-  label: 'UKF -sigma',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 0,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(49, 26, 140, 0)', // full transparency
-  //backgroundColor: 'rgba(49, 26, 140, 0.1)'
-  lineTension: 0, // remove smoothing
-  itemID: 3
-}
-var ukfMinusSigmaData = Array(0);
-
-var emaDataset = {
-  label: 'EMA-Smoothed Altitude',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(252, 70, 173, 0.8)',
-  backgroundColor: 'rgba(252, 70, 173, 0)',
-  lineTension: 0, // remove smoothing
-  itemID: 4
-}
-var emaData = Array(0);
-
-var stateGroundTruthDataset = {
-  label: 'Ground Truth Height',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(0, 0, 0, 0.8)',
-  backgroundColor: 'rgba(0, 0, 0, 0)',
-  lineTension: 0, // remove smoothing
-  itemID: 5
-}
-var stateGroundTruthData = Array(0);
-
-//--------------------------------------
-
-var residualDataset = {
-  label: 'Error between UKF and Ground Truth',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(209, 81, 58, 0.8)',
-  backgroundColor: 'rgba(209, 81, 58, 0)',
-  lineTension: 0, // remove smoothing
-}
-var residualData = Array(0);
-
-var plusSigmaDataset = {
-  label: '+1 sigma',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: '+1', // fill to the next dataset
-  borderColor: 'rgba(49, 26, 140, 0.8)',
-  backgroundColor: 'rgba(49, 26, 140, 0.1)',
-  lineTension: 0, // remove smoothing
-}
-var plusSigmaData = Array(0);
-
-var minusSigmaDataset = {
-  label: '-1 sigma',
-  data: Array(0), // initialize array of length 0
-  borderWidth: 1.5,
-  pointRadius: 0,
-  fill: false,
-  borderColor: 'rgba(49, 26, 140, 0.8)',
-  backgroundColor: 'rgba(49, 26, 140, 0.1)',
-  lineTension: 0, // remove smoothing
-}
-var minusSigmaData = Array(0);
-
-
-var ctx;
-var xyctx;
-
-function loadHeightChartStandardView() {
-    ctx = document.getElementById("heightChart").getContext('2d');
-    heightChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            datasets: [
-                rawIrDataset,
-                ukfDataset,
-                ukfPlusSigmaDataset,
-                ukfMinusSigmaDataset,
-                emaDataset,
-                stateGroundTruthDataset
-            ]
-        },
-        options: {
-	    responsive: false,
-            animation: {
-               duration: 0,
-            },
-            scales: {
-                yAxes: [{
-                    ticks: {
-                        beginAtZero: true,
-                        min: 0,
-                        max: 0.6,
-                        stepSize: 0.1
-                    },
-                    scaleLabel: {
-                        display: true,
-                        labelString: 'Height (meters)'
-                    }
-                }],
-                xAxes: [{
-                    type: 'linear',
-                    display: false,
-                    ticks: {
-                        min: 0,
-                        max: windowSize,
-                        stepSize: windowSize
-                    }
-                }]
-            },
-            legend: {
-              display: true,
-              labels: {
-                  // Filter out UKF standard deviation datasets and datasets
-                  // that have no data in them
-                  filter: function(itemInLegend, chartData) {
-                      var itemIndex = itemInLegend.datasetIndex;
-                      return ((itemIndex != ukfPlusSigmaDataset.itemID &&
-                               itemIndex != ukfMinusSigmaDataset.itemID) &&
-                               (chartData.datasets[itemIndex].data.length != 0));
-                  }
-              }
-            },
-        }
-    });
-}
-
-function loadHeightChartUkfAnalysis() {
-    ctx = document.getElementById("heightChart").getContext('2d');
-    heightChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            datasets: [
-                residualDataset,
-                plusSigmaDataset,
-                minusSigmaDataset
-            ]
-        },
-        options: {
-            animation: {
-               duration: 0,
-            },
-            scales: {
-                yAxes: [{
-                    scaleLabel: {
-                        display: true,
-                        labelString: 'Height (meters)'
-                    }
-                }],
-                xAxes: [{
-                    type: 'linear',
-                    display: false,
-                    ticks: {
-                        min: 0,
-                        max: windowSize,
-                        stepSize: windowSize
-                    }
-                }]
-            },
-            legend: {
-              display: true
-            },
-        }
-    });
-}
-
-function loadVelocityChartStandardView() {
-    ctx = document.getElementById("velocityChart").getContext('2d');
-    velocityChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            datasets: [
-                rawVelocityDataset
-            ]
-        },
-        options: {
-	    responsive: false,
-            animation: {
-               duration: 0,
-            },
-            scales: {
-                yAxes: [{
-                    ticks: {
-                        beginAtZero: true,
-                        min: 0,
-                        max: 0.6,
-                        stepSize: 0.1
-                    },
-                    scaleLabel: {
-                        display: true,
-                        labelString: 'Speed (m/s)'
-                    }
-                }],
-                xAxes: [{
-                    type: 'linear',
-                    display: false,
-                    ticks: {
-                        min: 0,
-                        max: windowSize,
-                        stepSize: windowSize
-                    }
-                }]
-            },
-            legend: {
-              display: true,
-              labels: {
-                  // Filter out UKF standard deviation datasets and datasets
-                  // that have no data in them
-                  filter: function(itemInLegend, chartData) {
-                      var itemIndex = itemInLegend.datasetIndex;
-                      return ((itemIndex != ukfPlusSigmaDataset.itemID &&
-                               itemIndex != ukfMinusSigmaDataset.itemID) &&
-                               (chartData.datasets[itemIndex].data.length != 0));
-                  }
-              }
-            },
-        }
-    });
-}
-
-
-$(document).ready(function() {
-    loadHeightChartStandardView();
-    loadVelocityChartStandardView();    
-    xyctx = document.getElementById("xyChart").getContext('2d');
-    xyChart = new Chart(xyctx, {
-        type: 'line',
-        data: {
-            datasets: [
-                {
-                  data: Array(0), // initialize array of length 0
-                  borderWidth: 1.5,
-                  pointRadius: 0,
-                  fill: false,
-                  borderColor: 'rgba(0, 0, 0, 1)',
-                  backgroundColor: 'rgba(0, 0, 0, 0)',
-                  lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(0, 0, 0, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(0, 0, 0, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(49, 26, 140, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(49, 26, 140, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(49, 26, 140, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(255, 80, 0, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(255, 80, 0, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-              {
-                data: Array(0), // initialize array of length 0
-                borderWidth: 1.5,
-                pointRadius: 0,
-                fill: false,
-                borderColor: 'rgba(255, 80, 0, 1)',
-                backgroundColor: 'rgba(0, 0, 0, 0)',
-                lineTension: 0, // remove smoothing
-              },
-            ]
-        },
-        options: {
-	    responsive: false,
-            animation: {
-               duration: 0,
-            },
-            scales: {
-                yAxes: [{
-                    ticks: {
-                        min: -1,
-                        max: 1,
-                        stepSize: 0.1
-                    },
-                    scaleLabel: {
-                        display: true,
-                        labelString: 'y position (meters)'
-                    }
-                }],
-                xAxes: [{
-                    type: 'linear',
-                    ticks: {
-                        min: -400.0/250.0,
-                        // max: 1,
-                        max: 400.0/250.0,
-                        stepSize: 0.1,
-                        display: true
-                    },
-                    scaleLabel: {
-                        display: true,
-                        labelString: 'x position (meters)'
-                    }
-                }]
-            },
-            legend: {
-              display: false
-            },
-        }
-    });
-
-});
-
-$(window).on("beforeunload", function(e) {
-    closeSession();
-});
-
-function changeHeightChartYScaleMin() {
-    heightChart.options.scales.yAxes[0].ticks.min = parseFloat(document.getElementById('heightMin').value);
-    heightChart.update();
-}
-
-function changeHeightChartYScaleMax() {
-    heightChart.options.scales.yAxes[0].ticks.max = parseFloat(document.getElementById('heightMax').value);
-    heightChart.update();
-}
-
-function togglePauseHeightChart(btn) {
-    heightChartPaused = !heightChartPaused;
-    if (heightChartPaused) {
-        btn.value = 'Play'
-        irAlphaVal = 0;
-    } else {
-        btn.value = 'Pause'
-        heightChart.data.datasets[0].backgroundColor = 'rgba(255, 80, 0, 0)';
-        heightChart.data.datasets[0].fill = false;
-    }
-}
-
-function togglePauseVelocityChart(btn) {
-    velocityChartPaused = !velocityChartPaused;
-    btn.value = velocityChartPaused ? 'Play' : 'Pause';
-}
-
-function toggleUkfAnalysis(btn) {
-    showingUkfAnalysis = !showingUkfAnalysis;
-    if (showingUkfAnalysis) {
-        btn.value = 'Standard View'
-        heightChart.destroy();
-        loadHeightChartUkfAnalysis();
-    } else {
-        btn.value = 'UKF Analysis'
-        heightChart.destroy();
-        loadHeightChartStandardView();
-    }
-}
-
-function togglePauseXYChart(btn) {
-    // TODO: Implement this function
-    console.log('Pause button pressed')
-}
-
-function publishVelocityMode() {
-    positionMsg.data = false;
-    positionPub.publish(positionMsg)
-}
-
-function publishPositionMode() {
-    positionMsg.data = true;
-    positionPub.publish(positionMsg)
-}
-
-function setControls () {
-    x = document.getElementById("controlX").value;
-    y = document.getElementById("controlY").value;
-    z = document.getElementById("controlZ").value;
-
-    if (positionMsg.data == true) {
-        poseMsg.position.x = Number(parseFloat(x));
-        poseMsg.position.y = Number(parseFloat(y));
-        poseMsg.position.z = Number(parseFloat(z));
-        positionControlPub.publish(poseMsg);
-    } else {
-        twistMsg.linear.x = Number(parseFloat(x));
-        twistMsg.linear.y = Number(parseFloat(y));
-        twistMsg.linear.z = Number(parseFloat(z));
-        velocityControlPub.publish(twistMsg);
-    }
-}
-
-/*
- * Listen for key events
-*/
 
 function isFormControl(target) {
-  return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName));
+  return target && (target.isContentEditable || !!target.closest('input, textarea, select, summary'));
 }
 
-$(document).keyup(function(event){
-  if (isFormControl(event.target)) return;
-  var char = String.fromCharCode(event.which || event.keyCode);
-  if (char == "J" || char == "L" || char == "K" || char == "I" || char == "W" || char == "S" || char == "A" || char == "D") {
-    publishZeroVelocity();
-  }
+document.addEventListener('DOMContentLoaded', () => {
+  Chart.defaults.global.defaultFontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  Chart.defaults.global.defaultFontSize = 12;
+  Chart.defaults.global.defaultFontColor = '#58677b';
+  ['drone1', 'drone2'].forEach(id => { drones[id] = new DroneSession(id); });
+  fleetMap = new FleetMap();
+  Object.values(drones).forEach(drone => { drone.updateDetection(); });
+  setInterval(() => { Object.values(drones).forEach(drone => { drone.updateDetection(); drone.refreshVerticalSpeed(); }); }, 250);
+  updateLayout();
+  document.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.connect === 'selected') connectSelected();
+    else if (button.dataset.connect) sessionsFor(button.dataset.connect).forEach(drone => drone.connect());
+    if (button.dataset.disconnect) {
+      stopHeldKeys();
+      sessionsFor(button.dataset.disconnect === 'selected' ? selectedConnection() : button.dataset.disconnect).forEach(drone => drone.disconnect());
+    }
+    if (button.dataset.analysis) drones[button.dataset.analysis].toggleAnalysis(button);
+    if (!button.dataset.command) return;
+    const controller = button.closest('[data-controller]');
+    const scope = controller.dataset.controller;
+    const action = button.dataset.command;
+    const target = scope === 'shared' ? (action === 'disarm' ? 'both' : currentTarget()) : scope;
+    if (action === 'disarm' || action === 'stop') stopHeldKeys();
+    dispatch(action, target);
+  });
 });
 
-$(document).keypress(function(event){
-  if (isFormControl(event.target)) return;
-  var char = String.fromCharCode(event.which || event.keyCode);
-  if (char == ';') {
-    publishArm();
-  } else if (char == 'r') {
-    publishResetTransform();
-  } else if (char == 't') {
-    publishTakeoff();
-  } else if (char == 'p') {
-    publishToPosition();
-  } else if (char == 'v') {
-    publishToVelocity();
-  } else if (char == 'm') {
-    publishToggleMap();
-  }
-});
-
-$(document).keydown(function(event){
-  if (isFormControl(event.target)) return;
-  if ((event.which || event.keyCode) === 32) {
+document.addEventListener('keydown', event => {
+  const key = event.key.toLowerCase();
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (key === ' ') {
     event.preventDefault();
-    publishDisarm();
+    stopHeldKeys();
+    dispatch('disarm', 'both');
     return;
   }
-  var char = String.fromCharCode(event.which || event.keyCode);
-  // console.log("Key down: " + char);
-  if (char == 'J') {
-    publishTranslateLeft();
-  } else if (char == 'L') {
-    publishTranslateRight();
-  } else if (char == "K") {
-    publishTranslateBackward();
-  } else if (char == "I") {
-    publishTranslateForward();
-  } else if (char == "W") {
-    publishTranslateUp();
-  } else if (char == "S") {
-    publishTranslateDown();
-  } else if (char == "A") {
-    publishYawLeft();
-  } else if (char == "D") {
-    publishYawRight();
-  } else {
-    //console.log('undefined key: ' + event.keyCode);
+  if (isFormControl(event.target)) return;
+  if (movementKeys[key]) {
+    event.preventDefault();
+    if (event.repeat && !heldKeys.has(key)) return;
+    const targets = dispatch(movementKeys[key]);
+    if (targets.length) heldKeys.set(key, targets);
+  } else if (actionKeys[key] && !event.repeat) {
+    event.preventDefault();
+    dispatch(actionKeys[key]);
   }
+});
+
+document.addEventListener('keyup', event => {
+  const key = event.key.toLowerCase();
+  // Release the drones that received the press, even if focus or selection changed.
+  if (!heldKeys.has(key)) return;
+  heldKeys.get(key).forEach(drone => drone.command('stop'));
+  heldKeys.delete(key);
+});
+window.addEventListener('blur', stopHeldKeys);
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopHeldKeys(); });
+window.addEventListener('beforeunload', () => {
+  stopHeldKeys();
+  Object.values(drones).forEach(drone => drone.disconnect());
 });
