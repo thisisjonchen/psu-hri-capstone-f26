@@ -7,7 +7,8 @@ Each drone's DWM1001-DEV tag works out its own 2D position from four corner anch
 | File | Purpose |
 |---|---|
 | `uwb_locator.py` | Runtime module for the Pi. `UWBLocator` opens the tag's serial port, switches PANS into shell mode, and turns on the `lep` position stream. A daemon thread then keeps the latest `Position(x, y, z, quality, timestamp)` and drops fixes below `min_quality`. `position` and `is_fresh()` never block. `read_z()` is the stub where the ToF height will go. Run it directly to print live positions. |
-| `configure_board.py` | One-time setup script. Sets a board's network ID and mode (initiator, anchor, or tag). Anchors also get their position (converted to mm); the tag gets its update rate. Prints `si` at the end so you can check the result. |
+| `configure_board.py` | One-time setup script. Sets a board's network ID and writes its full role config (`acas` for anchors, `acts` for the tag, with UWB active), then resets the board. Anchors also get their position (converted to mm); the tag gets its update rate. Prints `si` at the end so you can check the result. |
+| `SETUP.md` | Step-by-step board setup: firmware check, flashing, configuration, and troubleshooting. |
 | `anchors.json` | Network ID, tag update rate (in 100 ms units), and anchor positions in meters. A0 is the initiator. |
 | `__init__.py` | Makes the folder importable: `from localization import UWBLocator, Position`. |
 | `requirements.txt` | Only dependency is `pyserial` (on 16.04, `apt install python3-serial` works too). |
@@ -31,11 +32,14 @@ All anchors sit at z = 0, so UWB can't resolve height. That's expected, because 
 
 ## Setup (once per board)
 
-1. `pip3 install -r requirements.txt` and add the user to `dialout`: `sudo usermod -aG dialout $USER`
-2. Plug a board into USB and run one of these:
-   - `python3 configure_board.py --anchor A0` (repeat for A1, A2, A3)
-   - `python3 configure_board.py --tag` (one per drone)
-3. Check the `si` output it prints. If a command fails, compare against `help` in the board shell, or configure with the Decawave DRTLS Android app instead.
+See [SETUP.md](SETUP.md). In short: every board runs the same PANS firmware, and `configure_board.py` makes it an anchor or a tag:
+
+```
+python3 configure_board.py --port /dev/ttyACM0 --anchor A0   # A1, A2, A3
+python3 configure_board.py --port /dev/ttyACM0 --tag
+```
+
+On macOS the port is `/dev/cu.usbmodemXXXX`.
 
 ## Usage on the Pi
 

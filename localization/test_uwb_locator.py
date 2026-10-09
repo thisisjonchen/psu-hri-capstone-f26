@@ -162,16 +162,16 @@ class ConfigureBoardTest(unittest.TestCase):
 
     def test_initiator_anchor(self):
         self.assertEqual(self.configure('--anchor', 'A0'),
-                         [b'\r\r', b'nis 0x1234\r', b'nmi\r', b'\r\r', b'aps 0 0 0\r', b'si\r'])
+                         [b'\r\r', b'nis 0x1234\r', b'acas 1 0 0 1 1 2 0\r', b'reset\r', b'\r\r', b'aps 0 0 0\r', b'si\r'])
 
     def test_anchor_position_in_mm(self):
         writes = self.configure('--anchor', 'A2')
-        self.assertIn(b'nma\r', writes)
+        self.assertIn(b'acas 0 0 0 1 1 2 0\r', writes)
         self.assertIn(b'aps 3000 6000 0\r', writes)
 
     def test_tag(self):
         self.assertEqual(self.configure('--tag'),
-                         [b'\r\r', b'nis 0x1234\r', b'nmt\r', b'\r\r', b'aurs 1 1\r', b'si\r'])
+                         [b'\r\r', b'nis 0x1234\r', b'acts 0 0 0 1 0 1 1 2 0\r', b'reset\r', b'\r\r', b'aurs 1 1\r', b'si\r'])
 
 
 if __name__ == '__main__':
