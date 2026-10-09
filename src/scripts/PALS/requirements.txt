@@ -1,4 +1,4 @@
-opencv-python
-pupil-apriltags
-Flask
-flask-cors
+# Install on each drone using the Python interpreter that runs rospy.
+# OpenCV and NumPy come from the drone's ROS/system environment.
+pupil-apriltags; python_version >= '3.6'
+apriltag==0.0.16; python_version < '3.6'

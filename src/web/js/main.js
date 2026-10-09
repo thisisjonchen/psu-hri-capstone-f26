@@ -55,10 +55,7 @@ class DroneSession {
   constructor(id) {
     this.id = id;
     this.host = id + '.local';
-    this.detectorUrl = 'http://127.0.0.1:' + (id === 'drone1' ? 5001 : 5002) + '/zone';
-    this.detectionPending = null;
-    this.detectorStartPending = null;
-    this.detectorStartingUntil = 0;
+    this.detectionReceivedAt = null;
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
@@ -101,69 +98,33 @@ class DroneSession {
   }
   get connected() { return !!(this.ros && this.ros.isConnected); }
 
-  startDetector(ros) {
-    if (this.detectorStartPending) return this.detectorStartPending;
-    this.detectorStartingUntil = Date.now() + 10000;
-    this.field('detection').textContent = 'Starting detector…';
-    this.field('detection').dataset.state = 'checking';
-    this.detectorStartPending = this.requestDetectorStart(ros).finally(() => { this.detectorStartPending = null; });
-    return this.detectorStartPending;
-  }
-
-  async requestDetectorStart(ros) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    try {
-      const response = await fetch('/api/detectors/' + this.id + '/start', {
-        method: 'POST', signal: controller.signal, cache: 'no-store'
-      });
-      if (!response.ok) throw new Error('Detector launcher unavailable');
-      const result = await response.json();
-      if (result.drone_id !== this.id || !['starting', 'running'].includes(result.status)) throw new Error('Invalid detector launcher response');
-    } catch (error) {
-      if (this.ros !== ros) return;
-      this.detectorStartingUntil = 0;
-      this.field('detection').textContent = 'Detector offline';
-      this.field('detection').dataset.state = 'offline';
-      feedback('Drone ' + this.id.slice(-1) + ' detector could not start. Open the dashboard using its local server.');
-      console.error(this.id + ' detector startup failed', error);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  updateDetection() {
-    if (this.detectionPending) return this.detectionPending;
-    this.detectionPending = this.fetchDetection().finally(() => { this.detectionPending = null; });
-    return this.detectionPending;
-  }
-
-  async fetchDetection() {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
+  setDetection(text, state) {
     const status = this.field('detection');
-    try {
-      const response = await fetch(this.detectorUrl, { signal: controller.signal, cache: 'no-store' });
-      if (!response.ok) throw new Error('Detection API unavailable');
-      const detection = await response.json();
-      if (detection.drone_id && detection.drone_id !== this.id) throw new Error('Wrong drone detector');
-      if (detection.tag_id === null) {
-        status.textContent = 'No tag detected';
-        status.dataset.state = 'none';
-      } else {
-        if (!Number.isInteger(detection.tag_id) || detection.tag_id < 0 || typeof detection.zone !== 'string' || !detection.zone.trim()) {
-          throw new Error('Invalid detection');
-        }
-        status.textContent = detection.zone + ' · Tag ' + detection.tag_id;
-        status.dataset.state = 'detected';
-      }
-      this.detectorStartingUntil = 0;
-    } catch (error) {
-      if (this.detectorStartPending || Date.now() < this.detectorStartingUntil) return;
-      status.textContent = 'Detector offline';
-      status.dataset.state = 'offline';
-    } finally {
-      clearTimeout(timeout);
+    status.textContent = text;
+    status.dataset.state = state;
+  }
+
+  updateDetection(message) {
+    const valid = typeof message.camera_online === 'boolean' &&
+      Array.isArray(message.tag_ids) && Array.isArray(message.zones) &&
+      message.tag_ids.length === message.zones.length &&
+      message.tag_ids.every(id => Number.isInteger(id) && id >= 0) &&
+      message.zones.every(zone => typeof zone === 'string' && zone.trim());
+    if (!valid || !message.camera_online) {
+      this.detectionReceivedAt = null;
+      this.setDetection('Detector offline', 'offline');
+      return;
+    }
+    this.detectionReceivedAt = Date.now();
+    this.setDetection(message.tag_ids.length ? message.tag_ids.map((id, i) =>
+      message.zones[i] + ' · Tag ' + id).join(', ') : 'No tag detected',
+      message.tag_ids.length ? 'detected' : 'none');
+  }
+
+  refreshDetection() {
+    if (this.detectionReceivedAt !== null && Date.now() - this.detectionReceivedAt > 1500) {
+      this.detectionReceivedAt = null;
+      this.setDetection('Detector offline', 'offline');
     }
   }
 
@@ -228,6 +189,8 @@ class DroneSession {
     this.positionMode = false;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
+    this.detectionReceivedAt = null;
+    this.setDetection('Detector offline', 'offline');
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
@@ -255,7 +218,6 @@ class DroneSession {
       this.setupTopics(ros);
       this.field('camera').src = 'http://' + this.host + ':8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed';
       updateLayout();
-      this.startDetector(ros);
     });
     ros.on('error', error => {
       if (this.ros !== ros) return;
@@ -306,6 +268,7 @@ class DroneSession {
       topic.subscribe(message => { if (this.ros === ros && this.connected) callback(message); });
       this.subscribers.push(topic);
     };
+    subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
     subscribe('/pidrone/battery', 'pidrone_pkg/Battery', message => {
       if (!Number.isFinite(message.vbat)) return;
       const battery = this.field('battery');
@@ -568,8 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
   Chart.defaults.global.defaultFontColor = '#58677b';
   ['drone1', 'drone2'].forEach(id => { drones[id] = new DroneSession(id); });
   fleetMap = new FleetMap();
-  Object.values(drones).forEach(drone => { drone.updateDetection(); });
-  setInterval(() => { Object.values(drones).forEach(drone => { drone.updateDetection(); drone.refreshVerticalSpeed(); }); }, 250);
+  setInterval(() => { Object.values(drones).forEach(drone => { drone.refreshDetection(); drone.refreshVerticalSpeed(); }); }, 250);
   updateLayout();
   document.addEventListener('click', event => {
     const button = event.target.closest('button');

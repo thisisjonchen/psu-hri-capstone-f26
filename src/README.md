@@ -76,10 +76,28 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
 7. You are now ready to go. Take a look at **Changing Branches**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
 
 ## Camera Out of Focus
+
 The camera may be out of focus. Here are some steps to fix that.
 1. Follow **Standard Operation + Control**. You should have the drone connected to the interface and see a camera image.
 2. Take a look at the drone's camera: you should see a black ring. Twist it until it comes into focus, but not too much that it becomes blurry again.
 3. Congrats, you focused the camera!
+4. If you need the camera to be calibrated, ask Jon
+
+NOTE: IF CAMERA IS CALIBRATED, DO NOT TOUCH THE FOCUS RING.
+
+## AprilTag Detector Installation
+To allow AprilTag detection to work, we will have to install some dependencies.
+
+
+1. Run the following
+```
+cd ~/catkin_ws/src/pidrone_pkg
+python -m pip install --user -r scripts/PALS/requirements.txt
+cd ~/catkin_ws
+catkin_make
+source devel/setup.bash
+```
+2. Done!
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session

@@ -1,208 +1,96 @@
-import argparse
+#!/usr/bin/env python
+"""Detect AprilTags onboard from ROS camera images; publish results to rosbridge."""
+from __future__ import print_function
 
-parser = argparse.ArgumentParser(description="Detect AprilTags from one drone camera.")
-parser.add_argument("--drone", choices=("drone1", "drone2"), default="drone2")
-parser.add_argument("--port", type=int, help="Detection API port (Drone 1: 5001; Drone 2: 5002).")
-parser.add_argument("--headless", action="store_true", help="Run without opening a camera window.")
-args = parser.parse_args()
-detector_port = args.port if args.port is not None else (5001 if args.drone == "drone1" else 5002)
-if not 1 <= detector_port <= 65535:
-    parser.error("--port must be between 1 and 65535")
-
-import cv2
+import threading
 import time
 
-from pupil_apriltags import Detector
-from flask import Flask, jsonify
-from flask_cors import CORS
-from threading import Thread
-from werkzeug.serving import make_server
+import cv2
+import numpy as np
+import rospy
+from sensor_msgs.msg import CompressedImage
+from pidrone_pkg.msg import TagDetection
 
-# AprilTag zone definitions
-
-TAG_ZONES = {
-    0: "PICKUP",
-    1: "DROP_OFF",
-    2: "BORDER"
-}
-
-# Camera configuration
-
-# -----------------------------------
-# ONLY USE ONE CAMER SOURCE AT ONCE
-# it won't really break anything it
-# just won't work correctly. thx :)
-# -----------------------------------
-
-# For testing with your laptop webcam:
-# CAMERA_SOURCE = 0
-
-# For testing on the drone camera
-CAMERA_SOURCE = ("http://{}.local:8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed".format(args.drone))
-
-# Information shared with the web interface
-latest_detection = {
-    "drone_id": args.drone,
-    "tag_id": None,
-    "zone": "No tag detected"
-}
-
-last_detection_time = 0
-
-# How long to wait before deciding a tag is no
-# longer visible.
-DETECTION_TIMEOUT = 0.5
-
-# Flask server
-app = Flask(__name__)
-CORS(app)
+TAG_ZONES = {0: 'PICKUP', 1: 'DROP_OFF', 2: 'BORDER'}
 
 
-@app.route("/zone")
-def get_zone():
-    return jsonify(latest_detection)
+def make_detector():
+    # ROS Kinetic uses Python 2; newer drone environments can use AprilTag 3.
+    try:
+        from pupil_apriltags import Detector
+    except ImportError:
+        import apriltag
+        return apriltag.Detector(apriltag.DetectorOptions(
+            families='tag36h11', nthreads=1, quad_decimate=1.0))
+    return Detector(families='tag36h11', nthreads=1, quad_decimate=1.0)
 
 
-# Bind before opening the camera so a port conflict fails the process itself.
-api_server = make_server("127.0.0.1", detector_port, app)
+class AprilTagNode(object):
+    def __init__(self):
+        self.detector = make_detector()
+        self.rate = float(rospy.get_param('~rate', 10))
+        self.timeout = float(rospy.get_param('~camera_timeout', 0.5))
+        if not 0 < self.rate <= 30 or self.timeout <= 0:
+            raise ValueError('rate must be between 0 and 30 Hz; camera_timeout must be positive')
+        self.lock = threading.Lock()
+        self.pending = None
+        self.last_frame_at = None
+        self.result = TagDetection()
+        self.result.camera_online = False
+        self.publisher = rospy.Publisher('/pidrone/apriltag/detections', TagDetection, queue_size=1)
+        topic = rospy.get_param('~image_topic', '/raspicam_node/image/compressed')
+        self.subscriber = rospy.Subscriber(topic, CompressedImage, self.image_callback,
+                                           queue_size=1, buff_size=2 ** 20)
+        rospy.loginfo('AprilTag detection: %s -> /pidrone/apriltag/detections at %.1f Hz', topic, self.rate)
 
-# AprilTag detector
-detector = Detector(
-    families="tag36h11",
-    nthreads=1,
-    quad_decimate=1.0,
-    quad_sigma=0.0,
-    refine_edges=1,
-    decode_sharpening=0.25,
-    debug=0
-)
-# Start Flask server
-server_thread = Thread(
-    target=api_server.serve_forever,
-    daemon=True
-)
+    def image_callback(self, message):
+        # Keep only the newest frame. Detection runs in the rate-limited main loop.
+        with self.lock:
+            self.pending = (message, time.time())
 
-server_thread.start()
+    def step(self):
+        with self.lock:
+            pending, self.pending = self.pending, None
+        if pending is not None:
+            message, received = pending
+            self.result = TagDetection()
+            self.result.header = message.header
+            self.last_frame_at = None
+            try:
+                age = rospy.Time.now().to_sec() - message.header.stamp.to_sec()
+                if time.time() - received <= self.timeout and (message.header.stamp.to_sec() <= 0 or age <= self.timeout):
+                    image = cv2.imdecode(np.frombuffer(message.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                    if image is None:
+                        raise ValueError('Invalid compressed camera frame')
+                    detections = self.detector.detect(image)
+                    # Stable order; unknown IDs are still reported to consumers.
+                    ids = sorted(set(int(tag.tag_id) for tag in detections))
+                    self.result.tag_ids = ids
+                    self.result.zones = [TAG_ZONES.get(tag_id, 'UNKNOWN') for tag_id in ids]
+                    self.result.camera_online = True
+                    self.last_frame_at = received
+            except (ValueError, cv2.error, RuntimeError) as error:
+                rospy.logwarn_throttle(5, 'AprilTag image processing failed: {}'.format(error))
+        if self.last_frame_at is None or time.time() - self.last_frame_at > self.timeout:
+            self.result = TagDetection()
+            self.result.header.stamp = rospy.Time.now()
+            self.result.camera_online = False
+        self.publisher.publish(self.result)
 
-# Open camera
-camera = cv2.VideoCapture(CAMERA_SOURCE)
-
-if not camera.isOpened():
-    print("Could not open camera.")
-    camera.release()
-    raise SystemExit(1)
-
-
-print("AprilTag detector started.")
-if not args.headless:
-    print("Press Q to quit.")
-
-# Main camera loop
-while True:
-
-    ret, frame = camera.read()
-
-    if not ret:
-        print("Could not read camera frame.")
-        camera.release()
-        raise SystemExit(1)
-
-
-    # Convert image to grayscale for AprilTag detection
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
-    )
-
-
-    # Search the current frame for AprilTags
-    detections = detector.detect(gray)
-    # Process detections
-
-    for detection in detections:
-
-        tag_id = detection.tag_id
-
-        zone = TAG_ZONES.get(
-            tag_id,
-            "UNKNOWN"
-        )
+    def run(self):
+        rate = rospy.Rate(self.rate)
+        while not rospy.is_shutdown():
+            self.step()
+            rate.sleep()
 
 
-        # Store result for the web interface
-        latest_detection["tag_id"] = tag_id
-        latest_detection["zone"] = zone
-
-        last_detection_time = time.time()
-
-
-        print(
-            "Detected Tag:",
-            tag_id,
-            "Zone:",
-            zone
-        )
+def main():
+    rospy.init_node('apriltag_detection')
+    try:
+        AprilTagNode().run()
+    except rospy.ROSInterruptException:
+        pass
 
 
-        # Draw box around detected tag
-
-        corners = detection.corners.astype(int)
-
-        for i in range(4):
-
-            point1 = tuple(
-                map(int, corners[i])
-            )
-
-            point2 = tuple(
-                map(int, corners[(i + 1) % 4])
-            )
-
-            cv2.line(
-                frame,
-                point1,
-                point2,
-                (0, 255, 0),
-                2
-            )
-
-
-        # Display tag ID and zone
-
-        center = tuple(
-            map(int, detection.center)
-        )
-
-        cv2.putText(
-            frame,
-            "Tag {}: {}".format(
-                tag_id,
-                zone
-            ),
-            center,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 255),
-            2
-        )
-
-
-    # Reset when tag disappears
-
-
-    if time.time() - last_detection_time > DETECTION_TIMEOUT:
-
-        latest_detection["tag_id"] = None
-        latest_detection["zone"] = "No tag detected"
-
-    # Display camera feed
-
-    if not args.headless:
-        cv2.imshow("AprilTag Detection", frame)
-        # Press Q to quit
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-camera.release()
-if not args.headless:
-    cv2.destroyAllWindows()
+if __name__ == '__main__':
+    main()

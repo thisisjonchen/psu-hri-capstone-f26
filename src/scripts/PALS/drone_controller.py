@@ -204,6 +204,7 @@ class Drone(object):
             ('/state_estimator_ema', [sys.executable, '-u', 'StateEstimators/state_estimator_ema.py']),
             ('/pid_controller', [sys.executable, '-u', 'pid_controller.py']),
             ('/flight_controller_node', [sys.executable, '-u', 'flight_controller_node.py']),
+            ('/apriltag_detection', ['roslaunch', os.path.join(launch, 'apriltag_detection.launch')]),
         ]
         for name, command in nodes:
             if rospy.is_shutdown():

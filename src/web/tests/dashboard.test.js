@@ -9,12 +9,7 @@ const vm = require('node:vm');
 function dashboard() {
   const listeners = {};
   const timers = new Map();
-  const detectionTimers = new Map();
-  const timeouts = new Map();
-  const detectorResponses = new Map();
-  const detectionRequests = [];
-  const launcherResponses = new Map();
-  const launcherRequests = [];
+  const maintenanceTimers = new Map();
   let nextTimer = 0;
   let now = 1000;
   const elements = new Map();
@@ -83,25 +78,8 @@ function dashboard() {
     console: { error() {} }, Chart,
     Quaternion: class { rotateVector(vector) { return vector; } },
     ROSLIB: { Ros, Topic, Message: class { constructor(data) { Object.assign(this, data); } } },
-    AbortController,
     Date: class extends Date { static now() { return now; } },
-    async fetch(url, options) {
-      if (options.method === 'POST') {
-        launcherRequests.push({ url, options });
-        const response = launcherResponses.get(url);
-        if (typeof response === 'function') return response(url, options);
-        if (response instanceof Error) throw response;
-        return response || { ok: true, async json() { return { drone_id: url.split('/')[3], status: 'starting' }; } };
-      }
-      detectionRequests.push({ url, options });
-      const response = detectorResponses.get(url);
-      if (typeof response === 'function') return response(url, options);
-      if (!response || response instanceof Error) throw response || new Error('Detector offline');
-      return response;
-    },
-    setTimeout(callback) { const id = ++nextTimer; timeouts.set(id, callback); return id; },
-    clearTimeout(id) { timeouts.delete(id); },
-    setInterval(callback, delay) { const id = ++nextTimer; (delay === 250 ? detectionTimers : timers).set(id, callback); return id; },
+    setInterval(callback, delay) { const id = ++nextTimer; (delay === 250 ? maintenanceTimers : timers).set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
@@ -110,7 +88,7 @@ function dashboard() {
   const connect = id => { api.drones[id].connect(); api.drones[id].ros.open(); return api.drones[id]; };
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const key = (name, value, target = element(), repeat = false) => listeners[name]({ key: value, target, repeat, preventDefault() {} });
-  return { ...api, connect, receive, key, elements, timers, detectionTimers, timeouts, detectorResponses, detectionRequests, launcherResponses, launcherRequests, listeners, element, advanceTime(ms) { now += ms; } };
+  return { ...api, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
 }
 const stamp = secs => ({ header: { stamp: { secs, nsecs: 0 } } });
 const rangeAt = (secs, range) => ({ ...stamp(secs), range, min_range: 0.05, max_range: 1.2 });
@@ -420,136 +398,50 @@ test('shared map stays live and disconnection clears only the departed drone', (
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.2);
 });
 
-const detectionResponse = data => ({ ok: true, async json() { return data; } });
-const finishInitialDetection = app => Promise.all(Object.values(app.drones).map(drone => drone.updateDetection()));
+const tags = (tag_ids, zones, camera_online = true) => ({ tag_ids, zones, camera_online });
 
-test('camera detection reports separate endpoints, tag zero, and loss of detection per drone', async () => {
+test('ROS tag results stay isolated and include tag zero and multiple tags', () => {
   const app = dashboard();
-  await finishInitialDetection(app);
-  const a = app.drones.drone1, b = app.drones.drone2;
-  assert.equal(a.detectorUrl, 'http://127.0.0.1:5001/zone');
-  assert.equal(b.detectorUrl, 'http://127.0.0.1:5002/zone');
-  app.detectorResponses.set(a.detectorUrl, detectionResponse({ drone_id: 'drone1', tag_id: 0, zone: 'PICKUP' }));
-  app.detectorResponses.set(b.detectorUrl, detectionResponse({ drone_id: 'drone2', tag_id: 1, zone: 'DROP_OFF' }));
-  await Promise.all([a.updateDetection(), b.updateDetection()]);
-  assert.equal(a.field('detection').textContent, 'PICKUP · Tag 0');
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const topic = '/pidrone/apriltag/detections';
+  app.receive(a, topic, tags([0, 2], ['PICKUP', 'BORDER']));
+  app.receive(b, topic, tags([1], ['DROP_OFF']));
+  assert.equal(a.field('detection').textContent, 'PICKUP · Tag 0, BORDER · Tag 2');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
-  assert.equal(a.field('detection').dataset.state, 'detected');
-  app.detectorResponses.set(a.detectorUrl, detectionResponse({ drone_id: 'drone1', tag_id: null, zone: 'No tag detected' }));
-  await a.updateDetection();
+  app.receive(a, topic, tags([], []));
   assert.equal(a.field('detection').textContent, 'No tag detected');
   assert.equal(a.field('detection').dataset.state, 'none');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
-  assert.equal(app.timeouts.size, 0);
-  assert.equal(app.detectionTimers.size, 1);
 });
 
-test('offline, invalid, and mismatched detector responses clear stale detection', async () => {
+test('camera loss, malformed results, and a silent ROS detector clear stale tags', () => {
   const app = dashboard();
-  await finishInitialDetection(app);
-  const a = app.drones.drone1;
-  app.detectorResponses.set(a.detectorUrl, detectionResponse({ tag_id: 2, zone: 'BORDER' }));
-  await a.updateDetection();
-  assert.equal(a.field('detection').textContent, 'BORDER · Tag 2');
-  for (const response of [
-    new Error('Connection refused'), { ok: false },
-    detectionResponse({ drone_id: 'drone2', tag_id: 0, zone: 'PICKUP' }),
-    detectionResponse({ tag_id: -1, zone: 'UNKNOWN' }), detectionResponse({ tag_id: 0 })
-  ]) {
-    app.detectorResponses.set(a.detectorUrl, response);
-    await a.updateDetection();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const topic = '/pidrone/apriltag/detections';
+  const detected = tags([0], ['PICKUP']);
+  for (const message of [tags([], [], false), tags([-1], ['UNKNOWN']), tags([0], []), tags([0], ['']), {}]) {
+    app.receive(a, topic, detected);
+    app.receive(a, topic, message);
     assert.equal(a.field('detection').textContent, 'Detector offline');
-    assert.equal(a.field('detection').dataset.state, 'offline');
   }
-});
-
-test('detection polling prevents overlapping requests and aborts stalled fetches', async () => {
-  const app = dashboard();
-  await finishInitialDetection(app);
-  const a = app.drones.drone1;
-  app.detectionRequests.length = 0;
-  let complete;
-  app.detectorResponses.set(a.detectorUrl, () => new Promise(resolve => { complete = resolve; }));
-  const pending = a.updateDetection();
-  assert.equal(a.updateDetection(), pending);
-  assert.equal(app.detectionRequests.length, 1);
-  complete(detectionResponse({ tag_id: null, zone: 'No tag detected' }));
-  await pending;
-  app.detectorResponses.set(a.detectorUrl, (url, options) => new Promise((resolve, reject) => {
-    options.signal.addEventListener('abort', () => reject(new Error('Aborted')));
-  }));
-  const stalled = a.updateDetection();
-  [...app.timeouts.values()][0]();
-  await stalled;
+  app.receive(a, topic, detected);
+  app.advanceTime(1600);
+  app.receive(b, topic, tags([1], ['DROP_OFF']));
+  for (const callback of app.maintenanceTimers.values()) callback();
   assert.equal(a.field('detection').textContent, 'Detector offline');
-  assert.equal(a.detectionPending, null);
-  assert.equal(app.timeouts.size, 0);
+  assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
-test('successful connections launch the matching detector once and reconnect can retry', async () => {
+test('disconnect clears tags and old ROS callbacks cannot overwrite a new session', () => {
   const app = dashboard();
-  await finishInitialDetection(app);
-  const a = app.drones.drone1;
-  a.connect();
-  assert.equal(app.launcherRequests.length, 0);
-  a.ros.open();
-  assert.equal(app.launcherRequests[0].url, '/api/detectors/drone1/start');
-  const pending = a.detectorStartPending;
-  a.connect();
-  assert.equal(a.startDetector(a.ros), pending);
-  assert.equal(app.launcherRequests.length, 1);
-  await pending;
-  await a.updateDetection();
-  assert.equal(a.field('detection').textContent, 'Starting detector…');
-  a.detectorStartingUntil = 0;
-  await a.updateDetection();
-  assert.equal(a.field('detection').textContent, 'Detector offline');
-  const b = app.connect('drone2');
-  await b.detectorStartPending;
-  assert.equal(app.launcherRequests[1].url, '/api/detectors/drone2/start');
-  a.disconnect();
-  app.connect('drone1');
-  await a.detectorStartPending;
-  assert.equal(app.launcherRequests.length, 3);
-  assert.equal(b.connected, true);
-});
-
-test('launcher failure and timeout keep ROS controls usable and do not affect the partner', async () => {
-  const app = dashboard();
-  await finishInitialDetection(app);
-  const a = app.drones.drone1;
-  app.launcherResponses.set('/api/detectors/drone1/start', { ok: false });
-  app.connect('drone1');
-  await a.detectorStartPending;
-  assert.equal(a.field('detection').textContent, 'Detector offline');
-  assert.match(app.elements.get('commandFeedback').textContent, /Drone 1 detector could not start/);
-  assert.equal(a.connected, true);
-  app.dispatch('takeoff', 'drone1');
-  assert.equal(last(a, 'mode').mode, 'FLYING');
-  assert.equal(app.drones.drone2.field('detection').textContent, 'Detector offline');
-  app.launcherResponses.set('/api/detectors/drone1/start', (url, options) => new Promise((resolve, reject) => {
-    options.signal.addEventListener('abort', () => reject(new Error('Aborted')));
-  }));
-  const stalled = a.startDetector(a.ros);
-  await a.updateDetection();
-  assert.equal(a.field('detection').textContent, 'Starting detector…');
-  [...app.timeouts.values()][0]();
-  await stalled;
-  assert.equal(a.detectorStartPending, null);
-  assert.equal(app.timeouts.size, 0);
-  assert.equal(a.connected, true);
-});
-
-test('a stale launcher response cannot report errors after a drone disconnects', async () => {
-  const app = dashboard();
-  await finishInitialDetection(app);
-  let complete;
-  app.launcherResponses.set('/api/detectors/drone1/start', () => new Promise(resolve => { complete = resolve; }));
   const a = app.connect('drone1');
-  const pending = a.detectorStartPending;
+  const oldTopic = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
+  oldTopic.receive(tags([0], ['PICKUP']));
   a.disconnect();
-  complete({ ok: false });
-  await pending;
-  assert.equal(app.elements.get('commandFeedback').textContent, '');
-  assert.equal(a.connected, false);
+  assert.equal(a.field('detection').textContent, 'Detector offline');
+  app.connect('drone1');
+  oldTopic.receive(tags([0], ['PICKUP']));
+  assert.equal(a.field('detection').textContent, 'Detector offline');
+  app.receive(a, '/pidrone/apriltag/detections', tags([1], ['DROP_OFF']));
+  assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });

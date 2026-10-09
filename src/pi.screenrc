@@ -42,5 +42,6 @@ screen -t "Rigid Transform" /bin/bash -ic 'source scripts/screen_node.sh rigid; 
 screen -t "TOF" /bin/bash -ic 'source scripts/screen_node.sh tof; exec /bin/bash --norc -i'
 screen -t "rosbridge" /bin/bash -ic 'source scripts/screen_node.sh bridge; exec /bin/bash --norc -i'
 screen -t "web_vid_serv" /bin/bash -ic 'source scripts/screen_node.sh video; exec /bin/bash --norc -i'
+screen -t "AprilTags" /bin/bash -ic 'source scripts/screen_node.sh tags; exec /bin/bash --norc -i'
 screen -t "free1" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
 screen -t "free2" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'

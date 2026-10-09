@@ -36,7 +36,8 @@ pidrone_screen_node() {
             ;;
         bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
         video) command=(rosrun web_video_server web_video_server) ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|shell}' >&2
+        tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|shell}' >&2
            return 2 ;;
     esac
 

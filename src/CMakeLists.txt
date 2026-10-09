@@ -53,6 +53,7 @@ add_message_files(
   State.msg
   StateGroundTruth.msg
   UkfStats.msg
+  TagDetection.msg
 
 )
 
@@ -156,6 +157,10 @@ include_directories(
 # See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
 
 ## Mark executable scripts (Python etc.) for installation
+catkin_install_python(PROGRAMS
+  scripts/PALS/apriltag_detection_drone
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 ## in contrast to setup.py, you can choose the destination
 # install(PROGRAMS
 #   scripts/my_python_script
