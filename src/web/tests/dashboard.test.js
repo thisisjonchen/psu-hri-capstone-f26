@@ -16,7 +16,7 @@ function dashboard() {
   function element(value = '') {
     const classes = new Set();
     return {
-      value, textContent: '', dataset: {}, src: 'nocamera.jpg', listeners: {},
+      value, textContent: '', dataset: {}, src: 'nocamera.svg', listeners: {},
       classList: {
         toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); },
         remove(...names) { names.forEach(name => classes.delete(name)); },
@@ -207,7 +207,7 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   a.disconnect();
   assert.equal(app.timers.size, 1);
   assert.equal(b.connected, true);
-  assert.equal(a.field('camera').src, 'nocamera.jpg');
+  assert.equal(a.field('camera').src, 'nocamera.svg');
   app.connect('drone1');
   oldRange.receive({ ...stamp(500), range: 9 });
   oldRos.events.close();
@@ -422,13 +422,13 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   for (const message of [tags([], [], false), tags([-1], ['UNKNOWN']), tags([0], []), tags([0], ['']), {}]) {
     app.receive(a, topic, detected);
     app.receive(a, topic, message);
-    assert.equal(a.field('detection').textContent, 'Detector offline');
+    assert.equal(a.field('detection').textContent, 'Drone Offline');
   }
   app.receive(a, topic, detected);
   app.advanceTime(1600);
   app.receive(b, topic, tags([1], ['DROP_OFF']));
   for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(a.field('detection').textContent, 'Detector offline');
+  assert.equal(a.field('detection').textContent, 'Drone Offline');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
@@ -438,10 +438,10 @@ test('disconnect clears tags and old ROS callbacks cannot overwrite a new sessio
   const oldTopic = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
   oldTopic.receive(tags([0], ['PICKUP']));
   a.disconnect();
-  assert.equal(a.field('detection').textContent, 'Detector offline');
+  assert.equal(a.field('detection').textContent, 'Drone Offline');
   app.connect('drone1');
   oldTopic.receive(tags([0], ['PICKUP']));
-  assert.equal(a.field('detection').textContent, 'Detector offline');
+  assert.equal(a.field('detection').textContent, 'Drone Offline');
   app.receive(a, '/pidrone/apriltag/detections', tags([1], ['DROP_OFF']));
   assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });

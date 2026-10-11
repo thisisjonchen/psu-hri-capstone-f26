@@ -85,8 +85,8 @@ class DroneSession {
     });
     this.field('camera').addEventListener('error', () => {
       // Stop retrying a missing stream until the next connection.
-      if (this.field('camera').getAttribute('src') !== 'nocamera.jpg') {
-        this.field('camera').src = 'nocamera.jpg';
+      if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
+        this.field('camera').src = 'nocamera.svg';
       }
     });
   }
@@ -112,7 +112,7 @@ class DroneSession {
       message.zones.every(zone => typeof zone === 'string' && zone.trim());
     if (!valid || !message.camera_online) {
       this.detectionReceivedAt = null;
-      this.setDetection('Detector offline', 'offline');
+      this.setDetection('Drone Offline', 'offline');
       return;
     }
     this.detectionReceivedAt = Date.now();
@@ -124,7 +124,7 @@ class DroneSession {
   refreshDetection() {
     if (this.detectionReceivedAt !== null && Date.now() - this.detectionReceivedAt > 1500) {
       this.detectionReceivedAt = null;
-      this.setDetection('Detector offline', 'offline');
+      this.setDetection('Drone Offline', 'offline');
     }
   }
 
@@ -190,12 +190,12 @@ class DroneSession {
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.detectionReceivedAt = null;
-    this.setDetection('Detector offline', 'offline');
+    this.setDetection('Drone Offline', 'offline');
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
     });
-    this.field('camera').src = 'nocamera.jpg';
+    this.field('camera').src = 'nocamera.svg';
     Object.keys(this.series).forEach(key => { this.series[key] = []; });
     [this.heightChart, this.speedChart].forEach(chart => {
       chart.data.datasets.forEach(dataset => { dataset.data = []; });
