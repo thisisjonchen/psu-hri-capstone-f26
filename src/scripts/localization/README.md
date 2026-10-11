@@ -27,29 +27,30 @@ The Dockerfile includes `python-monotonic` for Python 2. `pyserial` is already
 installed by the image. Configure the anchors and each tag with [SETUP.md](SETUP.md).
 The default coordinates in `anchors.json` are examples; survey the installed anchors.
 
-**Select the tag's actual serial port explicitly.** The flight controller already
-probes `/dev/ttyACM0` and `/dev/ttyACM1`. Use the tag's persistent
-`/dev/serial/by-id/...` path, rather than assuming USB enumeration order. On the
-drone, compare `ls -l /dev/serial/by-id/` before and after plugging in the UWB tag.
+**The UWB tag defaults to `/dev/ttyACM1`.** The flight controller already
+probes `/dev/ttyACM0` and `/dev/ttyACM1`; confirm the tag still owns its configured
+port after reconnecting. To use another port, override it with the tag's persistent
+`/dev/serial/by-id/...` path. On the drone, compare `ls -l /dev/serial/by-id/`
+before and after plugging in the UWB tag.
 Only one process may own the tag port; close board setup tools before launching.
 
 ```bash
-roslaunch pidrone_pkg uwb_localization.launch port:=/dev/serial/by-id/YOUR_UWB_TAG
+roslaunch pidrone_pkg uwb_localization.launch
 roslaunch pidrone_pkg fusion_localization.launch room_yaw_offset:=YOUR_MEASURED_OFFSET_RADIANS
 ```
 
-The new UWB Screen window starts the same launch file. To configure it, export the
-tag path before starting Screen (set separately on each drone):
+The UWB Screen window uses the same default, so no port export is needed. To
+override it, export `PALS_UWB_PORT` before starting Screen. Set the measured room
+heading separately on each drone:
 
 ```bash
-export PALS_UWB_PORT=/dev/serial/by-id/YOUR_UWB_TAG
 export PALS_ROOM_YAW_OFFSET=YOUR_MEASURED_OFFSET_RADIANS
 cd ~/catkin_ws/src/pidrone_pkg
 screen -c pi.screenrc
 ```
 
-With no port configured, the node publishes an actionable error diagnostic and
-opens no serial device. With a port configured, setup and reading run in a worker.
+An explicitly empty `port:=` disables serial access and publishes an actionable
+error diagnostic. With a port configured, setup and reading run in a worker.
 The reader verifies the `dwm>` PANS prompt, reboots the tag once to establish a known
 stream state, then enables `lec` once. A delayed first fix does not toggle it off.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,

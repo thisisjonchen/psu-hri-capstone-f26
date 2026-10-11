@@ -1,8 +1,7 @@
 <launch>
-  <!-- Leave namespace empty for each drone's existing separate ROS master. -->
-  <arg name="namespace" default=""/>
-  <!-- Required explicitly: the flight controller already probes ttyACM0/1. -->
-  <arg name="port" default=""/>
+  <!-- Use the root namespace on each drone's separate ROS master. -->
+  <arg name="namespace" default="/"/>
+  <arg name="port" default="/dev/ttyACM1"/>
   <arg name="frame_id" default="map"/>
   <arg name="range_topic" default="pidrone/range"/>
   <arg name="imu_topic" default="pidrone/imu"/>

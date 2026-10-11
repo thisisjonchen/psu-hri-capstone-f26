@@ -101,31 +101,16 @@ source devel/setup.bash
 
 ## Camera + UWB + ToF Localization
 
-The UWB ROS node publishes horizontal position from the DWM1001 tag and vertical
-position from ToF. See [localization setup and operation](scripts/localization/README.md)
-for board configuration, Python/ROS dependencies, calibration and tests.
+Camera + UWB provide XY position; ToF provides height. The map loads the four
+anchor positions automatically when a drone connects.
 
-After building the package, run on each drone:
+- UWB defaults to `/dev/ttyACM1`. Export `PALS_UWB_PORT` before starting Screen to use another port.
+- The **SE** window runs fusion; do not also run EMA.
+- Room targets require a calibrated heading. Set `PALS_ROOM_YAW_OFFSET` before starting Screen, or restart fusion with the measured offset after FC startup.
+- **Preview** selects a target, **Send target** commands the selected drone, and **Stop target** cancels it. Sending requires flying mode and valid localization.
 
-```bash
-roslaunch pidrone_pkg uwb_localization.launch port:=/dev/serial/by-id/YOUR_UWB_TAG
-roslaunch pidrone_pkg fusion_localization.launch room_yaw_offset:=YOUR_MEASURED_OFFSET_RADIANS
-```
-
-The UWB Screen window reads the port from `PALS_UWB_PORT`, exported before starting
-Screen. The dashboard shows each drone's position and localization health, plus a
-UWB marker on the shared map. It discovers the four corner anchors through
-`/pidrone/localization/anchors`; rebuild and source the workspace on both drones
-to generate the new `AnchorLayout` message. Use the tag's actual persistent device path: the
-flight controller already uses `/dev/ttyACM0` or `/dev/ttyACM1`.
-
-The **SE** Screen window now runs camera/UWB fusion and publishes the controller's
-continuous local state; do not also run EMA. Export `PALS_ROOM_YAW_OFFSET` before
-starting Screen: measured forward heading in the room minus IMU yaw, in radians.
-Without heading calibration, room fusion and target sending remain unavailable.
-The dashboard displays fused and raw positions and provides explicit **Send target**
-and **Stop target** controls. ToF remains the height source. See the setup link above
-for frame conventions, sensor-loss behavior and required hardware validation.
+See [localization setup](scripts/localization/README.md) for dependencies, rebuilding,
+board configuration and heading calibration.
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session
