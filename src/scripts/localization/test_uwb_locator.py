@@ -1,0 +1,163 @@
+"""Serial lifecycle and validation tests; no ROS or boards required."""
+import time
+import unittest
+from collections import deque
+from unittest import mock
+
+import serial
+
+from localization.uwb_locator import UWBLocator, parse_lep_line, parse_lec_line
+
+LEC = 'DIST,4,AN0,1151,3,6,2.25,6.44,AN1,0CA8,0,6,2.25,6.50,AN2,111C,3,0,2.25,3.24,AN3,1150,0,0,2.25,3.19,POS,1,2,9,90\r\n'
+
+
+class FakeSerial(object):
+    def __init__(self, lines=(), streaming=False):
+        self.lines = deque(lines)
+        self.streaming = streaming
+        self.writes = []
+        self.is_open = True
+        self.fail = False
+        self.in_waiting = 0
+        self.prompt = b'dwm> '
+
+    def write(self, data):
+        self.writes.append(data)
+        if data == b'reset\r' or data == b'quit\r':
+            self.streaming = False
+        if data == b'lec\r':
+            self.streaming = not self.streaming
+
+    def readline(self):
+        if self.fail:
+            raise serial.SerialException('device unplugged')
+        if self.streaming and self.lines:
+            return self.lines.popleft()
+        time.sleep(0.001)
+        return b''
+
+    def read(self, count):
+        return self.prompt
+
+    def reset_input_buffer(self):
+        pass
+
+    def close(self):
+        self.is_open = False
+
+
+def wait_until(condition):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.001)
+    return False
+
+
+class LocatorTest(unittest.TestCase):
+    def start_locator(self, fake):
+        loc = UWBLocator(port='fake')
+        # Skip real hardware boot delays, retaining real reader threads and serial errors.
+        loc._stop.wait = lambda timeout: loc._stop.is_set()
+        self.addCleanup(loc.stop)
+        with mock.patch('serial.Serial', return_value=fake):
+            loc.start()
+        self.assertTrue(wait_until(lambda: loc.connected or not loc.running))
+        return loc
+
+    def test_parser_handles_prompt_and_rejects_nonfinite_and_bad_quality(self):
+        p = parse_lep_line('dwm> POS,1.23,4.56,0.78,92\r\n', timestamp=100)
+        self.assertEqual(tuple(p), (1.23, 4.56, 0.78, 92, 100))
+        for line in ['', 'POS,1,2', 'POS,a,b,c,d', 'POS,nan,2,0,90',
+                     'POS,1,inf,0,90', 'POS,1,2,-inf,90', 'POS,1,2,0,101',
+                     'POS,1,2,0,-1', 'POS,1,2,0,90,unexpected']:
+            self.assertIsNone(parse_lep_line(line), line)
+
+    def test_lec_reports_hardware_ids_and_rejects_malformed_anchor_sets(self):
+        sample, p = parse_lec_line('dwm> ' + LEC, timestamp=100)
+        self.assertEqual([a.id for a in sample.anchors], ['0CA8', '111C', '1150', '1151'])
+        self.assertEqual(sample.anchors[0].y, 6)
+        self.assertEqual(sample.anchors[0].distance, 6.50)
+        self.assertEqual(sample.timestamp, p.timestamp)
+        self.assertEqual(p.x, 1)
+        for line in [LEC.replace('DIST,4', 'DIST,5'), LEC.replace('1150', '1151'),
+                     LEC.replace('1151', 'ZZZZ'), LEC.replace(',3,6,', ',nan,6,'),
+                     LEC.replace(',2.25,6.44', ',2.25,-1'), LEC.replace('AN3', 'AN0'),
+                     LEC.replace(',POS,', ',bad,POS,'), 'DIST,2,AN0,1151,0,0',
+                     LEC.replace(',9,90', ',9,101')]:
+            self.assertIsNone(parse_lec_line(line), line)
+        partial, p = parse_lec_line('DIST,1,AN2,ca8,0,6,2.25,6.5', timestamp=101)
+        self.assertEqual(partial.anchors[0].id, '0CA8')
+        self.assertIsNone(p)
+        self.assertEqual(parse_lec_line('DIST,0', timestamp=102)[0].anchors, ())
+
+    def test_delayed_first_fix_does_not_toggle_stream_off_or_discard_first_fix(self):
+        fake = FakeSerial(streaming=True)
+        loc = self.start_locator(fake)
+        self.assertIsNone(loc.position)
+        fake.lines.append(LEC.encode('ascii'))
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertEqual((loc.position.x, loc.position.y), (1, 2))
+        self.assertEqual(fake.writes.count(b'lec\r'), 1)
+        self.assertEqual(len(loc.anchor_sample.anchors), 4)
+        self.assertIn(b'reset\r', fake.writes)
+
+    def test_partial_lines_and_quality_filter(self):
+        raw = LEC.encode('ascii')
+        fake = FakeSerial([raw[:30], raw[30:], b'POS,9,9,9,10\r\n'])
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: not fake.lines))
+        self.assertEqual(loc.position.x, 1)
+        self.assertEqual(len(loc.anchor_sample.anchors), 4)
+        self.assertTrue(loc.is_fresh())
+        with mock.patch('localization.uwb_locator.monotonic', return_value=loc.position.timestamp + 1):
+            self.assertFalse(loc.is_fresh())
+
+    def test_stop_clears_fix_and_closes_port(self):
+        fake = FakeSerial([LEC.encode('ascii')])
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        loc.stop()
+        self.assertFalse(loc.running)
+        self.assertFalse(loc.is_fresh())
+        self.assertIsNone(loc.position)
+        self.assertIsNone(loc.anchor_sample)
+        self.assertFalse(fake.streaming)
+        self.assertFalse(fake.is_open)
+
+    def test_serial_failure_invalidates_fix_and_can_reconnect(self):
+        fake = FakeSerial([LEC.encode('ascii')])
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        fake.fail = True
+        self.assertTrue(wait_until(lambda: not loc.running))
+        self.assertFalse(loc.is_fresh())
+        self.assertIsNone(loc.anchor_sample)
+        self.assertEqual(loc.error, 'device unplugged')
+        self.assertFalse(fake.is_open)
+        replacement = FakeSerial([b'POS,3,4,0,90\r\n'])
+        with mock.patch('serial.Serial', return_value=replacement):
+            loc.start()
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertEqual(loc.position.x, 3)
+        self.assertIsNone(loc.error)
+
+    def test_no_port_never_opens_a_guessed_device(self):
+        with mock.patch('serial.Serial') as opened:
+            with self.assertRaises(ValueError):
+                UWBLocator().start()
+            opened.assert_not_called()
+
+    def test_non_pans_device_is_closed_without_reset_or_stream_commands(self):
+        fake = FakeSerial()
+        fake.prompt = b'not a DWM1001'
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: not loc.running))
+        self.assertEqual(fake.writes, [b'\r\r'])
+        self.assertFalse(fake.is_open)
+        self.assertIn('No PANS shell prompt', loc.error)
+
+
+if __name__ == '__main__':
+    unittest.main()

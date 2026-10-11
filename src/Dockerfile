@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --allow-unauthenticated --no-install-re
     python-numpy \
     python-smbus \
     python-scipy \
+    python-monotonic \
     locate \
     ros-kinetic-rosbridge-suite \
     ros-kinetic-web-video-server \

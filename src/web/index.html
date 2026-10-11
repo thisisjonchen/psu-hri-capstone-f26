@@ -43,10 +43,39 @@
         </article>
       </div>
       <section class="control-map" aria-label="Shared XY map">
-        <div class="panel-header"><h3>XY map</h3></div>
-        <div class="canvas-wrap flight-map-wrap"><canvas id="fleet-xyChart" aria-label="Both drones XY map"></canvas></div>
-        <div class="map-legend"><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span></div>
-        <div class="map-sources"><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span></div>
+        <div class="panel-header"><h3>XY map</h3><div class="map-actions">
+          <button class="btn btn-outline-secondary" id="room-fit" disabled>Fit room</button>
+          <button class="btn btn-outline-secondary" id="room-zoom-in" aria-label="Zoom in on room" disabled>+</button>
+          <button class="btn btn-outline-secondary" id="room-zoom-out" aria-label="Zoom out of room" disabled>−</button>
+        </div></div>
+        <div class="canvas-wrap flight-map-wrap map-unavailable" id="map-frame">
+          <canvas id="fleet-xyChart" aria-label="Both drones XY map" aria-hidden="true"></canvas>
+          <div class="map-placeholder" id="map-placeholder" role="img" aria-label="XY map unavailable">
+            <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <path d="m5 12 10-4 10 4 10-4v23l-10 4-10-4-10 4V12Zm10-4v23m10-19v23"/>
+              <path d="M26 15a6 6 0 0 0-12 0c0 5 6 11 6 11s6-6 6-11Z"/>
+              <circle cx="20" cy="15" r="2"/>
+            </svg></div>
+            <span>Map unavailable</span>
+          </div>
+        </div>
+        <div class="map-details">
+        <p class="map-note" id="room-status" role="status">Connect a drone to discover the UWB anchor layout</p>
+        <div class="map-legend" id="map-legend" hidden><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span></div>
+        <div class="map-sources" id="map-sources" hidden><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span><span class="map-source-uwb">Raw UWB + ToF</span><span>Fused position</span></div>
+        <p class="map-note" id="map-stream-status" role="status"></p>
+        <form id="target-preview" class="target-preview">
+          <label>Target drone<select id="target-drone"><option value="drone1">Drone 1</option><option value="drone2">Drone 2</option></select></label>
+          <label>X (m)<input id="target-x" type="number" step="any" required></label>
+          <label>Y (m)<input id="target-y" type="number" step="any" required></label>
+          <button class="btn btn-outline-secondary" id="target-submit" type="submit" disabled>Preview</button>
+          <button class="btn btn-outline-secondary" id="target-clear" type="button" disabled>Clear</button>
+          <button class="btn btn-primary" id="target-send" type="button" disabled>Send target</button>
+          <button class="btn btn-outline-secondary" id="target-stop" type="button" disabled>Stop target</button>
+        </form>
+        <p class="map-note" id="target-command-status" role="status" aria-live="polite"></p>
+        <p class="map-note target-status" id="target-status" role="status" aria-live="polite"></p>
+        </div>
       </section></div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
     </section>
@@ -55,6 +84,8 @@
             <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
           </div>
           <div class="status-grid" aria-label="Drone 1 status">
+            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div><small data-field="fusionStatus" role="status">Waiting for fusion</small></div>
+            <div class="status-card localization-card"><p>Raw position · UWB + ToF</p><div data-field="localizationPosition">—</div><small data-field="localizationStatus" role="status">Waiting for localization</small></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
@@ -81,6 +112,8 @@
             <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
           </div>
           <div class="status-grid" aria-label="Drone 2 status">
+            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div><small data-field="fusionStatus" role="status">Waiting for fusion</small></div>
+            <div class="status-card localization-card"><p>Raw position · UWB + ToF</p><div data-field="localizationPosition">—</div><small data-field="localizationStatus" role="status">Waiting for localization</small></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">

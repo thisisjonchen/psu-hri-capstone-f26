@@ -30,7 +30,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    ```
 7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
 8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
-10. To control it, on your laptop/base station, clone this repo. Open the website at `packages/pidrone_pkg/web/index.html`.
+10. To control it, on your laptop/base station, clone this repo and open `src/web/index.html`. Alternatively, run `python3 -m http.server 8000 --directory src` from the repository root and open `http://localhost:8000/web/index.html`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
@@ -98,6 +98,34 @@ catkin_make
 source devel/setup.bash
 ```
 2. Done!
+
+## Camera + UWB + ToF Localization
+
+The UWB ROS node publishes horizontal position from the DWM1001 tag and vertical
+position from ToF. See [localization setup and operation](scripts/localization/README.md)
+for board configuration, Python/ROS dependencies, calibration and tests.
+
+After building the package, run on each drone:
+
+```bash
+roslaunch pidrone_pkg uwb_localization.launch port:=/dev/serial/by-id/YOUR_UWB_TAG
+roslaunch pidrone_pkg fusion_localization.launch room_yaw_offset:=YOUR_MEASURED_OFFSET_RADIANS
+```
+
+The UWB Screen window reads the port from `PALS_UWB_PORT`, exported before starting
+Screen. The dashboard shows each drone's position and localization health, plus a
+UWB marker on the shared map. It discovers the four corner anchors through
+`/pidrone/localization/anchors`; rebuild and source the workspace on both drones
+to generate the new `AnchorLayout` message. Use the tag's actual persistent device path: the
+flight controller already uses `/dev/ttyACM0` or `/dev/ttyACM1`.
+
+The **SE** Screen window now runs camera/UWB fusion and publishes the controller's
+continuous local state; do not also run EMA. Export `PALS_ROOM_YAW_OFFSET` before
+starting Screen: measured forward heading in the room minus IMU yaw, in radians.
+Without heading calibration, room fusion and target sending remain unavailable.
+The dashboard displays fused and raw positions and provides explicit **Send target**
+and **Stop target** controls. ToF remains the height source. See the setup link above
+for frame conventions, sensor-loss behavior and required hardware validation.
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session

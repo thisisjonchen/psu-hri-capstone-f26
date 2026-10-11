@@ -1,0 +1,288 @@
+#!/usr/bin/env python
+"""Camera/UWB room localization with continuous local controller odometry."""
+import math
+import threading
+
+import numpy as np
+import rospy
+import tf
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
+from nav_msgs.msg import Odometry
+from pidrone_pkg.msg import AnchorLayout, State
+from sensor_msgs.msg import Imu, Range
+from std_msgs.msg import Bool, UInt32
+
+from localization.fusion import PlanarFusion, body_angle, rotate
+from localization.position import PositionCombiner
+from localization.uwb_locator import Position, monotonic
+
+
+class FusionLocalizationNode(object):
+    def __init__(self):
+        self.lock = threading.RLock()
+        offset = rospy.get_param('~room_yaw_offset', '')
+        self.filter = PlanarFusion(
+            yaw_offset=None if offset == '' else float(offset),
+            velocity_stddev=float(rospy.get_param('~velocity_stddev', 0.12)),
+            drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
+            velocity_tau=float(rospy.get_param('~velocity_tau', 0.08)),
+            max_gap=float(rospy.get_param('~flow_timeout', 0.25)),
+            gate=float(rospy.get_param('~innovation_gate', 9.21)),
+            max_innovation=float(rospy.get_param('~max_innovation', 1.0)))
+        self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
+        self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
+        self.frame = rospy.get_param('~frame_id', 'map')
+        self.odom_frame = rospy.get_param('~odom_frame', 'odom')
+        self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
+        self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
+        if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
+                or not all((self.frame, self.odom_frame, self.body_frame))
+                or not all(np.isfinite(v) and v > 0 for v in (self.timeout, self.skew, self.flow_limit))
+                or not np.isfinite(self.angular_comp)):
+            raise ValueError('Invalid fusion frames, limits or timeouts')
+        self.height = PositionCombiner(
+            stale_after=self.timeout, max_skew=self.skew,
+            floor_z=float(rospy.get_param('~floor_z', 0.0)),
+            tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
+        self.imu = None
+        self.flow_valid = False
+        self.pending = []
+        self.layout = None
+        self.layout_stamp = None
+        self.layout_active = False
+        self.generation = 0
+        self.last_time = None
+        self.reason = 'Waiting for sensors'
+        self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
+        self.pose_pub = rospy.Publisher('pidrone/localization/fused', PoseWithCovarianceStamped, queue_size=1)
+        self.odom_pub = rospy.Publisher('pidrone/localization/odometry', Odometry, queue_size=1)
+        self.status_pub = rospy.Publisher('pidrone/localization/fusion_status', DiagnosticArray, queue_size=1)
+        self.local_pub = rospy.Publisher('pidrone/localization/local_ready', Bool, queue_size=1)
+        self.ready_pub = rospy.Publisher('pidrone/localization/ready', Bool, queue_size=1)
+        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1)
+        self.broadcaster = tf.TransformBroadcaster()
+        self.subscribers = [
+            rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
+            rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
+            rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
+            rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
+            rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
+
+    def fresh(self, stamp, now, timeout=None):
+        return stamp is not None and 0 <= now - stamp <= (self.timeout if timeout is None else timeout)
+
+    def invalidate_room(self):
+        self.filter.reset_room()
+        self.pending = []
+        self.generation += 1
+
+    def imu_callback(self, msg):
+        with self.lock:
+            q = msg.orientation
+            quaternion = np.array([q.x, q.y, q.z, q.w], dtype=float)
+            stamp = msg.header.stamp.to_sec()
+            omega = np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z])
+            self.height.update_attitude(tuple(quaternion), stamp, monotonic(), msg.orientation_covariance[0] != -1)
+            if (self.height.attitude is None or not self.fresh(stamp, rospy.get_time())
+                    or not np.all(np.isfinite(omega))):
+                self.imu = None
+                return
+            if self.imu is not None and stamp <= self.imu[0]:
+                return
+            quaternion /= np.linalg.norm(quaternion)
+            self.imu = (stamp, tf.transformations.euler_from_quaternion(quaternion), omega, quaternion)
+
+    def range_callback(self, msg):
+        with self.lock:
+            self.height.update_range(msg.range, msg.min_range, msg.max_range,
+                                     msg.header.stamp.to_sec(), monotonic())
+
+    def flow_callback(self, msg):
+        with self.lock:
+            now = rospy.get_time()
+            stamp = msg.header.stamp.to_sec()
+            sample, _ = self.height.combine(Position(0, 0, 0, 100, monotonic()), monotonic(), now)
+            if (sample is None or self.imu is None or not self.fresh(self.imu[0], now)
+                    or not self.fresh(stamp, now, self.filter.max_gap)
+                    or max(stamp, self.imu[0], sample.stamp) - min(stamp, self.imu[0], sample.stamp) > self.skew
+                    or msg.header.frame_id != self.body_frame):
+                self.flow_valid = False
+                return
+            velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
+            # Preserve the existing EMA's rotational-flow compensation.
+            velocity -= self.imu[2][:2] * (sample.z - self.height.floor_z) * self.angular_comp
+            if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
+                self.flow_valid = False
+                return
+            if self.filter.update_flow(velocity, self.imu[1][2], stamp):
+                self.flow_valid = True
+
+    def uwb_callback(self, msg):
+        with self.lock:
+            stamp = msg.header.stamp.to_sec()
+            if msg.header.frame_id != self.frame or not self.fresh(stamp, rospy.get_time()):
+                return
+            p, c = msg.pose.pose.position, msg.pose.covariance
+            self.pending.append((stamp, (p.x, p.y), [[c[0], c[1]], [c[6], c[7]]]))
+            self.pending = sorted(self.pending, key=lambda item: item[0])[-20:]
+
+    def anchors_callback(self, msg):
+        with self.lock:
+            stamp = msg.header.stamp.to_sec()
+            positions = [(p.x, p.y, p.z) for p in msg.positions]
+            valid = (msg.header.frame_id == self.frame and len(msg.anchor_ids) == len(positions) == 4
+                     and len(set(msg.anchor_ids)) == 4 and all(msg.anchor_ids)
+                     and np.all(np.isfinite(positions)) and self.fresh(stamp, rospy.get_time()))
+            if valid:
+                # All four surveyed anchors must form a nondegenerate convex outline.
+                xy = np.asarray(positions)[:, :2]
+                center = xy.mean(axis=0)
+                order = np.argsort(np.arctan2(xy[:, 1] - center[1], xy[:, 0] - center[0]))
+                hull = xy[order]
+                edges = np.roll(hull, -1, axis=0) - hull
+                turns = [edges[i, 0] * edges[(i + 1) % 4, 1] - edges[i, 1] * edges[(i + 1) % 4, 0] for i in range(4)]
+                valid = all(t > 1e-6 for t in turns)
+            if not valid:
+                if self.layout_active:
+                    self.invalidate_room()
+                self.layout_active = False
+                return
+            if self.layout_stamp is not None and stamp <= self.layout_stamp:
+                return
+            layout = sorted(zip(msg.anchor_ids, positions))
+            changed = self.layout is not None and (
+                [a[0] for a in layout] != [a[0] for a in self.layout]
+                or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout], atol=0.02, rtol=0))
+            if changed:
+                self.invalidate_room()
+            if self.layout is None or changed:
+                self.layout = layout
+            self.layout_stamp, self.layout_active = stamp, True
+
+    def step(self):
+        with self.lock:
+            now = rospy.get_time()
+            if self.last_time is not None and now < self.last_time:
+                old = self.filter
+                old.stamp = None
+                old.history.clear()
+                old.velocity[:] = 0
+                self.invalidate_room()
+                self.height.range = self.height.attitude = self.imu = None
+                self.flow_valid = self.layout_active = False
+                self.layout_stamp = None
+            self.last_time = now
+            if self.layout_active and not self.fresh(self.layout_stamp, now):
+                self.layout_active = False
+                self.invalidate_room()
+            height, height_reason = self.height.combine(Position(0, 0, 0, 100, monotonic()), monotonic(), now)
+            local_ready = bool(height and self.imu and self.fresh(self.imu[0], now)
+                               and self.flow_valid and self.fresh(self.filter.stamp, now, self.filter.max_gap))
+            if not local_ready:
+                self.invalidate_if_tracking()
+            remaining = []
+            for stamp, position, covariance in self.pending:
+                if not self.fresh(stamp, now) or not self.layout_active or not local_ready:
+                    continue
+                if self.filter.stamp is None or stamp > self.filter.stamp:
+                    remaining.append((stamp, position, covariance))
+                else:
+                    _, self.reason = self.filter.update_uwb(position, covariance, stamp)
+            self.pending = remaining
+            ready = bool(local_ready and self.layout_active and self.filter.room is not None
+                         and self.fresh(self.filter.uwb_stamp, now))
+            if not ready and self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
+                self.invalidate_room()
+            reason = ('OK' if ready else 'Room heading is not calibrated' if self.filter.yaw_offset is None
+                      else height_reason if height is None else 'Camera/IMU unavailable' if not local_ready
+                      else 'Four live anchors required' if not self.layout_active else self.reason)
+            self.local_pub.publish(Bool(data=local_ready))
+            self.ready_pub.publish(Bool(data=ready))
+            self.generation_pub.publish(UInt32(data=self.generation))
+            if height and self.imu and self.fresh(self.imu[0], now):
+                self.publish_estimates(height, local_ready, ready)
+            status = DiagnosticStatus()
+            status.name, status.hardware_id = 'fusion_localization', 'camera+uwb+imu+tof'
+            status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
+            status.message = reason
+            status.values = [KeyValue(key='height_source', value='ToF'),
+                             KeyValue(key='local_ready', value=str(local_ready)),
+                             KeyValue(key='frame_id', value=self.frame),
+                             KeyValue(key='last_uwb_result', value=self.reason)]
+            diagnostics = DiagnosticArray()
+            diagnostics.header.stamp = rospy.Time.from_sec(now)
+            diagnostics.status = [status]
+            self.status_pub.publish(diagnostics)
+
+    def invalidate_if_tracking(self):
+        if self.filter.room is not None:
+            self.invalidate_room()
+
+    def publish_estimates(self, height, local_ready, ready):
+        roll, pitch, yaw = self.imu[1]
+        angle = body_angle(yaw)
+        quaternion = tf.transformations.quaternion_multiply(self.imu[3],
+            tf.transformations.quaternion_from_euler(0, 0, -math.pi / 2.0))
+        state = State()
+        state.header.frame_id = self.odom_frame
+        # Preserve sensor age, even when publishing cached odometry for altitude control.
+        state.header.stamp = rospy.Time.from_sec(height.stamp)
+        p, q = state.pose_with_covariance.pose.position, state.pose_with_covariance.pose.orientation
+        p.x, p.y, p.z = self.filter.odom[0], self.filter.odom[1], height.z - self.height.floor_z
+        q.x, q.y, q.z, q.w = quaternion
+        state.pose_with_covariance.covariance[0] = state.pose_with_covariance.covariance[7] = 1e6
+        state.pose_with_covariance.covariance[14] = 0.03 ** 2
+        for index in (21, 28, 35):
+            state.pose_with_covariance.covariance[index] = 0.15 ** 2
+        velocity = rotate(self.filter.velocity, -angle) if local_ready else np.zeros(2)
+        state.twist_with_covariance.twist.linear.x, state.twist_with_covariance.twist.linear.y = velocity
+        omega = state.twist_with_covariance.twist.angular
+        omega.x, omega.y, omega.z = -self.imu[2][1], self.imu[2][0], self.imu[2][2]
+        state.twist_with_covariance.covariance[0] = state.twist_with_covariance.covariance[7] = self.filter.velocity_variance
+        for index in (14, 21, 28, 35):
+            state.twist_with_covariance.covariance[index] = 1e6
+        self.state_pub.publish(state)
+        if not local_ready:
+            return
+        odometry = Odometry()
+        odometry.header.frame_id, odometry.child_frame_id = self.odom_frame, self.body_frame
+        odometry.header.stamp = rospy.Time.from_sec(min(height.stamp, self.filter.stamp))
+        odometry.pose, odometry.twist = state.pose_with_covariance, state.twist_with_covariance
+        self.odom_pub.publish(odometry)
+        self.broadcaster.sendTransform((p.x, p.y, p.z), quaternion, odometry.header.stamp, self.body_frame, self.odom_frame)
+        if not ready:
+            return
+        pose = PoseWithCovarianceStamped()
+        pose.header.frame_id = self.frame
+        pose.header.stamp = odometry.header.stamp
+        p = pose.pose.pose.position
+        p.x, p.y, p.z = self.filter.room[0], self.filter.room[1], height.z
+        q = pose.pose.pose.orientation
+        q.x, q.y, q.z, q.w = tf.transformations.quaternion_multiply(
+            tf.transformations.quaternion_from_euler(0, 0, self.filter.yaw_offset), quaternion)
+        covariance = self.filter.covariance
+        pose.pose.covariance[0], pose.pose.covariance[1] = covariance[0]
+        pose.pose.covariance[6], pose.pose.covariance[7] = covariance[1]
+        pose.pose.covariance[14] = 0.03 ** 2
+        for index in (21, 28, 35):
+            pose.pose.covariance[index] = 0.15 ** 2
+        self.pose_pub.publish(pose)
+        translation = self.filter.room - rotate(self.filter.odom, self.filter.yaw_offset)
+        self.broadcaster.sendTransform((translation[0], translation[1], self.height.floor_z),
+            tf.transformations.quaternion_from_euler(0, 0, self.filter.yaw_offset),
+            pose.header.stamp, self.odom_frame, self.frame)
+
+
+def main():
+    rospy.init_node('fusion_localization')
+    node = FusionLocalizationNode()
+    rate = rospy.Rate(60)
+    while not rospy.is_shutdown():
+        node.step()
+        rate.sleep()
+
+
+if __name__ == '__main__':
+    main()
