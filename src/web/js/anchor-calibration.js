@@ -1,5 +1,11 @@
 'use strict';
 
+const anchorNames = Object.freeze({ '4D12': 'Tag 6', '980C': 'Tag 5', '9781': 'Tag 4', 'CA83': 'Tag 3' });
+function anchorLabel(id) {
+  const hardwareId = id.toUpperCase();
+  return anchorNames[hardwareId] ? anchorNames[hardwareId] + ' (' + hardwareId + ')' : hardwareId;
+}
+
 class AnchorCalibration {
   constructor() {
     this.state = null;
@@ -56,7 +62,7 @@ class AnchorCalibration {
           this.state.boards.forEach(board => {
             const option = document.createElement('option');
             option.value = board.ble;
-            option.textContent = board.id + (!board.active ? ' · Unavailable' : '');
+            option.textContent = anchorLabel(board.id) + (!board.active ? ' · Unavailable' : '');
             option.disabled = !board.active;
             select.appendChild(option);
           });
@@ -146,7 +152,7 @@ class AnchorCalibration {
     // Present rows from top to bottom; the solver retains its counterclockwise order.
     preview.textContent = fresh && state.preview ? [3, 2, 0, 1]
       .map(index => state.preview.positions[index]).filter(Boolean).map((p, i) =>
-        'Corner ' + (i + 1) + ' (' + corners[i] + ') · ' + p.id +
+        'Corner ' + (i + 1) + ' (' + corners[i] + ') · ' + anchorLabel(p.id) +
         ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ' m').join('\n') : '';
   }
 }

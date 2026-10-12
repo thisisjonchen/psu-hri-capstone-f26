@@ -727,10 +727,12 @@ test('laptop calibration retains flight inhibition when its server becomes unava
 
 test('laptop calibration with only Drone 2 requires disarmed state and sends the reviewed layout through HTTP', () => {
   const app = dashboard(), service = app.connect('drone2');
-  const boards = Array.from({ length: 4 }, (_, i) => ({ id: '000' + (i + 1), ble: 'uuid-' + i, active: true, initiator: i === 0 }));
+  const boards = ['4d12', '980C', '9781', 'CA83'].map((id, i) => ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
   const state = { stage: 'idle', message: 'Select anchors', boards, reserved: false, grounded: true, preview: null, token: null };
   const status = () => app.anchorCalibration.update({ ...state });
   status();
+  assert.deepEqual(app.elements.get('calibration-anchor-0').children.slice(1).map(option => option.textContent),
+    ['Tag 6 (4D12)', 'Tag 5 (980C)', 'Tag 4 (9781)', 'Tag 3 (CA83)']);
   app.anchorCalibration.request('scan');
   assert.equal(app.calibrationRequests.length, 0);
   app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
@@ -749,6 +751,7 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
+  assert.match(app.elements.get('calibration-preview').textContent, /Corner 1 \(Top Left\) · Tag 3 \(CA83\)/);
   app.receive(service, '/pidrone/localization/calibration_locked', { data: true });
   assert.equal(app.fleetMap.layoutUsable, false);
   app.dispatch('arm');

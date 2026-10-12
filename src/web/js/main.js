@@ -248,8 +248,11 @@ class FleetMap {
     ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.fillStyle = '#58677b';
     this.room.anchors.forEach(anchor => {
-      ctx.fillText(anchor.name, chart.scales['room-x'].getPixelForValue(anchor.x) + 9,
-        chart.scales['room-y'].getPixelForValue(anchor.y) - 9);
+      const label = anchorLabel(anchor.name);
+      const x = Math.min(chart.scales['room-x'].getPixelForValue(anchor.x) + 9,
+        area.right - ctx.measureText(label).width - 4);
+      const y = Math.max(area.top + 14, chart.scales['room-y'].getPixelForValue(anchor.y) - 9);
+      ctx.fillText(label, x, y);
     });
     ctx.restore();
   }
