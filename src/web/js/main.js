@@ -21,6 +21,8 @@ function roomTick(value, index, ticks) {
 class FleetMap {
   constructor() {
     this.room = null;
+    this.calibratedRoom = null;
+    this.calibrationRevision = null;
     this.targets = {};
     this.zoom = 1;
     this.anchorReports = {};
@@ -110,6 +112,26 @@ class FleetMap {
     return { frame, margin, anchors, xMin, xMax, yMin, yMax };
   }
 
+  updateCalibratedLayout(layout) {
+    if (!layout) {
+      this.calibratedRoom = null;
+      this.calibrationRevision = null;
+    } else if (layout.revision !== this.calibrationRevision) {
+      const positions = layout.positions;
+      if (typeof layout.revision !== 'string' || !layout.revision || roomFrame(layout.frame) !== 'map' ||
+          !Array.isArray(positions) || positions.length !== 4 ||
+          !positions.every(p => p && /^[0-9a-f]{4}$/i.test(p.id) &&
+            [p.x, p.y, p.z].every(Number.isFinite)) ||
+          new Set(positions.map(p => p.id.toUpperCase())).size !== 4) return;
+      try {
+        this.calibratedRoom = this.makeRoom('map', positions.map(p =>
+          ({ name: p.id.toUpperCase(), x: p.x, y: p.y, z: p.z })));
+        this.calibrationRevision = layout.revision;
+      } catch (error) { return; }
+    }
+    this.refreshAnchors();
+  }
+
   updateAnchors(id, message) {
     const receivedAt = Date.now();
     const stamp = message.header && message.header.stamp;
@@ -160,15 +182,12 @@ class FleetMap {
     const live = Object.entries(this.anchorReports).filter(([id, report]) =>
       drones[id].connected && now - report.receivedAt <= 1500);
     const complete = live.filter(([, report]) => report.completeRoom && now - report.completeAt <= 1500);
-    const candidate = complete.length ? complete[0][1].completeRoom : null;
+    const candidate = this.calibratedRoom || (complete.length ? complete[0][1].completeRoom : null);
     const bad = live.find(([, report]) => report.error || (candidate && !this.matchesRoom(candidate, report)));
     this.layoutUsable = !!candidate && !bad;
     if (wasUsable && !this.layoutUsable) Object.values(drones).forEach(drone => drone.publish('cancelRoomTarget', {}));
-    let status;
-    if (bad) {
-      status = bad[1].error || 'Anchor layouts disagree between drones';
-      status += '. Map updates and target editing are paused.';
-    } else if (candidate) {
+    // A Bluetooth-verified outline can be displayed before tags report it.
+    if (candidate && (this.calibratedRoom || !bad)) {
       if (!this.room || this.room.anchors.length !== candidate.anchors.length || !this.matchesRoom(this.room, candidate)) {
         if (this.room) {
           Object.values(drones).forEach(drone => drone.publish('cancelRoomTarget', {}));
@@ -186,7 +205,14 @@ class FleetMap {
         this.chart.options.scales.xAxes[0].display = true;
         this.chart.options.scales.yAxes[0].display = true;
       }
-      status = '';
+    }
+    let status;
+    if (bad) {
+      status = bad[1].error || 'Anchor layouts disagree between drones';
+      status += '. Map updates and target editing are paused.';
+    } else if (candidate) {
+      status = this.calibratedRoom && !live.some(([, report]) => report.anchors.length)
+        ? 'Waiting for drone positions.' : '';
     } else {
       status = Object.values(drones).some(drone => drone.connected)
         ? 'Waiting for a complete report of four UWB corner anchors'

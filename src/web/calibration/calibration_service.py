@@ -60,7 +60,7 @@ class AnchorCalibration:
         self.preview_at = None
         self.boards = saved.get('recovery_boards', []) if self.dirty else []
         self.state = {'stage': 'idle', 'message': 'Connect and disarm at least one drone to scan for anchors.',
-                      'boards': self.boards, 'preview': None, 'token': None}
+                      'boards': self.boards, 'preview': None, 'token': None, 'layout': None}
         if self.dirty:
             self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
         owner = saved.get('owner', str(uuid.uuid4()))
@@ -129,6 +129,8 @@ class AnchorCalibration:
         self.state.update(preview=None, token=None)
 
     def mark_write(self):
+        with self.lock:
+            self.state['layout'] = None
         self.dirty = True
         self.persist()
 
@@ -192,10 +194,12 @@ class AnchorCalibration:
                 self.guard.reserve(False)
                 self.dirty = self.reserved = False
                 self.persist()
+                layout = {'revision': self.state['token'], 'frame': 'map',
+                          'positions': copy.deepcopy(self.preview['positions'])}
                 self.preview = None
                 self.preview_at = None
                 self.update('complete', 'Layout saved and verified.',
-                            token=None, preview=None)
+                            token=None, preview=None, layout=layout)
         except Exception as error:
             logging.warning('Anchor calibration: %s', error)
             self.preview = None

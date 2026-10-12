@@ -164,7 +164,9 @@ The laptop dashboard server uses its Bluetooth to calibrate four DWM1001 PANS an
 The drones read localization through their USB tags; they do not need Bluetooth.
 Calibration measures all six inter-anchor distances, fits XY with shared Z = 0,
 and verifies saved coordinates by reading them back from all four anchors through BLE.
-The map uses live tag reports only, with no offline layout.
+The map uses live tag reports or the Bluetooth-verified layout from the current
+server session. Calibrated coordinates are not restored from disk; drone positions
+always come from live telemetry.
 
 From the repository root on your laptop (macOS or Linux, Python 3.9+):
 

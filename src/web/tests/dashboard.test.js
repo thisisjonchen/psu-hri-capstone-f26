@@ -727,6 +727,54 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.layoutUsable, true);
 });
 
+test('verified calibration displays the room before a complete tag report and uses live positions', () => {
+  const app = dashboard({ discover: false }), map = app.fleetMap, drone = app.connect('drone2');
+  const report = anchorsAt(100, [[0, 0, 0], [3, 0, 0], [3, 6, 0], [0, 6, 0]]);
+  const layout = { revision: 'saved-layout', frame: 'map', positions:
+    report.positions.map((p, i) => ({ ...p, id: report.anchor_ids[i] })) };
+  const state = { stage: 'complete', message: 'Layout saved and verified.', boards: [],
+    selection: ['ws://drone2.local:9090'], grounded: true, reserved: false, layout };
+  assert.equal(app.elements.get('map-placeholder').hidden, false);
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(map.room.xMax, 3);
+  assert.equal(map.room.yMax, 6);
+  assert.equal(map.chart.data.datasets.find(d => d.key === 'anchors').data.length, 5);
+  assert.equal(app.elements.get('room-status').textContent, 'Waiting for drone positions.');
+  map.previewTarget('drone2', 1, 2);
+  app.elements.get('target-drone').value = 'drone2';
+  app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
+  const pose = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
+    pose: { pose: { position: { x: 1, y: 2, z: .4 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } };
+  app.receive(drone, '/pidrone/localization/fused', pose);
+  app.receive(drone, '/pidrone/localization/ready', { data: true });
+  map.sendTarget();
+  assert.equal(drone.publishers.roomTarget.messages.length, 0);
+  app.receive(drone, '/pidrone/localization/anchors', {
+    ...report, anchor_ids: report.anchor_ids.slice(0, 3), positions: report.positions.slice(0, 3) });
+  app.receive(drone, '/pidrone/localization/pose', localizationAt(100, 1, 2, .4));
+  assert.equal(sharedMarker(app, 'drone2', 'uwb0').data.length, 2);
+  map.sendTarget();
+  assert.equal(drone.publishers.roomTarget.messages.length, 1);
+  app.anchorCalibration.update(state);
+  assert.equal(map.targets.drone2.x, 1);
+  app.advanceTime(1600);
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(app.elements.get('target-send').disabled, true);
+  assert.equal(sharedMarker(app, 'drone2', 'uwb0').stale, true);
+  const changed = anchorsAt(101, [[0, 0, 0], [4, 0, 0], [4, 6, 0], [0, 6, 0]]);
+  app.receive(drone, '/pidrone/localization/anchors', changed);
+  assert.equal(map.room.xMax, 3);
+  assert.equal(map.layoutUsable, false);
+  app.anchorCalibration.update({ ...state, layout: { ...layout, revision: 'resaved-layout',
+    positions: changed.positions.map((p, i) => ({ ...p, id: changed.anchor_ids[i] })) } });
+  assert.equal(map.room.xMax, 4);
+  assert.equal(map.layoutUsable, true);
+  assert.equal(Object.keys(map.targets).length, 0);
+  assert.equal(sharedMarker(app, 'drone2', 'uwb0').data.length, 0);
+});
+
 test('ROS tag results stay isolated and include tag zero and multiple tags', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');

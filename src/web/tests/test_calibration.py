@@ -204,6 +204,7 @@ class CoordinatorTest(unittest.TestCase):
         self.guard.owner = 'laptop'
         self.guard.claimed = False
         self.guard.participants = None
+        self.guard.selection = []
         def prepare():
             self.guard.participants = ['ws://drone2.local:9090']
             return list(self.guard.participants)
@@ -292,6 +293,20 @@ class CoordinatorTest(unittest.TestCase):
         self.assertFalse(self.node.reserved)
         self.assertEqual(self.node.state['stage'], 'complete')
         self.guard.reserve.assert_called_once_with(False)
+        layout = self.node.status()['layout']
+        self.assertEqual(layout['frame'], 'map')
+        self.assertEqual(layout['positions'], solve_layout(BOARDS, ROWS)['positions'])
+        self.node.run(self.measure)
+        self.assertEqual(self.node.status()['layout'], layout)
+        def fail(positions, guard, on_write):
+            on_write()
+            raise ValueError('BLE write outcome unknown')
+        self.ble.save.side_effect = fail
+        self.node.run(dict(action='apply', token=self.node.state['token']))
+        self.assertIsNone(self.node.status()['layout'])
+        self.node.close()
+        self.node = self.create()
+        self.assertIsNone(self.node.status()['layout'])
 
 
 class FlightOwnershipTest(unittest.TestCase):

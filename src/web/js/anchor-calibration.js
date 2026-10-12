@@ -31,7 +31,7 @@ class AnchorCalibration {
     this.receivedAt = Date.now();
     this.pendingAt = null;
     this.refresh();
-    if (fleetMap) fleetMap.refreshAnchors();
+    if (fleetMap) fleetMap.updateCalibratedLayout(state.layout);
   }
 
   async poll() {
