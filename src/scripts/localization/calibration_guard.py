@@ -3,24 +3,28 @@ from __future__ import division
 
 import json
 import threading
+import uuid
 
 from localization.uwb_locator import monotonic
 
-LOCK = '/pidrone/localization/calibration_lock'
+LOCK = '/pidrone/localization/calibration_owner/request'
+OWNER = '/pidrone/localization/calibration_owner/status'
 ACK = '/pidrone/localization/calibration_locked'
 ANCHORS = '/pidrone/localization/anchors'
 
 
 class BridgeGuard(object):
-    def __init__(self, urls):
+    def __init__(self, urls, owner, claimed=False):
         import websocket
         self.websocket = websocket
         if len(urls) != 2 or len(set(urls)) != 2:
             raise ValueError('Configure two distinct drone rosbridge URLs')
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
+        self.owner = owner
+        self.claimed = claimed
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
-                       'locked': None, 'ack_at': 0, 'anchor_seq': 0,
+                       'locked': None, 'ack_at': 0, 'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
                        'anchors': None, 'anchors_at': 0, 'anchor_stamp': None} for url in urls]
         for peer in self.peers:
             worker = threading.Thread(target=self.watch, args=(peer,))
@@ -41,8 +45,9 @@ class BridgeGuard(object):
                 socket = websocket.create_connection(peer['url'], timeout=1)
                 with self.lock:
                     peer['socket'] = socket
-                self.send(peer, {'op': 'advertise', 'topic': LOCK, 'type': 'std_msgs/Bool', 'latch': True})
+                self.send(peer, {'op': 'advertise', 'topic': LOCK, 'type': 'std_msgs/String'})
                 for topic, kind in (('/pidrone/mode', 'pidrone_pkg/Mode'), (ACK, 'std_msgs/Bool'),
+                                    (OWNER, 'std_msgs/String'),
                                     (ANCHORS, 'pidrone_pkg/AnchorLayout')):
                     self.send(peer, {'op': 'subscribe', 'topic': topic, 'type': kind, 'queue_length': 1})
                 while not self.stop_event.is_set():
@@ -58,7 +63,7 @@ class BridgeGuard(object):
             finally:
                 with self.lock:
                     peer['socket'] = None
-                    peer['mode_at'] = peer['ack_at'] = peer['anchors_at'] = 0
+                    peer['mode_at'] = peer['ack_at'] = peer['owner_at'] = peer['anchors_at'] = 0
                     peer['anchor_stamp'] = None
                 if socket is not None:
                     socket.close()
@@ -71,6 +76,15 @@ class BridgeGuard(object):
                 peer['mode'], peer['mode_at'] = message.get('mode'), now
             elif topic == ACK and type(message.get('data')) is bool:
                 peer['locked'], peer['ack_at'] = message['data'], now
+            elif topic == OWNER and isinstance(message.get('data'), type(u'')):
+                try:
+                    status = json.loads(message['data'])
+                    if isinstance(status['owner'], type(u'')) and isinstance(status['request'], type(u'')):
+                        peer['owner'], peer['request'], peer['owner_at'] = status['owner'], status['request'], now
+                        if status['owner'] == self.owner:
+                            self.claimed = True
+                except (ValueError, KeyError, TypeError):
+                    pass
             elif topic == ANCHORS:
                 try:
                     stamp = message['header']['stamp']
@@ -83,7 +97,7 @@ class BridgeGuard(object):
                 except (KeyError, TypeError, ValueError):
                     pass
 
-    def check(self, locked=False):
+    def check(self, locked=False, allow_other=False):
         now = monotonic()
         with self.lock:
             for peer in self.peers:
@@ -91,21 +105,55 @@ class BridgeGuard(object):
                     raise ValueError('Fresh flight state required from both drones')
                 if peer['mode'] != 'DISARMED':
                     raise ValueError('Disarm both drones before calibration')
-                if locked and (peer['locked'] is not True or not 0 <= now - peer['ack_at'] <= 0.5):
+                if not allow_other and (not 0 <= now - peer['owner_at'] <= 0.5 or peer['owner'] is None):
+                    raise ValueError('Fresh calibration ownership required; update both flight controllers')
+                if not allow_other and peer['owner'] not in ('', self.owner):
+                    raise ValueError('Anchor calibration is owned by another coordinator')
+                if locked and (peer['owner'] != self.owner or peer['locked'] is not True
+                               or not 0 <= now - peer['ack_at'] <= 0.5):
                     raise ValueError('Both flight controllers must acknowledge the calibration lock')
 
     def set_locked(self, value):
-        self.check()
         with self.lock:
+            had_claim = self.claimed or any(p['owner'] == self.owner for p in self.peers)
+        try:
+            self.change_lock(value)
+        except Exception:
+            if value and self.claimed and not had_claim:
+                # A competing coordinator may have won one master. Release only our claims.
+                try:
+                    self.change_lock(False)
+                except Exception:
+                    pass  # Keep the reservation if either release is unconfirmed.
+            raise
+
+    def change_lock(self, value):
+        self.check(allow_other=not value)
+        nonce = str(uuid.uuid4())
+        with self.lock:
+            if value:
+                self.claimed = True
             for peer in self.peers:
-                peer['ack_at'] = 0
-                self.send(peer, {'op': 'publish', 'topic': LOCK, 'msg': {'data': value}})
+                peer['ack_at'] = peer['owner_at'] = 0
+                request = json.dumps({'owner': self.owner, 'action': 'acquire' if value else 'release', 'request': nonce})
+                self.send(peer, {'op': 'publish', 'topic': LOCK, 'msg': {'data': request}})
         deadline = monotonic() + 3
         while monotonic() < deadline:
-            self.check()
+            # Wait for new acknowledgments after publishing; old ownership cannot confirm a change.
+            now = monotonic()
             with self.lock:
-                if all(p['locked'] is value and p['ack_at'] > 0 for p in self.peers):
-                    return
+                fresh = all(p['request'] == nonce and p['owner_at'] > 0 and p['ack_at'] > 0 and
+                            0 <= now - p['owner_at'] <= 0.5 and 0 <= now - p['ack_at'] <= 0.5
+                            for p in self.peers)
+                if fresh:
+                    self.check(allow_other=not value)
+                    if all((p['owner'] == self.owner and p['locked'] is True) if value else
+                           p['owner'] != self.owner for p in self.peers):
+                        self.claimed = value
+                        return
+                for peer in self.peers:
+                    if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5 or peer['mode'] != 'DISARMED':
+                        raise ValueError('Fresh disarmed flight state required from both drones')
             if self.stop_event.wait(0.05):
                 break
         raise ValueError('Flight-controller calibration lock was not acknowledged on both drones')

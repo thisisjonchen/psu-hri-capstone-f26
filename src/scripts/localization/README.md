@@ -153,13 +153,13 @@ If an anchor moves, recalibrate before using room targets again.
 
 ### Dashboard anchor calibration
 
-Drone 1 hosts a Bluetooth calibration coordinator for four DWM1001 PANS anchors.
+Either drone can host a Bluetooth calibration coordinator for four DWM1001 PANS anchors.
 It triggers PANS inter-anchor ranging, fits XY using all six pairwise distances with
 all anchor Z coordinates fixed at 0, previews the result, then writes and reads back each anchor.
 The room map continues to use live tag reports only; there is no offline layout.
 Calibration is an explicit grounded operation, not continuous tracking of moving anchors.
 
-On **Drone 1**, rebuild the Docker image to install Bluetooth support, or install
+On each Pi that will provide calibration, rebuild the Docker image to install Bluetooth support, or install
 these dependencies inside the existing ROS Kinetic container:
 
 ```bash
@@ -180,7 +180,7 @@ and UWB line of sight between each other.
 Rebuild the ROS workspace and restart the flight-controller and fusion nodes on
 **both drones** to install their calibration interlock. Start both rosbridges, tags
 and flight controllers; keep both drones disarmed. The **Calibration** Screen window
-starts the coordinator only on Drone 1. For a running Screen session, start it manually:
+starts a coordinator on either drone without checking its hostname. For a running Screen session, start it manually on either Pi:
 
 ```bash
 roslaunch pidrone_pkg anchor_calibration.launch
@@ -189,8 +189,16 @@ roslaunch pidrone_pkg anchor_calibration.launch
 
 Bridge addresses default to `ws://drone1.local:9090` and `ws://drone2.local:9090`;
 override `drone1_bridge` / `drone2_bridge` launch arguments if Pi-to-Pi name resolution
-requires different addresses. Run only one coordinator. Custom hostnames can opt
-into Screen startup on the coordinator Pi with `PALS_CALIBRATION_ENABLED=1`.
+requires different addresses. Both coordinators may run: the dashboard selects an
+available service and shows which drone it uses. Both flight controllers must grant
+that coordinator exclusive ownership before ranging or coordinate writes. A second
+coordinator cannot release its locks. Update and restart both flight controllers
+before using this version; older controllers cannot grant ownership.
+
+An idle service can be replaced automatically when it becomes unavailable. An active
+calibration stays with its original service through review, saving and recovery;
+reconnect that drone to finish or cancel it. No preview or incomplete save is transferred
+to another Pi. The selected Pi must have Bluetooth reachability to all four anchors.
 
 1. Connect **both** drones in the dashboard and open **Calibrate anchors → Scan anchors**.
 2. Select four anchors in counterclockwise physical order. First is XY origin;
@@ -224,9 +232,12 @@ Do not reset interlock parameters to bypass recovery. After any complete system
 restart, verify both tags' anchor coordinates before flight.
 
 Request/status use `/pidrone/localization/calibration/request` and `/status` on
-Drone 1 (`std_msgs/String` JSON). Each master uses
-`/pidrone/localization/calibration_lock` and `/calibration_locked` (`std_msgs/Bool`)
-for the request and periodically refreshed flight-controller acknowledgement.
+the selected drone (`std_msgs/String` JSON). Each master uses
+`/pidrone/localization/calibration_owner/request` and `/status` (`std_msgs/String`
+JSON) for exclusive ownership and acknowledgements identifying the request.
+`/pidrone/localization/calibration_locked` (`std_msgs/Bool`) continues to report
+flight inhibit to fusion and the dashboard. Legacy Boolean lock requests cannot
+override a coordinator's ownership.
 The implementation follows the [PANS API guide, section 7.2](https://forum.qorvo.com/uploads/short-url/jT6U3NQKKCCsDP0Zjh6QFMiZ3jW.pdf).
 Its BLE payload handling and full workflow require validation on your flashed boards
 before flight; the software tests use simulated BLE responses.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Ground-only BLE anchor calibration coordinator, hosted on drone1."""
+"""Ground-only BLE anchor calibration coordinator, hosted on either drone."""
 from __future__ import print_function
 
 import copy
@@ -30,7 +30,10 @@ class AnchorCalibrationNode(object):
                       'boards': self.boards, 'preview': None, 'token': None}
         if self.dirty:
             self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
-        self.guard = BridgeGuard(rospy.get_param('~bridges', ['ws://drone1.local:9090', 'ws://drone2.local:9090']))
+        owner = rospy.get_param('~owner', str(uuid.uuid4()))
+        rospy.set_param('~owner', owner)
+        self.guard = BridgeGuard(rospy.get_param('~bridges', ['ws://drone1.local:9090', 'ws://drone2.local:9090']),
+                                 owner, claimed=self.dirty)
         self.interface = int(rospy.get_param('~interface', 0))
         self.publisher = rospy.Publisher('/pidrone/localization/calibration/status', String, queue_size=1)
         self.subscriber = rospy.Subscriber('/pidrone/localization/calibration/request', String,
@@ -113,7 +116,11 @@ class AnchorCalibrationNode(object):
                 self.preview = None
                 self.preview_at = None
                 self.reserved = True  # Also recover a one-sided/unknown lock outcome.
-                self.guard.set_locked(True)
+                try:
+                    self.guard.set_locked(True)
+                except Exception:
+                    self.reserved = self.dirty or self.guard.claimed
+                    raise
                 self.update('measuring', 'Measuring distances between anchors...', preview=None, token=None)
                 rows = ble.measure(boards, self.check)
                 preview = solve_layout(boards, rows)
@@ -159,6 +166,9 @@ class AnchorCalibrationNode(object):
 
     def tick(self, _event):
         with self.lock:
+            if self.guard.claimed and not self.reserved and not self.busy:
+                self.reserved = True
+                self.update('error', 'Previous calibration still holds flight locks. Cancel or measure again.')
             if self.preview_at is not None and monotonic() - self.preview_at > 120 and not self.busy:
                 self.cancel.set()
                 self.request(String(data=json.dumps({'action': 'cancel'})))

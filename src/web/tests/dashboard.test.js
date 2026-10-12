@@ -679,25 +679,51 @@ test('disconnect clears tags and old ROS callbacks cannot overwrite a new sessio
   assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
-test('anchor calibration uses Drone 1, requires fresh disarmed peers and saves only the reviewed layout', () => {
+test('calibration switches idle services but pins active work and inhibits flight after its host disconnects', () => {
   const app = dashboard(), a = app.connect('drone1'), b = app.connect('drone2');
+  const idle = { stage: 'idle', message: 'Ready', boards: [], reserved: false, grounded: true };
+  const status = (drone, state) => app.receive(drone, '/pidrone/localization/calibration/status', { data: JSON.stringify(state) });
+  status(a, idle);
+  status(b, idle);
+  assert.equal(app.anchorCalibration.droneId, 'drone1');
+  app.advanceTime(1600);
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  status(b, idle);
+  assert.equal(app.anchorCalibration.droneId, 'drone2');
+  status(b, { ...idle, stage: 'preview', reserved: true, token: 'on-drone2', preview: { positions: [], rms: 0 } });
+  status(a, idle);
+  assert.equal(app.anchorCalibration.droneId, 'drone2');
+  b.disconnect();
+  app.anchorCalibration.refresh();
+  assert.match(app.elements.get('calibration-status').textContent, /Reconnect Drone 2/);
+  app.anchorCalibration.request('apply');
+  app.anchorCalibration.request('cancel');
+  assert.equal(a.publishers.calibrationRequest.messages.length, 0);
+  app.dispatch('arm', 'drone1');
+  assert.equal(a.publishers.mode.messages.length, 0);
+  assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
+});
+
+for (const coordinator of ['drone1', 'drone2']) test('anchor calibration through ' + coordinator + ' requires fresh disarmed peers and saves only the reviewed layout', () => {
+  const app = dashboard(), a = app.connect('drone1'), b = app.connect('drone2');
+  const service = coordinator === 'drone1' ? a : b, other = service === a ? b : a;
   const boards = Array.from({ length: 4 }, (_, i) => ({ id: '000' + (i + 1), ble: 'ble-' + i, active: true, initiator: i === 0 }));
   const state = { stage: 'idle', message: 'Select anchors', boards, reserved: false, grounded: true, preview: null, token: null };
-  const status = () => app.receive(a, '/pidrone/localization/calibration/status', { data: JSON.stringify(state) });
+  const status = () => app.receive(service, '/pidrone/localization/calibration/status', { data: JSON.stringify(state) });
   status();
   app.anchorCalibration.request('scan');
-  assert.equal(a.publishers.calibrationRequest.messages.length, 0);
+  assert.equal(service.publishers.calibrationRequest.messages.length, 0);
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
   status();
   app.anchorCalibration.request('scan');
-  assert.equal(JSON.parse(last(a, 'calibrationRequest').data).action, 'scan');
-  assert.equal(b.publishers.calibrationRequest, undefined);
+  assert.equal(JSON.parse(last(service, 'calibrationRequest').data).action, 'scan');
+  assert.equal(other.publishers.calibrationRequest.messages.length, 0);
   status();
   for (let i = 0; i < 4; i++) {
     app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
   }
   app.anchorCalibration.request('measure');
-  const measure = JSON.parse(last(a, 'calibrationRequest').data);
+  const measure = JSON.parse(last(service, 'calibrationRequest').data);
   assert.equal(measure.action, 'measure');
   assert.equal(measure.height, undefined);
   assert.deepEqual(measure.anchors.map(p => p.ble), boards.map(p => p.ble));
@@ -711,16 +737,16 @@ test('anchor calibration uses Drone 1, requires fresh disarmed peers and saves o
   assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
   app.elements.get('calibration-anchor-0').value = boards[1].ble;
   app.anchorCalibration.request('apply');
-  assert.equal(a.publishers.calibrationRequest.messages.length, 2);
+  assert.equal(service.publishers.calibrationRequest.messages.length, 2);
   app.elements.get('calibration-anchor-0').value = boards[0].ble;
   app.anchorCalibration.request('apply');
-  assert.deepEqual(JSON.parse(last(a, 'calibrationRequest').data), { action: 'apply', token: 'reviewed-token' });
+  assert.deepEqual(JSON.parse(last(service, 'calibrationRequest').data), { action: 'apply', token: 'reviewed-token' });
   status();
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
   assert.equal(app.elements.get('calibration-apply').disabled, true);
   app.anchorCalibration.request('apply');
-  assert.equal(a.publishers.calibrationRequest.messages.length, 3);
+  assert.equal(service.publishers.calibrationRequest.messages.length, 3);
   // Disarm remains reachable even when the coordinator or peer drops out.
   app.dispatch('disarm');
   assert.equal(last(a, 'mode').mode, 'DISARMED');

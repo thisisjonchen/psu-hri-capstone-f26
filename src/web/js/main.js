@@ -648,7 +648,7 @@ class DroneSession {
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
-    if (this.id === 'drone1') publisher('calibrationRequest', '/pidrone/localization/calibration/request', 'std_msgs/String');
+    publisher('calibrationRequest', '/pidrone/localization/calibration/request', 'std_msgs/String');
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -700,8 +700,8 @@ class DroneSession {
       this.calibrationLocked = message.data;
       fleetMap.refreshAnchors();
     });
-    if (this.id === 'drone1') subscribe('/pidrone/localization/calibration/status', 'std_msgs/String', message => {
-      if (anchorCalibration) anchorCalibration.update(message);
+    subscribe('/pidrone/localization/calibration/status', 'std_msgs/String', message => {
+      if (anchorCalibration) anchorCalibration.update(this.id, message);
     });
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
@@ -888,7 +888,7 @@ let fleetMap = null;
 let anchorCalibration = null;
 function calibrationActive() {
   return Object.values(drones).some(drone => drone.calibrationLocked) ||
-    !!(anchorCalibration && anchorCalibration.state && anchorCalibration.state.reserved);
+    !!(anchorCalibration && anchorCalibration.active());
 }
 const heldKeys = new Map();
 const movementKeys = { j: 'left', l: 'right', i: 'forward', k: 'backward', w: 'up', s: 'down', a: 'yawLeft', d: 'yawRight' };
