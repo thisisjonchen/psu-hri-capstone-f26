@@ -18,7 +18,7 @@ import numpy as np
 from localization.anchor_calibration import (decode_location, solve_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
 from localization.calibration_guard import BridgeGuard, ANCHORS, ACK, OWNER
-from localization.pans_ble import PansBLE
+from localization.pans_ble import PansBLE, BluetoothTimeout
 
 
 POINTS = [(0, 0, 0), (4, 0, 0), (4, 3, 0), (0, 3, 0)]
@@ -36,6 +36,22 @@ def payload(row):
 
 
 class CalibrationTest(unittest.TestCase):
+    def test_ble_timeout_identifies_board_and_command_and_preserves_guard_errors(self):
+        ble = PansBLE.__new__(PansBLE)
+        ble.interface = 0
+        base = type('Helper', (), {'_writeCmd': mock.Mock(), '_waitResp': mock.Mock(return_value=None)})
+        guard = mock.Mock()
+        helper = ble.bounded(base, guard)()
+        helper.context = 'fa:bd:17:8b:d2:62 (public)'
+        helper._writeCmd('mtu 80\n')
+        with mock.patch('localization.pans_ble.monotonic', side_effect=[0, 0, 6]):
+            with self.assertRaisesRegex(BluetoothTimeout, r'hci0, fa:bd:17:8b:d2:62 \(public\), command mtu'):
+                helper._waitResp(['stat'])
+        guard.side_effect = ValueError('Flight interlock lost')
+        with mock.patch('localization.pans_ble.monotonic', return_value=0):
+            with self.assertRaisesRegex(ValueError, 'Flight interlock lost'):
+                helper._waitResp(['stat'])
+
     def test_scan_start_failure_preserves_cause_when_helper_already_stopped_or_cleanup_fails(self):
         for helper in (None, object()):
             scanner = NS(_helper=helper, start=mock.Mock(side_effect=ValueError('Permission denied')),
@@ -65,6 +81,10 @@ class CalibrationTest(unittest.TestCase):
         connected.connect.assert_called_once_with(board['ble'], addrType='random', iface=0)
         self.assertEqual(board['addr_type'], 'random')
         connected.disconnect.assert_called_once()
+        failed.connect.side_effect = BluetoothTimeout('Public connection timed out')
+        factory.side_effect = [failed, connected]
+        with ble.connect(dict(BOARDS[0], addr_type='public'), lambda: None):
+            pass
         # Two failed address types must still report failure and clean up both attempts.
         connected.connect.side_effect = RuntimeError('Failed random connection')
         connected.disconnect.side_effect = ValueError('Helper not started')
@@ -79,7 +99,8 @@ class CalibrationTest(unittest.TestCase):
         def entry(address, mode, connectable=True):
             return NS(addr=address, addrType='public', connectable=connectable,
                       getScanData=lambda: [(0x21, 'Service Data', SERVICE.replace('-', '') + '%02x00' % mode)])
-        entries = [entry('tag', 0x02), entry('failed', 0x82), entry('busy', 0x82, False), entry('anchor', 0x82)]
+        entries = [entry('tag', 0x02), entry('failed', 0x82), entry('timeout', 0x82),
+                   entry('busy', 0x82, False), entry('anchor', 0x82)]
         scanner = NS(_helper=None, start=mock.Mock(), getDevices=lambda: entries, stop=mock.Mock(), _stopHelper=mock.Mock())
         ble = PansBLE.__new__(PansBLE)
         ble.interface, ble.btle = 0, NS(Scanner=object, BTLEException=RuntimeError)
@@ -89,15 +110,17 @@ class CalibrationTest(unittest.TestCase):
         def connect(board, guard):
             attempted.append(board['ble'])
             if board['ble'] == 'failed': raise RuntimeError('Failed to connect')
+            if board['ble'] == 'timeout': raise BluetoothTimeout('Bluetooth read timed out')
             yield object()
         ble.connect, ble.inspect = connect, lambda p: BOARDS[0]
         with mock.patch('localization.pans_ble.monotonic', side_effect=[0, 6]):
             boards = ble.scan(lambda: None)
-        self.assertEqual(attempted, ['failed', 'anchor'])
+        self.assertEqual(attempted, ['failed', 'timeout', 'anchor'])
         self.assertEqual([b['id'] for b in boards], [BOARDS[0]['id']])
-        self.assertEqual(len(ble.scan_warnings), 2)
+        self.assertEqual(len(ble.scan_warnings), 3)
         self.assertIn('failed', ble.scan_warnings[0])
-        self.assertIn('busy', ble.scan_warnings[1])
+        self.assertIn('timeout', ble.scan_warnings[1])
+        self.assertIn('busy', ble.scan_warnings[2])
 
     def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}

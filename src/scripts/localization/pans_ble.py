@@ -13,6 +13,10 @@ from localization.anchor_calibration import (SERVICE, MODE, PAN, DATA_MODE, LOCA
 from localization.uwb_locator import monotonic
 
 
+class BluetoothTimeout(ValueError):
+    pass
+
+
 class PansBLE(object):
     def __init__(self, interface=0, timeout=30.):
         # Imported on demand so missing Bluetooth support produces a dashboard error.
@@ -20,8 +24,13 @@ class PansBLE(object):
         self.btle, self.interface, self.timeout = btle, int(interface), float(timeout)
 
     def bounded(self, base, guard):
+        interface = self.interface
         class Bounded(base):
             check = staticmethod(guard)
+
+            def _writeCmd(self, command):
+                self.operation = command.split()[0]
+                return base._writeCmd(self, command)
 
             def _waitResp(self, wantType, timeout=None):
                 if timeout is not None:
@@ -33,7 +42,10 @@ class PansBLE(object):
                     response = base._waitResp(self, wantType, 0.25)
                     if response is not None:
                         return response
-                raise ValueError('Bluetooth operation timed out; check adapter and anchor range')
+                raise BluetoothTimeout('Bluetooth timeout on hci%d, %s, command %s (waiting for %s); '
+                                       'check BLE connections and range from the Pi'
+                                       % (interface, getattr(self, 'context', 'scan'),
+                                          getattr(self, 'operation', 'unknown'), wantType))
         return Bounded
 
     def cleanup(self, helper, stop):
@@ -64,11 +76,12 @@ class PansBLE(object):
         for index, address_type in enumerate(address_types):
             guard()
             peripheral = self.bounded(self.btle.Peripheral, guard)()
+            peripheral.context = '%s (%s)' % (board['ble'], address_type)
             try:
                 peripheral.connect(board['ble'], addrType=address_type, iface=self.interface)
             except Exception as error:
                 self.cleanup(peripheral, peripheral.disconnect)
-                if not isinstance(error, self.btle.BTLEDisconnectError) or index == len(address_types) - 1:
+                if not isinstance(error, (self.btle.BTLEDisconnectError, BluetoothTimeout)) or index == len(address_types) - 1:
                     raise
             else:
                 board['addr_type'] = address_type
@@ -127,7 +140,7 @@ class PansBLE(object):
             try:
                 with self.connect(board, guard) as peripheral:
                     board.update(self.inspect(peripheral))
-            except self.btle.BTLEException as error:
+            except (self.btle.BTLEException, BluetoothTimeout) as error:
                 guard()  # Cancellation or a lost flight interlock still aborts discovery.
                 self.scan_warnings.append('%s: %s. Close other BLE connections, check range, and retry' % (entry.addr, error))
                 continue

@@ -187,6 +187,9 @@ If an anchor advertises but cannot connect, close other BLE apps, power-cycle th
 board and check BLE range from the Pi. Discovery tries the advertised address type
 first, then the other type once. It skips tags and lists unreadable boards while
 retaining reachable anchors; four verified anchors are still required to measure.
+Timeout warnings identify the board, adapter and stalled BLE command (`conn` for
+connection, `mtu` for packet-size negotiation, `char` for discovery, `rd` for reads).
+These are Bluetooth failures, before UWB inter-anchor ranging begins.
 
 Rebuild the ROS workspace and restart the flight-controller and fusion nodes on
 each participating drone to install their calibration interlock. Start its rosbridge,
