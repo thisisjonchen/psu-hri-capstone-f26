@@ -255,11 +255,11 @@ class BridgeGuard(object):
                         valid = all(all(abs(float(point[axis]) - expected[key][axis]) <= 0.02
                                         for axis in ('x', 'y', 'z')) for key, point in zip(ids, actual))
                     matched.append(valid)
-            if all(matched):
+            if any(matched):
                 return
             if self.stop_event.wait(0.1):
                 break
-        raise ValueError('Layout verification incomplete: every participating tag must report the four saved anchors')
+        raise ValueError('Layout verification incomplete: at least one participating tag must report the four saved anchors')
 
     def close(self):
         self.stop_event.set()

@@ -152,6 +152,8 @@ test('room targets require live fused localization and explicit send, stay isola
   app.receive(a, '/pidrone/mode', { mode: 'FLYING' });
   app.receive(a, '/pidrone/localization/fused', pose);
   app.receive(a, '/pidrone/localization/ready', { data: true });
+  app.anchorCalibration.update({ stage: 'error', message: 'Layout unverified', boards: [],
+    selection: ['ws://drone1.local:9090', 'ws://drone2.local:9090'], reserved: true, dirty: true, grounded: false });
   assert.equal(app.elements.get('target-send').disabled, false);
   app.fleetMap.sendTarget();
   assert.equal(a.publishers.roomTarget.messages.length, 1);
