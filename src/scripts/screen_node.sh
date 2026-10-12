@@ -43,10 +43,7 @@ pidrone_screen_node() {
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        calibration)
-            command=(roslaunch --wait "$package_dir/launch/anchor_calibration.launch")
-            ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|uwb|calibration|shell}' >&2
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|uwb|shell}' >&2
            return 2 ;;
     esac
 

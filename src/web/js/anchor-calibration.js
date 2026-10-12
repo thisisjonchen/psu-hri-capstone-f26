@@ -6,8 +6,7 @@ class AnchorCalibration {
     this.receivedAt = null;
     this.boardSignature = null;
     this.pendingAt = null;
-    this.reports = {};
-    this.droneId = null;
+    this.polling = false;
     ['scan', 'measure', 'apply', 'cancel'].forEach(action => {
       document.getElementById('calibration-' + action).addEventListener('click', () => this.request(action));
     });
@@ -15,45 +14,37 @@ class AnchorCalibration {
       document.getElementById('calibration-anchor-' + i).addEventListener('input', () => this.refresh());
     }
     this.refresh();
+    this.poll();
+    setInterval(() => this.poll(), 500);
   }
 
-  update(droneId, message) {
+  update(state) {
+    if (!state || typeof state.stage !== 'string' || typeof state.message !== 'string' ||
+        !Array.isArray(state.boards)) return;
+    this.state = state;
+    this.receivedAt = Date.now();
+    this.pendingAt = null;
+    this.refresh();
+    if (fleetMap) fleetMap.refreshAnchors();
+  }
+
+  async poll() {
+    if (this.polling) return;
+    this.polling = true;
     try {
-      const state = JSON.parse(message.data);
-      if (!state || typeof state.stage !== 'string' || typeof state.message !== 'string' ||
-          !Array.isArray(state.boards)) return;
-      this.reports[droneId] = { state, receivedAt: Date.now() };
-      if (this.droneId === droneId) this.pendingAt = null;
+      const response = await fetch('/api/calibration', { cache: 'no-store', signal: AbortSignal.timeout(2000) });
+      if (!response.ok) throw new Error('Calibration server unavailable');
+      this.update(await response.json());
+    } catch (error) {
       this.refresh();
-      if (fleetMap) fleetMap.refreshAnchors();
-    } catch (error) { console.error('Invalid anchor calibration status', error); }
-  }
-
-  reportFresh(id) {
-    const report = this.reports[id];
-    return !!(drones[id] && drones[id].connected && report && Date.now() - report.receivedAt <= 1500);
-  }
-
-  selectCoordinator() {
-    const active = state => state && (state.reserved || ['scanning', 'measuring', 'saving', 'verifying'].includes(state.stage));
-    // Keep requests, previews and uncertain writes on the same service, even if it disconnects.
-    const pinned = active(this.state) || (this.pendingAt !== null && Date.now() - this.pendingAt <= 3000);
-    if (!pinned) {
-      const available = Object.keys(drones).filter(id => this.reportFresh(id));
-      const working = available.find(id => active(this.reports[id].state));
-      const current = available.includes(this.droneId) && this.reports[this.droneId].state.grounded;
-      const chosen = working || (current && this.droneId) ||
-        available.find(id => this.reports[id].state.grounded) || available[0] || null;
-      if (chosen !== this.droneId) {
-        this.droneId = chosen;
-        this.pendingAt = this.boardSignature = null;
-      }
+    } finally {
+      this.polling = false;
     }
-    const report = this.reports[this.droneId];
-    this.state = report ? report.state : null;
-    this.receivedAt = report ? report.receivedAt : null;
+  }
+
+  updateBoards() {
     if (this.state) {
-      const signature = this.droneId + JSON.stringify(this.state.boards);
+      const signature = JSON.stringify(this.state.boards);
       if (signature !== this.boardSignature) {
         this.boardSignature = signature;
         for (let i = 0; i < 4; i++) {
@@ -77,11 +68,11 @@ class AnchorCalibration {
   }
 
   fresh() {
-    return this.reportFresh(this.droneId);
+    return this.receivedAt !== null && Date.now() - this.receivedAt <= 1500;
   }
 
   active() {
-    return Object.values(this.reports).some(report => report.state.reserved);
+    return !!(this.state && (this.state.reserved || this.state.dirty));
   }
 
   grounded() {
@@ -93,7 +84,7 @@ class AnchorCalibration {
 
   busy() {
     return (this.pendingAt !== null && Date.now() - this.pendingAt <= 3000) ||
-      (this.state && ['scanning', 'measuring', 'saving', 'verifying'].includes(this.state.stage));
+      (this.state && this.state.busy);
   }
 
   matchesPreview() {
@@ -101,7 +92,7 @@ class AnchorCalibration {
       document.getElementById('calibration-anchor-' + i).value === p.ble && p.z === 0));
   }
 
-  request(action) {
+  async request(action) {
     this.refresh();
     if (!this.fresh() || (action !== 'cancel' && (!this.grounded() || this.busy()))) return;
     const request = { action };
@@ -119,14 +110,24 @@ class AnchorCalibration {
       if (this.state.stage !== 'preview' || !this.state.token || !this.matchesPreview()) return;
       request.token = this.state.token;
     }
-    if (drones[this.droneId].publish('calibrationRequest', { data: JSON.stringify(request) })) {
-      this.pendingAt = Date.now();
-      this.refresh();
+    this.pendingAt = Date.now();
+    this.refresh();
+    try {
+      const response = await fetch('/api/calibration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Calibration-Request': '1' },
+        body: JSON.stringify(request), signal: AbortSignal.timeout(3000)
+      });
+      if (!response.ok) throw new Error((await response.json()).error || 'Calibration request failed');
+      await this.poll();
+    } catch (error) {
+      this.pendingAt = null;
+      document.getElementById('calibration-status').textContent = error.message;
     }
   }
 
   refresh() {
-    this.selectCoordinator();
+    this.updateBoards();
     const fresh = this.fresh(), grounded = this.grounded(), busy = this.busy(), state = this.state;
     document.getElementById('calibration-scan').disabled = !grounded || busy || (state.reserved && !state.dirty);
     document.getElementById('calibration-measure').disabled = !grounded || busy || state.boards.length < 4;
@@ -136,10 +137,10 @@ class AnchorCalibration {
       document.getElementById('calibration-anchor-' + i).disabled = !grounded || busy;
     }
     document.getElementById('calibration-status').textContent = !fresh
-      ? (state && state.reserved ? 'Reconnect Drone ' + this.droneId.slice(-1) + ' to finish or cancel calibration.'
-        : 'Connect a drone and start its calibration service.')
+      ? (state && state.reserved ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
+        : 'Open the dashboard through the laptop server: http://localhost:8000.')
       : !grounded ? (state.ground_reason || 'Disarm connected drones; fresh flight state is required.')
-        : 'Drone ' + this.droneId.slice(-1) + ': ' + state.message;
+        : state.message;
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
     preview.textContent = fresh && state.preview ? state.preview.positions.map(p =>

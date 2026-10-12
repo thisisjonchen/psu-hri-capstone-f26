@@ -1,11 +1,9 @@
 """Observe reachable drones and retain calibration participants until release."""
-from __future__ import division
-
 import json
 import threading
 import uuid
 
-from localization.uwb_locator import monotonic
+from time import monotonic
 
 LOCK = '/pidrone/localization/calibration_owner/request'
 OWNER = '/pidrone/localization/calibration_owner/status'
@@ -79,10 +77,10 @@ class BridgeGuard(object):
                 peer['mode'], peer['mode_at'] = message.get('mode'), now
             elif topic == ACK and type(message.get('data')) is bool:
                 peer['locked'], peer['ack_at'] = message['data'], now
-            elif topic == OWNER and isinstance(message.get('data'), type(u'')):
+            elif topic == OWNER and isinstance(message.get('data'), str):
                 try:
                     status = json.loads(message['data'])
-                    if isinstance(status['owner'], type(u'')) and isinstance(status['request'], type(u'')):
+                    if isinstance(status['owner'], str) and isinstance(status['request'], str):
                         peer['owner'], peer['request'], peer['owner_at'] = status['owner'], status['request'], now
                         if status['owner'] == self.owner:
                             self.claimed = True

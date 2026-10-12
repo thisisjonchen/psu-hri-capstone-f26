@@ -1,6 +1,4 @@
 """PANS BLE payloads and four-anchor calibration; no ROS or Bluetooth dependency."""
-from __future__ import division
-
 import math
 import struct
 
@@ -70,12 +68,9 @@ def encode_position(position):
 
 
 def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
-    """Fit six 3D ranges with measured Z; A0 is XY origin, A1 sets +X, A2 is +Y."""
+    """Fit six ranges in the shared Z=0 plane; A0 is origin, A1 sets +X."""
     if len(anchors) != 4 or len(set(a['id'] for a in anchors)) != 4:
         raise ValueError('Select four distinct anchors')
-    z = np.array([float(a['z']) for a in anchors])
-    if not np.all(np.isfinite(z)) or np.any(np.abs(z) > 100):
-        raise ValueError('Enter measured anchor heights in meters')
     pairs, measured, horizontal = [], [], {}
     for i in range(4):
         for j in range(i + 1, 4):
@@ -89,10 +84,9 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
             if max(values) - min(values) > max_error:
                 raise ValueError('Opposite range measurements disagree; check line of sight')
             distance = sum(values) / len(values)
-            squared = distance ** 2 - (z[i] - z[j]) ** 2
-            if squared < 0.3 ** 2:
-                raise ValueError('Anchor spacing or height is inconsistent (minimum XY spacing 0.3 m)')
-            horizontal[i, j] = math.sqrt(squared)
+            if distance < 0.3:
+                raise ValueError('Minimum anchor spacing is 0.3 m')
+            horizontal[i, j] = distance
             pairs.append((i, j))
             measured.append(distance)
     baseline = horizontal[0, 1]
@@ -108,7 +102,7 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
 
     def residual(v):
         xy = np.array([[0., 0.], [v[0], 0.], v[1:3], v[3:5]])
-        return np.array([math.sqrt(np.sum((xy[i] - xy[j]) ** 2) + (z[i] - z[j]) ** 2)
+        return np.array([math.sqrt(np.sum((xy[i] - xy[j]) ** 2))
                          for i, j in pairs]) - measured
 
     damping = 0.001
@@ -138,6 +132,6 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
             raise ValueError('Anchors must form four well-separated convex corners in the selected order')
     if rms > max_rms or worst > max_error:
         raise ValueError('Range fit is inconsistent (RMS %.3f m, max %.3f m)' % (rms, worst))
-    positions = [dict(a, x=float(xy[i, 0]), y=float(xy[i, 1]), z=float(z[i]))
+    positions = [dict(a, x=float(xy[i, 0]), y=float(xy[i, 1]), z=0.0)
                  for i, a in enumerate(anchors)]
     return {'positions': positions, 'rms': rms, 'max_error': worst}

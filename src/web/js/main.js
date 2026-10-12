@@ -648,7 +648,6 @@ class DroneSession {
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
-    publisher('calibrationRequest', '/pidrone/localization/calibration/request', 'std_msgs/String');
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -700,9 +699,7 @@ class DroneSession {
       this.calibrationLocked = message.data;
       fleetMap.refreshAnchors();
     });
-    subscribe('/pidrone/localization/calibration/status', 'std_msgs/String', message => {
-      if (anchorCalibration) anchorCalibration.update(this.id, message);
-    });
+
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
     });

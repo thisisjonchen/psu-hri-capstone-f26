@@ -30,7 +30,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    ```
 7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
 8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
-10. To control it, on your laptop/base station, clone this repo and open `src/web/index.html`. Alternatively, run `python3 -m http.server 8000 --directory src` from the repository root and open `http://localhost:8000/web/index.html`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
+10. To control it, clone this repo on your laptop/base station and start the [dashboard server](#camera--uwb--tof-localization), then open `http://localhost:8000`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
@@ -107,8 +107,20 @@ anchor positions automatically when a drone connects.
 - UWB defaults to `/dev/ttyACM1`. Export `PALS_UWB_PORT` before starting Screen to use another port.
 - The **SE** window runs fusion; do not also run EMA.
 - Room targets require a calibrated heading. Set `PALS_ROOM_YAW_OFFSET` before starting Screen, or restart fusion with the measured offset after FC startup.
-- **Calibrate anchors** works with one or both drones and measures XY over Bluetooth from either Pi; review, then save. Anchors share Z = 0. Participating drones must be disarmed. Repeat after moving anchors.
+- **Calibrate anchors** works with one or both drones and measures XY over your laptop’s Bluetooth; review, then save. Anchors share Z = 0. Participating drones must be disarmed. Repeat after moving anchors.
 - **Preview** selects a target, **Send target** commands the selected drone, and **Stop target** cancels it. Sending requires flying mode and valid localization.
+
+Start the dashboard on your laptop (Python 3.9+):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r src/web/requirements.txt
+python src/web/server.py
+```
+
+Run these commands from the repository root, then open `http://localhost:8000`.
+Allow Bluetooth access for your terminal when prompted on macOS.
 
 See [localization setup](scripts/localization/README.md) for dependencies, rebuilding,
 board configuration and heading calibration.
