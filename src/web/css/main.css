@@ -59,6 +59,7 @@ h2 { font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin: 0; }
 .map-sources .map-source-uwb::before { border-top-style: double; border-top-width: 4px; }
 .localization-card { grid-column: 1 / -1; }
 .localization-card [data-field="localizationPosition"], .localization-card [data-field="fusedPosition"] { font-variant-numeric: tabular-nums; font-weight: 600; }
+.localization-card [data-field="localizationPosition"][data-state="stale"] { color: var(--muted); }
 .localization-card small { display: block; margin-top: 4px; color: var(--muted); }
 .localization-card small[data-state="ready"] { color: var(--success); }
 .localization-card small[data-state="stale"] { color: var(--error); }

@@ -1,7 +1,7 @@
 # IMU heading is forward measured counterclockwise from its startup X axis.
-# REQUIRED: room heading of forward minus IMU yaw, radians. Blank disables room
-# localization/targets until calibrated; local camera hover remains available.
-room_yaw_offset: ""
+# Default: start facing map +Y when the flight controller initializes yaw to zero.
+# Override with room heading of forward minus IMU yaw, radians; blank disables it.
+room_yaw_offset: 1.5707963267948966
 velocity_stddev: 0.12
 drift_stddev: 0.08
 velocity_tau: 0.08

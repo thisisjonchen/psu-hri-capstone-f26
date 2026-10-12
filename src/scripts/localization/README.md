@@ -37,15 +37,13 @@ Only one process may own the tag port; close board setup tools before launching.
 
 ```bash
 roslaunch pidrone_pkg uwb_localization.launch
-roslaunch pidrone_pkg fusion_localization.launch room_yaw_offset:=YOUR_MEASURED_OFFSET_RADIANS
+roslaunch pidrone_pkg fusion_localization.launch
 ```
 
 The UWB Screen window uses the same default, so no port export is needed. To
-override it, export `PALS_UWB_PORT` before starting Screen. Set the measured room
-heading separately on each drone:
+override it, export `PALS_UWB_PORT` before starting Screen:
 
 ```bash
-export PALS_ROOM_YAW_OFFSET=YOUR_MEASURED_OFFSET_RADIANS
 cd ~/catkin_ws/src/pidrone_pkg
 screen -c pi.screenrc
 ```
@@ -64,11 +62,16 @@ The **SE** Screen window now starts fusion instead of EMA. Do not run
 by Screen. Optical flow, ToF, the flight controller's IMU, UWB and rosbridge remain
 separate processes. Existing manual movement controls keep their body-axis meaning.
 
-### Calibrate heading on each drone
+### Room heading
 
-UWB anchors cannot supply the drone's yaw. With the drone stationary, measure the
-heading of its **forward** direction counterclockwise from room +X, read the yaw
-from `/pidrone/imu`, and set:
+Start each drone facing map **+Y** (toward the top of the map) before starting the
+flight controller. The default offset is `pi/2`: at IMU yaw zero, forward is +Y,
+back is -Y, left is -X and right is +X. The IMU tracks subsequent turns.
+Anchor calibration keeps this configured heading and requires a new live room fix.
+
+For a different starting orientation, override `room_yaw_offset` at launch or
+export `PALS_ROOM_YAW_OFFSET` before starting Screen. Measure forward heading
+counterclockwise from room +X and read yaw from `/pidrone/imu`:
 
 ```text
 room_yaw_offset = surveyed_forward_heading - IMU_yaw   (radians)
@@ -78,8 +81,8 @@ For example, forward along room +X with IMU yaw zero gives offset `0`; forward
 along room +Y with IMU yaw zero gives `1.57079632679`. The controller's legacy axes
 are X=right and Y=forward, so the body-to-odom planar rotation is `IMU_yaw - pi/2`.
 The implementation includes this basis conversion; do not add another quarter turn
-to the measured offset. Calibrate after FC startup and repeat after any heading
-reset. A blank offset disables fused room output and room-target commands. Local
+to the measured offset. Recheck alignment after a heading reset or a change in
+room axes. A blank offset disables fused room output and room-target commands. Local
 camera hover and ToF altitude do not require a room heading. Heading drift remains
 an accuracy limit; a single UWB position does not correct yaw.
 
@@ -192,8 +195,8 @@ calibration, and a newly connected drone must join through another measurement.
    must acknowledge exclusive calibration ownership before ranging begins.
 3. Press **Save layout** within two minutes. Flight stays inhibited until BLE
    readback and each participating tag confirm the saved layout.
-4. Recalibrate room heading on each drone before using room targets. Measurement
-   invalidates the previous heading even if cancelled. ToF remains the Z source.
+4. Keep the startup heading aligned with map +Y. A new live room fix is required
+   after calibration; ToF remains the Z source.
 
 **Cancel** or preview expiry releases locks only if no coordinates were written.
 An interrupted save keeps flight inhibited: reconnect the same laptop server,

@@ -101,6 +101,8 @@ source devel/setup.bash
 
 ## Camera + UWB + ToF Localization
 
+Start each drone facing the top of the map (+Y) before starting its flight controller.
+
 When calibrating:
 - 4D12: Tag 6
 - 980C: Tag 5

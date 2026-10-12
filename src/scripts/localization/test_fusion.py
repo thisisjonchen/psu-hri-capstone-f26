@@ -53,6 +53,10 @@ class FusionMathTest(unittest.TestCase):
         np.testing.assert_allclose(rotate((0, 1), body_angle(math.pi/2)), (0, 1), atol=1e-12)
         v = target_velocity((4, 0), (0, 0), body_angle(0), 0.5, 0.2)
         np.testing.assert_allclose(v, (0, 0.2), atol=1e-12)
+        for yaw, forward, right in ((0, (0, 1), (1, 0)), (math.pi/2, (-1, 0), (0, 1))):
+            angle = body_angle(yaw) + math.pi/2
+            np.testing.assert_allclose(rotate((0, 1), angle), forward, atol=1e-12)
+            np.testing.assert_allclose(rotate((1, 0), angle), right, atol=1e-12)
 
     def test_delayed_uwb_corrects_room_without_jumping_local_odometry(self):
         f = PlanarFusion(yaw_offset=math.pi/2)
@@ -90,21 +94,42 @@ class FusionMathTest(unittest.TestCase):
 
 
 class FusionNodeTest(unittest.TestCase):
-    def test_anchor_calibration_invalidates_heading_and_keeps_local_odometry(self):
+    def test_anchor_calibration_keeps_configured_heading_but_requires_new_room_fix(self):
         previous = self.node.filter.odom.copy()
         generation = self.node.generation
         self.node.calibration_callback(NS(data=True))
         self.node.step()
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertIsNone(self.node.filter.yaw_offset)
+        self.assertEqual(self.node.filter.yaw_offset, 0)
         self.assertGreater(self.node.generation, generation)
         np.testing.assert_array_equal(self.node.filter.odom, previous)
         self.node.calibration_callback(NS(data=False))
-        self.uwb()
         self.node.step()
         self.assertIsNone(self.node.filter.room)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.uwb()
+        self.node.step()
+        self.assertIsNotNone(self.node.filter.room)
+        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+
+    def test_default_heading_survives_startup_calibration_lock(self):
+        del self.params['~room_yaw_offset']
+        self.params['/pidrone/localization/calibration_lock'] = True
+        self.node = type(self.node)()
+        self.assertAlmostEqual(self.node.filter.yaw_offset, math.pi/2)
+        self.refresh()
+        self.report_anchors()
+        self.flow()
+        self.uwb()
+        self.node.step()
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.node.calibration_callback(NS(data=False))
+        self.uwb()
+        self.node.step()
+        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+        q = self.messages['pidrone/localization/fused'][-1].pose.pose.orientation
+        np.testing.assert_allclose((q.x, q.y, q.z, q.w), (0, 0, 0, 1), atol=1e-12)
 
     def setUp(self):
         # Reuse the existing transport doubles; execute the real node/controller.

@@ -356,6 +356,7 @@ class DroneSession {
     this.localizationReceivedAt = null;
     this.localizationStatusAt = null;
     this.localizationStamp = null;
+    this.lastLocalizationText = null;
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
@@ -436,10 +437,12 @@ class DroneSession {
     }
   }
 
-  clearLocalization(text = 'Localization unavailable') {
+  clearLocalization(text = 'Localization unavailable', retainReading = true) {
     this.localizationReceivedAt = null;
-    this.field('localizationPosition').textContent = '—';
-    this.field('localizationStatus').textContent = text;
+    if (!retainReading) this.lastLocalizationText = null;
+    this.field('localizationPosition').textContent = this.lastLocalizationText || '—';
+    this.field('localizationPosition').dataset.state = 'stale';
+    this.field('localizationStatus').textContent = (this.lastLocalizationText ? 'Last reading · ' : '') + text;
     this.field('localizationStatus').dataset.state = 'stale';
     [0, 1, 2].forEach(i => { this.series['uwb' + i] = []; });
     if (fleetMap) fleetMap.render();
@@ -456,7 +459,9 @@ class DroneSession {
     this.localizationStamp = time;
     this.xyFrames.uwb = message.header.frame_id;
     this.localizationReceivedAt = Date.now();
-    this.field('localizationPosition').textContent = 'X ' + p.x.toFixed(2) + ' · Y ' + p.y.toFixed(2) + ' · Z ' + p.z.toFixed(2) + ' m';
+    this.lastLocalizationText = 'X ' + p.x.toFixed(2) + ' · Y ' + p.y.toFixed(2) + ' · Z ' + p.z.toFixed(2) + ' m';
+    this.field('localizationPosition').textContent = this.lastLocalizationText;
+    this.field('localizationPosition').dataset.state = 'ready';
     this.field('localizationStatus').textContent = 'Ready · ' + message.header.frame_id;
     this.field('localizationStatus').dataset.state = 'ready';
     // Draw a cross, since UWB provides no heading measurement.
@@ -576,7 +581,7 @@ class DroneSession {
     this.fusedStamp = null;
     this.fusionGeneration = null;
     this.clearFusion(this.connected ? 'Waiting for fusion' : 'Drone offline');
-    this.clearLocalization(this.connected ? 'Waiting for localization' : 'Drone offline');
+    this.clearLocalization(this.connected ? 'Waiting for localization' : 'Drone offline', false);
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
@@ -665,6 +670,7 @@ class DroneSession {
       if (this.fusionGeneration !== null && this.fusionGeneration !== message.data) {
         this.fusedStamp = this.localizationStamp = null;
         this.clearFusion('Localization reference changed');
+        this.clearLocalization('Localization reference changed', false);
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         fleetMap.refreshAnchors();

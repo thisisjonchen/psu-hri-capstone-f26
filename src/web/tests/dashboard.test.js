@@ -468,7 +468,7 @@ test('UWB and ToF telemetry stays per drone and room coordinates remain visible'
   assert.equal(sharedMarker(app, 'drone2', 'uwb1').data[0].x, 1);
 });
 
-test('localization faults, stale streams and repeated stamps remove old positions', () => {
+test('localization gaps retain a labeled last reading while stale map markers clear', () => {
   const app = dashboard();
   const a = app.connect('drone1');
   const send = (seconds, z = 0.4) => app.receive(a, '/pidrone/localization/pose', localizationAt(seconds, 1, 2, z));
@@ -477,17 +477,34 @@ test('localization faults, stale streams and repeated stamps remove old position
   send(100);
   app.advanceTime(200);
   app.maintenanceTimers.forEach(callback => callback());
-  assert.equal(a.field('localizationPosition').textContent, '—');
+  const reading = 'X 1.00 · Y 2.00 · Z 0.40 m';
+  assert.equal(a.field('localizationPosition').textContent, reading);
+  assert.equal(a.field('localizationPosition').dataset.state, 'stale');
+  assert.match(a.field('localizationStatus').textContent, /^Last reading · Localization stale$/);
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
   send(101);
-  app.receive(a, '/pidrone/localization/status', { status: [{ level: 1, message: 'ToF missing, invalid or stale' }] });
-  assert.match(a.field('localizationStatus').textContent, /ToF/);
-  assert.equal(a.field('localizationPosition').textContent, '—');
+  for (const message of ['Sensor timestamps are not aligned', 'UWB missing or stale', 'ToF missing, invalid or stale']) {
+    app.receive(a, '/pidrone/localization/status', { status: [{ level: 1, message }] });
+    assert.equal(a.field('localizationStatus').textContent, 'Last reading · ' + message);
+    assert.equal(a.field('localizationPosition').textContent, reading);
+    assert.equal(a.field('localizationPosition').dataset.state, 'stale');
+    assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
+    assert.equal(a.localizationReceivedAt, null);
+  }
   send(102, NaN);
-  assert.equal(a.field('localizationPosition').textContent, '—');
+  assert.equal(a.field('localizationPosition').textContent, reading);
+  assert.match(a.field('localizationStatus').textContent, /^Last reading · Invalid position$/);
+  const unstamped = localizationAt(102, 9, 9, 9);
+  delete unstamped.header.stamp;
+  app.receive(a, '/pidrone/localization/pose', unstamped);
+  assert.equal(a.field('localizationPosition').textContent, reading);
+  assert.equal(a.localizationStamp, 101);
   send(102);
   assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
+  assert.equal(a.field('localizationPosition').dataset.state, 'ready');
+  assert.match(a.field('localizationStatus').textContent, /^Ready/);
   a.disconnect();
+  assert.equal(a.field('localizationPosition').textContent, '—');
   app.connect('drone1');
   send(1);
   assert.match(a.field('localizationPosition').textContent, /Z 0.40/);

@@ -22,9 +22,7 @@ class FusionLocalizationNode(object):
     def __init__(self):
         self.lock = threading.RLock()
         self.calibrating = bool(rospy.get_param('/pidrone/localization/calibration_lock', False))
-        offset = rospy.get_param('~room_yaw_offset', '')
-        if self.calibrating:
-            offset = ''
+        offset = rospy.get_param('~room_yaw_offset', math.pi / 2.0)
         self.filter = PlanarFusion(
             yaw_offset=None if offset == '' else float(offset),
             velocity_stddev=float(rospy.get_param('~velocity_stddev', 0.12)),
@@ -80,7 +78,6 @@ class FusionLocalizationNode(object):
     def calibration_callback(self, msg):
         with self.lock:
             if msg.data and not self.calibrating:
-                self.filter.yaw_offset = None
                 self.invalidate_room()
             self.calibrating = bool(msg.data)
 

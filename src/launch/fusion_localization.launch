@@ -1,6 +1,6 @@
 <launch>
   <arg name="namespace" default="/"/>
-  <arg name="room_yaw_offset" default=""/>
+  <arg name="room_yaw_offset" default="1.5707963267948966"/>
   <arg name="frame_id" default="map"/>
   <arg name="floor_z" default="0.0"/>
   <arg name="tof_offset_z" default="0.0"/>

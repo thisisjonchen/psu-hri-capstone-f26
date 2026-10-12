@@ -22,7 +22,7 @@ pidrone_screen_node() {
         rigid) command=(python -u rigid_transform_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u pid_controller.py) ;;
-        se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch" "room_yaw_offset:=${PALS_ROOM_YAW_OFFSET:-}") ;;
+        se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch" "room_yaw_offset:=${PALS_ROOM_YAW_OFFSET-1.5707963267948966}") ;;
         vision) command=(roslaunch --wait "$package_dir/launch/raspicam_node.launch") ;;
         flow) command=(python -u optical_flow_node.py) ;;
         tof)
