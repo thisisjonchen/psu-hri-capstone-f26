@@ -704,20 +704,25 @@ test('calibration switches idle services but pins active work and inhibits fligh
   assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
 });
 
-for (const coordinator of ['drone1', 'drone2']) test('anchor calibration through ' + coordinator + ' requires fresh disarmed peers and saves only the reviewed layout', () => {
-  const app = dashboard(), a = app.connect('drone1'), b = app.connect('drone2');
-  const service = coordinator === 'drone1' ? a : b, other = service === a ? b : a;
+for (const coordinator of ['drone1', 'drone2']) for (const paired of [false, true]) test('anchor calibration through ' + coordinator + ' with ' + (paired ? 'two drones' : 'one drone') + ' requires fresh disarmed peers and saves only the reviewed layout', () => {
+  const app = dashboard(), service = app.connect(coordinator);
+  const other = paired ? app.connect(coordinator === 'drone1' ? 'drone2' : 'drone1') : null;
+  const connected = other ? [service, other] : [service];
   const boards = Array.from({ length: 4 }, (_, i) => ({ id: '000' + (i + 1), ble: 'ble-' + i, active: true, initiator: i === 0 }));
   const state = { stage: 'idle', message: 'Select anchors', boards, reserved: false, grounded: true, preview: null, token: null };
   const status = () => app.receive(service, '/pidrone/localization/calibration/status', { data: JSON.stringify(state) });
   status();
   app.anchorCalibration.request('scan');
   assert.equal(service.publishers.calibrationRequest.messages.length, 0);
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  for (const drone of connected) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  app.receive(service, '/pidrone/mode', { mode: 'ARMED' });
+  app.anchorCalibration.request('scan');
+  assert.equal(service.publishers.calibrationRequest.messages.length, 0);
+  app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
   status();
   app.anchorCalibration.request('scan');
   assert.equal(JSON.parse(last(service, 'calibrationRequest').data).action, 'scan');
-  assert.equal(other.publishers.calibrationRequest.messages.length, 0);
+  if (other) assert.equal(other.publishers.calibrationRequest.messages.length, 0);
   status();
   for (let i = 0; i < 4; i++) {
     app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
@@ -730,10 +735,10 @@ for (const coordinator of ['drone1', 'drone2']) test('anchor calibration through
   Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
-  app.receive(a, '/pidrone/localization/calibration_locked', { data: true });
+  app.receive(service, '/pidrone/localization/calibration_locked', { data: true });
   assert.equal(app.fleetMap.layoutUsable, false);
   app.dispatch('arm');
-  assert.equal(a.publishers.mode.messages.length, 0);
+  assert.equal(service.publishers.mode.messages.length, 0);
   assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
   app.elements.get('calibration-anchor-0').value = boards[1].ble;
   app.anchorCalibration.request('apply');
@@ -749,5 +754,5 @@ for (const coordinator of ['drone1', 'drone2']) test('anchor calibration through
   assert.equal(service.publishers.calibrationRequest.messages.length, 3);
   // Disarm remains reachable even when the coordinator or peer drops out.
   app.dispatch('disarm');
-  assert.equal(last(a, 'mode').mode, 'DISARMED');
+  assert.equal(last(service, 'mode').mode, 'DISARMED');
 });

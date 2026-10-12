@@ -85,9 +85,10 @@ class AnchorCalibration {
   }
 
   grounded() {
-    return this.fresh() && this.state.grounded === true && Object.values(drones).every(drone =>
-      drone.connected && drone.field('flightMode').textContent === 'DISARMED' &&
-      drone.modeReceivedAt !== null && Date.now() - drone.modeReceivedAt <= 500);
+    const connected = Object.values(drones).filter(drone => drone.connected);
+    return this.fresh() && this.state.grounded === true && connected.length > 0 && connected.every(drone =>
+      drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
+      Date.now() - drone.modeReceivedAt <= 500);
   }
 
   busy() {
@@ -136,8 +137,8 @@ class AnchorCalibration {
     }
     document.getElementById('calibration-status').textContent = !fresh
       ? (state && state.reserved ? 'Reconnect Drone ' + this.droneId.slice(-1) + ' to finish or cancel calibration.'
-        : 'Connect both drones and start the calibration service on either drone.')
-      : !grounded ? (state.ground_reason || 'Disarm both drones; fresh flight state is required.')
+        : 'Connect a drone and start its calibration service.')
+      : !grounded ? (state.ground_reason || 'Disarm connected drones; fresh flight state is required.')
         : 'Drone ' + this.droneId.slice(-1) + ': ' + state.message;
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;

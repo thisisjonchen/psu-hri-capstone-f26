@@ -107,7 +107,7 @@ anchor positions automatically when a drone connects.
 - UWB defaults to `/dev/ttyACM1`. Export `PALS_UWB_PORT` before starting Screen to use another port.
 - The **SE** window runs fusion; do not also run EMA.
 - Room targets require a calibrated heading. Set `PALS_ROOM_YAW_OFFSET` before starting Screen, or restart fusion with the measured offset after FC startup.
-- **Calibrate anchors** measures XY over Bluetooth from either drone; review, then save. Anchors share Z = 0. Both drones must be disarmed. Repeat after moving anchors.
+- **Calibrate anchors** works with one or both drones and measures XY over Bluetooth from either Pi; review, then save. Anchors share Z = 0. Participating drones must be disarmed. Repeat after moving anchors.
 - **Preview** selects a target, **Send target** commands the selected drone, and **Stop target** cancels it. Sending requires flying mode and valid localization.
 
 See [localization setup](scripts/localization/README.md) for dependencies, rebuilding,

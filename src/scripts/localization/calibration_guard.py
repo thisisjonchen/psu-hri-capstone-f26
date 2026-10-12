@@ -1,4 +1,4 @@
-"""Observe and lock both independent ROS masters through their rosbridges."""
+"""Observe reachable drones and retain calibration participants until release."""
 from __future__ import division
 
 import json
@@ -14,15 +14,18 @@ ANCHORS = '/pidrone/localization/anchors'
 
 
 class BridgeGuard(object):
-    def __init__(self, urls, owner, claimed=False):
+    def __init__(self, urls, owner, claimed=False, participants=None):
         import websocket
         self.websocket = websocket
-        if len(urls) != 2 or len(set(urls)) != 2:
-            raise ValueError('Configure two distinct drone rosbridge URLs')
+        if not 1 <= len(urls) <= 2 or len(set(urls)) != len(urls):
+            raise ValueError('Configure one or two distinct drone rosbridge URLs')
+        if participants and any(url not in urls for url in participants):
+            raise ValueError('Restore the saved participant bridge addresses before calibration recovery')
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.owner = owner
         self.claimed = claimed
+        self.participants = list(participants) if participants else None
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
                        'locked': None, 'ack_at': 0, 'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
                        'anchors': None, 'anchors_at': 0, 'anchor_stamp': None} for url in urls]
@@ -34,7 +37,7 @@ class BridgeGuard(object):
     def send(self, peer, message):
         with self.lock:
             if peer['socket'] is None:
-                raise ValueError('Connect both drone rosbridges before calibration')
+                raise ValueError('Reconnect calibration participant %s' % peer['url'])
             peer['socket'].send(json.dumps(message))
 
     def watch(self, peer):
@@ -97,21 +100,36 @@ class BridgeGuard(object):
                 except (KeyError, TypeError, ValueError):
                     pass
 
+    def selected(self, include_new=True):
+        with self.lock:
+            peers = [p for p in self.peers if
+                     (self.participants is not None and p['url'] in self.participants) or
+                     ((include_new or self.participants is None) and p['socket'] is not None)]
+            if not peers:
+                raise ValueError('Connect at least one drone rosbridge before calibration')
+            return peers
+
+    def prepare(self):
+        with self.lock:
+            # A retry can add a newly connected drone, but cannot drop an existing participant.
+            self.participants = [p['url'] for p in self.selected()]
+            return list(self.participants)
+
     def check(self, locked=False, allow_other=False):
         now = monotonic()
         with self.lock:
-            for peer in self.peers:
+            for peer in self.selected(include_new=not allow_other):
                 if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5:
-                    raise ValueError('Fresh flight state required from both drones')
+                    raise ValueError('Fresh flight state required from %s; start its flight controller' % peer['url'])
                 if peer['mode'] != 'DISARMED':
-                    raise ValueError('Disarm both drones before calibration')
+                    raise ValueError('Disarm %s before calibration' % peer['url'])
                 if not allow_other and (not 0 <= now - peer['owner_at'] <= 0.5 or peer['owner'] is None):
-                    raise ValueError('Fresh calibration ownership required; update both flight controllers')
+                    raise ValueError('Fresh calibration ownership required from %s; update its flight controller' % peer['url'])
                 if not allow_other and peer['owner'] not in ('', self.owner):
                     raise ValueError('Anchor calibration is owned by another coordinator')
                 if locked and (peer['owner'] != self.owner or peer['locked'] is not True
                                or not 0 <= now - peer['ack_at'] <= 0.5):
-                    raise ValueError('Both flight controllers must acknowledge the calibration lock')
+                    raise ValueError('Every participating flight controller must acknowledge the calibration lock; measure again if another drone joined')
 
     def set_locked(self, value):
         with self.lock:
@@ -128,12 +146,15 @@ class BridgeGuard(object):
             raise
 
     def change_lock(self, value):
+        if value and self.participants is None:
+            self.prepare()
         self.check(allow_other=not value)
         nonce = str(uuid.uuid4())
         with self.lock:
             if value:
                 self.claimed = True
-            for peer in self.peers:
+            peers = self.selected(include_new=False)
+            for peer in peers:
                 peer['ack_at'] = peer['owner_at'] = 0
                 request = json.dumps({'owner': self.owner, 'action': 'acquire' if value else 'release', 'request': nonce})
                 self.send(peer, {'op': 'publish', 'topic': LOCK, 'msg': {'data': request}})
@@ -144,23 +165,25 @@ class BridgeGuard(object):
             with self.lock:
                 fresh = all(p['request'] == nonce and p['owner_at'] > 0 and p['ack_at'] > 0 and
                             0 <= now - p['owner_at'] <= 0.5 and 0 <= now - p['ack_at'] <= 0.5
-                            for p in self.peers)
+                            for p in peers)
                 if fresh:
                     self.check(allow_other=not value)
                     if all((p['owner'] == self.owner and p['locked'] is True) if value else
-                           p['owner'] != self.owner for p in self.peers):
+                           p['owner'] != self.owner for p in peers):
                         self.claimed = value
+                        if not value:
+                            self.participants = None
                         return
-                for peer in self.peers:
+                for peer in peers:
                     if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5 or peer['mode'] != 'DISARMED':
-                        raise ValueError('Fresh disarmed flight state required from both drones')
+                        raise ValueError('Fresh disarmed flight state required from %s' % peer['url'])
             if self.stop_event.wait(0.05):
                 break
-        raise ValueError('Flight-controller calibration lock was not acknowledged on both drones')
+        raise ValueError('Flight-controller calibration lock was not acknowledged by every participant')
 
     def sequences(self):
         with self.lock:
-            return [p['anchor_seq'] for p in self.peers]
+            return {p['url']: p['anchor_seq'] for p in self.selected(include_new=False)}
 
     def verify_layout(self, positions, baseline, guard, timeout=8):
         expected = {p['id']: p for p in positions}
@@ -169,7 +192,8 @@ class BridgeGuard(object):
             guard()
             matched = []
             with self.lock:
-                for peer, sequence in zip(self.peers, baseline):
+                for peer in self.selected(include_new=False):
+                    sequence = baseline.get(peer['url'], peer['anchor_seq'])
                     report = peer['anchors'] or {}
                     ids, actual = report.get('anchor_ids', []), report.get('positions', [])
                     valid = (peer['anchor_seq'] > sequence and monotonic() - peer['anchors_at'] <= 0.5
@@ -183,7 +207,7 @@ class BridgeGuard(object):
                 return
             if self.stop_event.wait(0.1):
                 break
-        raise ValueError('Both tags must report the four newly saved anchors; flight stays inhibited')
+        raise ValueError('Every participating tag must report the four newly saved anchors; flight stays inhibited')
 
     def close(self):
         self.stop_event.set()

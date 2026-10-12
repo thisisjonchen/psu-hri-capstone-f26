@@ -26,14 +26,14 @@ class AnchorCalibrationNode(object):
         self.preview = None
         self.preview_at = None
         self.boards = rospy.get_param('~recovery_boards', []) if self.dirty else []
-        self.state = {'stage': 'idle', 'message': 'Connect and disarm both drones to scan for anchors.',
+        self.state = {'stage': 'idle', 'message': 'Connect and disarm at least one drone to scan for anchors.',
                       'boards': self.boards, 'preview': None, 'token': None}
         if self.dirty:
             self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
         owner = rospy.get_param('~owner', str(uuid.uuid4()))
         rospy.set_param('~owner', owner)
         self.guard = BridgeGuard(rospy.get_param('~bridges', ['ws://drone1.local:9090', 'ws://drone2.local:9090']),
-                                 owner, claimed=self.dirty)
+                                 owner, claimed=self.dirty, participants=rospy.get_param('~participants', []))
         self.interface = int(rospy.get_param('~interface', 0))
         self.publisher = rospy.Publisher('/pidrone/localization/calibration/status', String, queue_size=1)
         self.subscriber = rospy.Subscriber('/pidrone/localization/calibration/request', String,
@@ -80,6 +80,7 @@ class AnchorCalibrationNode(object):
         if self.reserved:
             self.guard.set_locked(False)
             self.reserved = False
+            rospy.set_param('~participants', [])
         self.preview = None
         self.preview_at = None
         self.state.update(preview=None, token=None)
@@ -96,6 +97,8 @@ class AnchorCalibrationNode(object):
                 self.release()
                 self.update('idle', 'Calibration cancelled. No new coordinates saved.')
                 return
+            if action == 'measure' or (action == 'scan' and self.dirty):
+                rospy.set_param('~participants', self.guard.prepare())
             self.check(locked=False)
             ble = PansBLE(self.interface)
             if action == 'scan':
@@ -138,16 +141,17 @@ class AnchorCalibrationNode(object):
                 self.check()
                 self.update('saving', 'Saving and verifying anchor coordinates...')
                 ble.save(self.preview['positions'], self.check, self.mark_write)
-                self.update('verifying', 'Waiting for both tags to report the saved layout...')
+                self.update('verifying', 'Waiting for participating tags to report the saved layout...')
                 self.guard.verify_layout(self.preview['positions'], self.guard.sequences(), self.check)
                 self.check()
-                # Keep dirty set until unlock is acknowledged on both masters.
+                # Keep dirty set until every participant acknowledges unlock.
                 self.guard.set_locked(False)
                 rospy.set_param('~incomplete_save', False)
+                rospy.set_param('~participants', [])
                 self.dirty = self.reserved = False
                 self.preview = None
                 self.preview_at = None
-                self.update('complete', 'Layout saved and verified. Recalibrate room heading on both drones.',
+                self.update('complete', 'Layout saved and verified. Recalibrate room heading before using each drone.',
                             token=None)
         except Exception as error:
             rospy.logwarn('Anchor calibration: %s', error)
@@ -163,6 +167,9 @@ class AnchorCalibrationNode(object):
         finally:
             with self.lock:
                 self.busy = False
+                if not self.reserved and not self.dirty and not self.guard.claimed:
+                    self.guard.participants = None
+                rospy.set_param('~participants', self.guard.participants or [])
 
     def tick(self, _event):
         with self.lock:

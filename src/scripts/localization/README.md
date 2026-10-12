@@ -178,8 +178,8 @@ connections to the anchors. All four anchors need BLE reachability from this Pi
 and UWB line of sight between each other.
 
 Rebuild the ROS workspace and restart the flight-controller and fusion nodes on
-**both drones** to install their calibration interlock. Start both rosbridges, tags
-and flight controllers; keep both drones disarmed. The **Calibration** Screen window
+each participating drone to install their calibration interlock. Start its rosbridge,
+tag and flight controller; keep it disarmed. One drone is enough. The **Calibration** Screen window
 starts a coordinator on either drone without checking its hostname. For a running Screen session, start it manually on either Pi:
 
 ```bash
@@ -190,9 +190,9 @@ roslaunch pidrone_pkg anchor_calibration.launch
 Bridge addresses default to `ws://drone1.local:9090` and `ws://drone2.local:9090`;
 override `drone1_bridge` / `drone2_bridge` launch arguments if Pi-to-Pi name resolution
 requires different addresses. Both coordinators may run: the dashboard selects an
-available service and shows which drone it uses. Both flight controllers must grant
+available service and shows which drone it uses. Every reachable drone's flight controller must grant
 that coordinator exclusive ownership before ranging or coordinate writes. A second
-coordinator cannot release its locks. Update and restart both flight controllers
+coordinator cannot release its locks. Update and restart participating flight controllers
 before using this version; older controllers cannot grant ownership.
 
 An idle service can be replaced automatically when it becomes unavailable. An active
@@ -200,7 +200,14 @@ calibration stays with its original service through review, saving and recovery;
 reconnect that drone to finish or cancel it. No preview or incomplete save is transferred
 to another Pi. The selected Pi must have Bluetooth reachability to all four anchors.
 
-1. Connect **both** drones in the dashboard and open **Calibrate anchors → Scan anchors**.
+Only reachable rosbridges participate when measuring starts; an offline companion
+is not required. A reachable companion must be disarmed even if its dashboard
+connection is closed. Participants remain required until completion or cancellation,
+so a dropped connection cannot bypass a lock or tag verification. If another drone
+joins during calibration, measure again to include it before saving. The participant
+list survives a coordinator process restart alongside the recovery state.
+
+1. Connect one or both drones in the dashboard and open **Calibrate anchors → Scan anchors**.
 2. Select four anchors in counterclockwise physical order. First is XY origin;
    second defines +X. The other two corners must be on the +Y side of this baseline.
    Mount all four antennas at the same height. Calibration treats their plane as
@@ -211,13 +218,13 @@ to another Pi. The selected Pi must have Bluetooth reachability to all four anch
    local controller height remains above the floor. The XY map uses only anchor XY.
    One selected anchor must be the active network initiator; the other three must
    be active anchors on the same PAN. Calibration does not configure these roles.
-3. Press **Measure layout**. Both flight controllers must acknowledge the flight
+3. Press **Measure layout**. Participating flight controllers must acknowledge the flight
    inhibit before ranging starts. Check the preview against the real room and its
    dimensions. Distances alone cannot distinguish a mirrored physical arrangement;
    selecting the correct corner order is essential. A small fit residual is not an
    absolute accuracy guarantee.
 4. Press **Save layout** within two minutes. The coordinator verifies BLE readback
-   and waits for fresh reports of the same four saved coordinates from **both tags**
+   and waits for fresh reports of the same four saved coordinates from **each participating tag**
    before releasing flight inhibit. It rejects missing/low-quality ranges, inconsistent
    geometry and poor fits. If needed, move the grounded tags where they see all four anchors.
 5. Recalibrate heading and restart fusion with the new measured `room_yaw_offset`
@@ -229,7 +236,8 @@ has started. A failed or partial save keeps it active: correct Bluetooth/tag rec
 and **Measure layout → Save layout** again to recover. Recovery state survives a
 coordinator process restart through ROS parameters while the ROS master stays up.
 Do not reset interlock parameters to bypass recovery. After any complete system
-restart, verify both tags' anchor coordinates before flight.
+restart, verify each participating tag's anchor coordinates before flight. Recalibrate
+room heading on an offline companion before using it with the changed layout.
 
 Request/status use `/pidrone/localization/calibration/request` and `/status` on
 the selected drone (`std_msgs/String` JSON). Each master uses
