@@ -162,13 +162,10 @@ class FleetMap {
     const complete = live.filter(([, report]) => report.completeRoom && now - report.completeAt <= 1500);
     const candidate = complete.length ? complete[0][1].completeRoom : null;
     const bad = live.find(([, report]) => report.error || (candidate && !this.matchesRoom(candidate, report)));
-    const calibrating = calibrationActive();
-    this.layoutUsable = !!candidate && !bad && !calibrating;
+    this.layoutUsable = !!candidate && !bad;
     if (wasUsable && !this.layoutUsable) Object.values(drones).forEach(drone => drone.publish('cancelRoomTarget', {}));
     let status;
-    if (calibrating) {
-      status = 'Anchor calibration in progress. Map and room targets paused.';
-    } else if (bad) {
+    if (bad) {
       status = bad[1].error || 'Anchor layouts disagree between drones';
       status += '. Map updates and target editing are paused.';
     } else if (candidate) {
@@ -385,7 +382,6 @@ class DroneSession {
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
-    this.calibrationLocked = false;
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
@@ -728,11 +724,6 @@ class DroneSession {
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
     });
-    subscribe('/pidrone/localization/calibration_locked', 'std_msgs/Bool', message => {
-      if (typeof message.data !== 'boolean') return;
-      this.calibrationLocked = message.data;
-      fleetMap.refreshAnchors();
-    });
 
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
@@ -898,7 +889,6 @@ class DroneSession {
 
   command(action) {
     if (!this.connected) return;
-    if ((action === 'arm' || action === 'takeoff') && calibrationActive()) return;
     if (action === 'position') return this.setMode(true);
     if (action === 'velocity') return this.setMode(false);
     if (action === 'reset' || action === 'map') return this.publish(action, {});
@@ -918,10 +908,6 @@ class DroneSession {
 const drones = {};
 let fleetMap = null;
 let anchorCalibration = null;
-function calibrationActive() {
-  return Object.values(drones).some(drone => drone.calibrationLocked) ||
-    !!(anchorCalibration && anchorCalibration.active());
-}
 const heldKeys = new Map();
 const movementKeys = { j: 'left', l: 'right', i: 'forward', k: 'backward', w: 'up', s: 'down', a: 'yawLeft', d: 'yawRight' };
 const actionKeys = { ';': 'arm', t: 'takeoff', r: 'reset', p: 'position', v: 'velocity', m: 'map' };
@@ -962,10 +948,6 @@ function connectSelected() {
 }
 
 function dispatch(action, target = currentTarget()) {
-  if ((action === 'arm' || action === 'takeoff') && calibrationActive()) {
-    feedback('Flight inhibited until anchor calibration is completed or cancelled.');
-    return [];
-  }
   const sessions = sessionsFor(target);
   const available = sessions.filter(drone => drone.connected);
   // Stop and disarm can still reach a remaining drone if its partner is offline.

@@ -94,26 +94,7 @@ class FusionMathTest(unittest.TestCase):
 
 
 class FusionNodeTest(unittest.TestCase):
-    def test_anchor_calibration_keeps_configured_heading_but_requires_new_room_fix(self):
-        previous = self.node.filter.odom.copy()
-        generation = self.node.generation
-        self.node.calibration_callback(NS(data=True))
-        self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertEqual(self.node.filter.yaw_offset, 0)
-        self.assertGreater(self.node.generation, generation)
-        np.testing.assert_array_equal(self.node.filter.odom, previous)
-        self.node.calibration_callback(NS(data=False))
-        self.node.step()
-        self.assertIsNone(self.node.filter.room)
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.uwb()
-        self.node.step()
-        self.assertIsNotNone(self.node.filter.room)
-        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-
-    def test_default_heading_survives_startup_calibration_lock(self):
+    def test_legacy_calibration_lock_does_not_disable_fused_room_position(self):
         del self.params['~room_yaw_offset']
         self.params['/pidrone/localization/calibration_lock'] = True
         self.node = type(self.node)()
@@ -121,10 +102,6 @@ class FusionNodeTest(unittest.TestCase):
         self.refresh()
         self.report_anchors()
         self.flow()
-        self.uwb()
-        self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.node.calibration_callback(NS(data=False))
         self.uwb()
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)

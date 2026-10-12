@@ -771,19 +771,25 @@ test('disconnect clears tags and old ROS callbacks cannot overwrite a new sessio
   assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
-test('laptop calibration retains flight inhibition when its server becomes unavailable', () => {
+test('unfinished calibration and server outages never block flight commands', () => {
   const app = dashboard(), drone = app.connect('drone2');
   app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
   app.anchorCalibration.update({ stage: 'preview', message: 'Review', boards: [],
-    selection: ['ws://drone2.local:9090'], reserved: true, grounded: true, preview: { positions: [], rms: 0 }, token: 'reviewed' });
+    selection: ['ws://drone2.local:9090'], reserved: true, dirty: true, grounded: true, preview: { positions: [], rms: 0 }, token: 'reviewed' });
+  assert.equal(app.fleetMap.layoutUsable, true);
+  drone.command('arm');
+  assert.equal(last(drone, 'mode').mode, 'ARMED');
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
   assert.match(app.elements.get('calibration-status').textContent, /Reconnect the laptop/);
   app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 0);
   app.dispatch('arm', 'drone2');
-  assert.equal(drone.publishers.mode.messages.length, 0);
-  assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
+  assert.equal(last(drone, 'mode').mode, 'ARMED');
+  app.dispatch('takeoff', 'drone2');
+  assert.equal(last(drone, 'mode').mode, 'FLYING');
+  app.dispatch('forward', 'drone2');
+  assert.equal(last(drone, 'twist').linear.y, .1);
   app.dispatch('disarm', 'drone2');
   assert.equal(last(drone, 'mode').mode, 'DISARMED');
 });
@@ -808,7 +814,6 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   status();
   app.anchorCalibration.request('scan');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges });
-  assert.equal(service.publishers.calibrationRequest, undefined);
   status();
   for (let i = 0; i < 4; i++) app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
   app.anchorCalibration.request('measure');
@@ -817,10 +822,6 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
   assert.match(app.elements.get('calibration-preview').textContent, /Corner 1 \(Top Left\) · Tag 3 \(CA83\)/);
-  app.receive(service, '/pidrone/localization/calibration_locked', { data: true });
-  assert.equal(app.fleetMap.layoutUsable, false);
-  app.dispatch('arm');
-  assert.equal(service.publishers.mode.messages.length, 0);
   app.elements.get('calibration-anchor-0').value = boards[1].ble;
   app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 2);
@@ -862,4 +863,14 @@ test('calibration follows dashboard connections and waits for matching server re
   assert.equal(app.elements.get('calibration-scan').disabled, false);
   app.anchorCalibration.request('scan');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges: state.selection });
+  state.flight_state_timeout_ms = 2000;
+  app.advanceTime(1000);
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('calibration-scan').disabled, false);
+  app.advanceTime(1001);
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
+  app.receive(second, '/pidrone/mode', { mode: 'ARMED' });
+  app.anchorCalibration.refresh();
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
 });

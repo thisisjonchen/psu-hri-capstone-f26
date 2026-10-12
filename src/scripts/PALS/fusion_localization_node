@@ -21,7 +21,6 @@ from localization.uwb_locator import Position, monotonic
 class FusionLocalizationNode(object):
     def __init__(self):
         self.lock = threading.RLock()
-        self.calibrating = bool(rospy.get_param('/pidrone/localization/calibration_lock', False))
         offset = rospy.get_param('~room_yaw_offset', math.pi / 2.0)
         self.filter = PlanarFusion(
             yaw_offset=None if offset == '' else float(offset),
@@ -65,7 +64,6 @@ class FusionLocalizationNode(object):
         self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1)
         self.broadcaster = tf.TransformBroadcaster()
         self.subscribers = [
-            rospy.Subscriber('pidrone/localization/calibration_locked', Bool, self.calibration_callback, queue_size=1),
             rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
             rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
@@ -74,12 +72,6 @@ class FusionLocalizationNode(object):
 
     def fresh(self, stamp, now, timeout=None):
         return stamp is not None and 0 <= now - stamp <= (self.timeout if timeout is None else timeout)
-
-    def calibration_callback(self, msg):
-        with self.lock:
-            if msg.data and not self.calibrating:
-                self.invalidate_room()
-            self.calibrating = bool(msg.data)
 
     def invalidate_room(self):
         self.filter.reset_room()
@@ -192,18 +184,18 @@ class FusionLocalizationNode(object):
                 self.invalidate_if_tracking()
             remaining = []
             for stamp, position, covariance in self.pending:
-                if self.calibrating or not self.fresh(stamp, now) or not self.layout_active or not local_ready:
+                if not self.fresh(stamp, now) or not self.layout_active or not local_ready:
                     continue
                 if self.filter.stamp is None or stamp > self.filter.stamp:
                     remaining.append((stamp, position, covariance))
                 else:
                     _, self.reason = self.filter.update_uwb(position, covariance, stamp)
             self.pending = remaining
-            ready = bool(not self.calibrating and local_ready and self.layout_active and self.filter.room is not None
+            ready = bool(local_ready and self.layout_active and self.filter.room is not None
                          and self.fresh(self.filter.uwb_stamp, now))
             if not ready and self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
                 self.invalidate_room()
-            reason = ('Anchor calibration in progress' if self.calibrating else 'OK' if ready else 'Room heading is not calibrated' if self.filter.yaw_offset is None
+            reason = ('OK' if ready else 'Room heading is not calibrated' if self.filter.yaw_offset is None
                       else height_reason if height is None else 'Camera/IMU unavailable' if not local_ready
                       else 'Four live anchors required' if not self.layout_active else self.reason)
             self.local_pub.publish(Bool(data=local_ready))

@@ -81,10 +81,6 @@ class AnchorCalibration {
     return this.receivedAt !== null && Date.now() - this.receivedAt <= 1500;
   }
 
-  active() {
-    return !!(this.state && (this.state.reserved || this.state.dirty));
-  }
-
   selection() {
     return Object.values(drones).filter(drone => drone.connected)
       .map(drone => 'ws://' + drone.host + ':9090');
@@ -99,7 +95,7 @@ class AnchorCalibration {
     const connected = Object.values(drones).filter(drone => drone.connected);
     return this.fresh() && this.matchesSelection() && this.state.grounded === true && connected.length > 0 && connected.every(drone =>
       drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
-      Date.now() - drone.modeReceivedAt <= 500);
+      Date.now() - drone.modeReceivedAt <= (this.state.flight_state_timeout_ms || 500));
   }
 
   busy() {

@@ -56,7 +56,8 @@ class FlightController(object):
         self.mode_lock = threading.RLock()
         self.calibration_owner = rospy.get_param('/pidrone/localization/calibration_owner', '')
         self.calibration_request = ''
-        self.calibrating = bool(self.calibration_owner or rospy.get_param('/pidrone/localization/calibration_lock', False))
+        # Clear the retired flight lock when upgrading an existing ROS session.
+        rospy.set_param('/pidrone/localization/calibration_lock', False)
         # store the command to send to the flight controller
         self.command = cmds.disarm_cmd      #initialize as disarmed
         self.last_command = cmds.disarm_cmd
@@ -101,19 +102,9 @@ class FlightController(object):
     def desired_mode_callback(self, msg):
         """ Set the current mode to the desired mode """
         with self.mode_lock:
-            if self.calibrating and msg.mode != 'DISARMED':
-                rospy.logwarn('Flight inhibited during anchor calibration')
-                return
             self.prev_mode = self.curr_mode
             self.curr_mode = msg.mode
             self.update_command()
-
-    def calibration_callback(self, msg):
-        with self.mode_lock:
-            if self.curr_mode != 'DISARMED' or self.calibration_owner:
-                return
-            rospy.set_param('/pidrone/localization/calibration_lock', msg.data)
-            self.calibrating = bool(msg.data)
 
     def calibration_owner_callback(self, msg):
         try:
@@ -127,20 +118,16 @@ class FlightController(object):
                 return
             with self.mode_lock:
                 self.calibration_request = nonce
-                if self.curr_mode != 'DISARMED':
+                if action == 'acquire' and self.curr_mode != 'DISARMED':
                     return
                 if action == 'acquire':
-                    if self.calibration_owner != owner and (self.calibration_owner or self.calibrating):
+                    if self.calibration_owner != owner and self.calibration_owner:
                         return
-                    self.calibrating = True
                     rospy.set_param('/pidrone/localization/calibration_owner', owner)
                     self.calibration_owner = owner
-                    rospy.set_param('/pidrone/localization/calibration_lock', True)
                 elif action == 'release' and self.calibration_owner == owner:
-                    rospy.set_param('/pidrone/localization/calibration_lock', False)
                     rospy.set_param('/pidrone/localization/calibration_owner', '')
                     self.calibration_owner = ''
-                    self.calibrating = False
         except (ValueError, KeyError, TypeError):
             return
 
@@ -388,7 +375,6 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
-    rospy.Subscriber('/pidrone/localization/calibration_lock', Bool, fc.calibration_callback, queue_size=1)
     rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
@@ -425,7 +411,7 @@ def main():
             # publish the current mode of the drone
             fc.modepub.publish(fc.curr_mode)
             with fc.mode_lock:
-                calibration_pub.publish(Bool(data=fc.calibrating))
+                calibration_pub.publish(Bool(data=False))
                 calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
                                                                      'request': fc.calibration_request})))
 

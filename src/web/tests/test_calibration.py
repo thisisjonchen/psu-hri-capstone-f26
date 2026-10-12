@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
-from calibration.calibration_guard import BridgeGuard, ANCHORS, ACK, OWNER, connect_bridge
+from calibration.calibration_guard import BridgeGuard, ANCHORS, OWNER, connect_bridge
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
 from tempfile import TemporaryDirectory
@@ -97,39 +97,12 @@ class CalibrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             solve_layout([BOARDS[i] for i in (0, 1, 3, 2)], ROWS)
 
-    def test_guard_requires_both_fresh_disarmed_controllers_and_new_layout_reports(self):
-        guard = BridgeGuard.__new__(BridgeGuard)
-        guard.lock, guard.stop_event = threading.RLock(), threading.Event()
-        guard.owner = 'coordinator'
-        guard.participants = None
-        guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10, locked=True, ack_at=10,
-                            owner='coordinator', owner_at=10, url='ws://drone%d:9090' % i,
-                            anchor_seq=1, anchor_stamp=None, anchors=None, anchors_at=0) for i in range(2)]
-        guard.select([p['url'] for p in guard.peers])
-        layout = solve_layout(BOARDS, ROWS)['positions']
-        with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
-            guard.check(locked=True)
-            guard.peers[1]['mode'] = 'ARMED'
-            with self.assertRaises(ValueError): guard.check(locked=True)
-            guard.peers[1]['mode'] = 'DISARMED'; guard.peers[1]['ack_at'] = 9
-            with self.assertRaises(ValueError): guard.check(locked=True)
-            guard.peers[1]['ack_at'] = 10
-            report = dict(header=dict(stamp=dict(secs=10, nsecs=0), frame_id='map'),
-                          anchor_ids=[p['id'] for p in layout], positions=layout)
-            baseline = guard.sequences()
-            for peer in guard.peers: guard.receive(peer, ANCHORS, report)
-            guard.verify_layout(layout, baseline, lambda: guard.check(True))
-            # Replaying the same report cannot advance acquisition or verification.
-            baseline = guard.sequences()
-            for peer in guard.peers: guard.receive(peer, ANCHORS, report)
-            self.assertEqual(guard.sequences(), baseline)
-
     def test_competing_coordinator_cannot_claim_both_or_release_another_owner(self):
         guard = BridgeGuard.__new__(BridgeGuard)
         guard.lock, guard.stop_event = threading.RLock(), threading.Event()
         guard.owner, guard.claimed = 'ours', False
         guard.participants = None
-        guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10, locked=False, ack_at=10,
+        guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10,
                             owner='', owner_at=10, request='', url='ws://drone%d:9090' % i) for i in range(2)]
         guard.select([p['url'] for p in guard.peers])
         controllers = ['', 'other']
@@ -140,34 +113,32 @@ class CalibrationTest(unittest.TestCase):
                 controllers[i] = request['owner']
             elif request['action'] == 'release' and controllers[i] == request['owner']:
                 controllers[i] = ''
-            guard.receive(peer, ACK, {'data': bool(controllers[i])})
             guard.receive(peer, OWNER, {'data': json.dumps(dict(owner=controllers[i], request=request['request']))})
         guard.send = send
         with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
             with self.assertRaisesRegex(ValueError, 'another coordinator'):
-                guard.set_locked(True)
+                guard.reserve(True)
             self.assertEqual(controllers, ['', 'other'])
             self.assertFalse(guard.claimed)
             controllers[1] = ''
             guard.receive(guard.peers[1], OWNER, {'data': json.dumps(dict(owner='', request=''))})
-            guard.set_locked(True)
-            guard.check(locked=True)
+            guard.reserve(True)
+            guard.check(owned=True)
             self.assertEqual(controllers, ['ours', 'ours'])
             def stale(peer, message):
-                guard.receive(peer, ACK, {'data': True})
                 guard.receive(peer, OWNER, {'data': json.dumps(dict(owner='ours', request='old-request'))})
             guard.send = stale
             with mock.patch.object(guard.stop_event, 'wait', return_value=True):
                 with self.assertRaisesRegex(ValueError, 'not acknowledged'):
-                    guard.set_locked(False)
-                # Failed re-acquisition must not release a lock protecting an incomplete save.
+                    guard.reserve(False)
+                # Failed re-acquisition must not release an existing coordinator reservation.
                 with self.assertRaises(ValueError):
-                    guard.set_locked(True)
+                    guard.reserve(True)
             self.assertTrue(guard.claimed)
             self.assertEqual(controllers, ['ours', 'ours'])
             guard.send = send
-            for peer in guard.peers: peer['owner_at'] = peer['ack_at'] = 10
-            guard.set_locked(False)
+            for peer in guard.peers: peer['owner_at'] = 10
+            guard.reserve(False)
             self.assertEqual(controllers, ['', ''])
 
     def test_dashboard_selects_one_or_both_without_dropping_calibration_participants(self):
@@ -175,9 +146,9 @@ class CalibrationTest(unittest.TestCase):
         guard.lock, guard.stop_event = threading.RLock(), threading.Event()
         guard.owner, guard.claimed, guard.participants = 'ours', False, None
         guard.peers = [dict(url='ws://drone1:9090', socket=object(), mode=None, mode_at=0,
-                            owner=None, owner_at=0, locked=None, ack_at=0),
+                            owner=None, owner_at=0),
                        dict(url='ws://drone2:9090', socket=object(), mode='DISARMED', mode_at=10,
-                            owner='', owner_at=10, locked=False, ack_at=10,
+                            owner='', owner_at=10,
                             anchor_seq=1, anchor_stamp=None, anchors=None, anchors_at=0)]
         active = guard.peers[1]
         guard.select([active['url']])
@@ -186,17 +157,24 @@ class CalibrationTest(unittest.TestCase):
         def send(peer, message):
             self.assertIs(peer, active)  # An unselected bridge is reachable, but has no flight state.
             request = json.loads(message['msg']['data'])
-            locked = request['action'] == 'acquire'
-            guard.receive(peer, ACK, {'data': locked})
-            guard.receive(peer, OWNER, {'data': json.dumps(dict(owner='ours' if locked else '', request=request['request']))})
+            claimed = request['action'] == 'acquire'
+            guard.receive(peer, OWNER, {'data': json.dumps(dict(owner='ours' if claimed else '', request=request['request']))})
         guard.send = send
         with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
             guard.check()
-            guard.set_locked(True)
-            guard.check(locked=True)
+            guard.reserve(True)
+            active.update(mode_at=8.5, owner_at=8.5)
+            guard.check(owned=True)  # Tolerate brief gaps; reject genuinely stale controller state.
+            for field in ('mode_at', 'owner_at'):
+                active[field] = 7.9
+                with self.assertRaises(ValueError): guard.check(owned=True)
+                active[field] = 10
+            active['mode'] = 'ARMED'
+            with self.assertRaises(ValueError): guard.check(owned=True)
+            active['mode'] = 'DISARMED'
             self.assertEqual(guard.participants, [active['url']])
             guard.select([])
-            guard.check(locked=True)  # Disconnecting in the dashboard cannot bypass an existing lock.
+            guard.check(owned=True)  # Dashboard changes retain the current calibration participant.
             guard.select([active['url']])
             baseline = guard.sequences()
             layout = solve_layout(BOARDS, ROWS)['positions']
@@ -205,15 +183,15 @@ class CalibrationTest(unittest.TestCase):
             guard.verify_layout(layout, baseline, lambda: guard.check(True))
             active['socket'] = None
             with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check(True)
-            with self.assertRaises(ValueError): guard.set_locked(False)
+            with self.assertRaises(ValueError): guard.reserve(False)
             self.assertEqual(guard.participants, [active['url']])
             active['socket'] = object()
             newcomer = guard.peers[0]
             guard.select([p['url'] for p in guard.peers])
-            with self.assertRaisesRegex(ValueError, 'Fresh flight state'): guard.check(True)
-            newcomer.update(socket=object(), mode='DISARMED', mode_at=10, owner='', owner_at=10, locked=False, ack_at=10)
+            with self.assertRaisesRegex(ValueError, 'No flight state received'): guard.check(True)
+            newcomer.update(socket=object(), mode='DISARMED', mode_at=10, owner='', owner_at=10)
             with self.assertRaisesRegex(ValueError, 'Every participating'): guard.check(True)
-            guard.set_locked(False)  # Cancel releases the original participant without touching the newcomer.
+            guard.reserve(False)  # Cancel releases the original participant without touching the newcomer.
             self.assertIsNone(guard.participants)
             guard.prepare()
             self.assertEqual(set(guard.participants), {p['url'] for p in guard.peers})
@@ -236,10 +214,10 @@ class CoordinatorTest(unittest.TestCase):
             self.guard.participants = ['ws://drone2.local:9090']
             return list(self.guard.participants)
         self.guard.prepare.side_effect = prepare
-        def set_locked(value):
+        def reserve(value):
             self.guard.claimed = value
             if not value: self.guard.participants = None
-        self.guard.set_locked.side_effect = set_locked
+        self.guard.reserve.side_effect = reserve
         self.ble = mock.Mock()
         self.ble.scan_warnings = []
         def call(action, guard, *args):
@@ -266,18 +244,20 @@ class CoordinatorTest(unittest.TestCase):
         with open(self.state_path) as stream:
             return {'~' + key: value for key, value in json.load(stream).items()}
 
-    def test_partial_save_survives_restart_and_cannot_be_cancelled(self):
+    def test_cancel_releases_reservation_but_retains_unverified_save_for_recovery(self):
         self.node.run(self.measure)
         def fail(positions, guard, on_write):
             on_write(); raise ValueError('BLE write outcome unknown')
         self.ble.save.side_effect = fail
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.node.run(dict(action='cancel'))
-        self.assertTrue(self.node.reserved)
+        self.assertFalse(self.node.reserved)
+        self.assertTrue(self.node.dirty)
+        self.assertIn('unverified', self.node.state['message'])
         with self.assertRaisesRegex(ValueError, 'Another laptop calibration service'):
             CalibrationJournal(self.state_path)
-        self.assertEqual(self.params['~participants'], ['ws://drone2.local:9090'])
-        self.assertEqual(self.guard.set_locked.call_args_list, [mock.call(True)])
+        self.assertEqual(self.params['~participants'], [])
+        self.assertEqual(self.guard.reserve.call_args_list, [mock.call(True), mock.call(False)])
         self.node.close()
         self.node = self.create()
         self.assertTrue(self.node.dirty)
@@ -287,7 +267,7 @@ class CoordinatorTest(unittest.TestCase):
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.assertFalse(self.node.dirty)
         self.assertEqual(self.params['~participants'], [])
-        self.guard.set_locked.assert_called_with(False)
+        self.guard.reserve.assert_called_with(False)
 
     def test_cancel_during_ranging_releases_only_unwritten_layout(self):
         def cancel(boards, guard):
@@ -295,7 +275,7 @@ class CoordinatorTest(unittest.TestCase):
         self.ble.measure.side_effect = cancel
         self.node.run(self.measure)
         self.assertFalse(self.node.reserved)
-        self.guard.set_locked.assert_called_with(False)
+        self.guard.reserve.assert_called_with(False)
         self.ble.save.assert_not_called()
         # Recovered ownership without a preview must expose Cancel after a process restart.
         self.guard.claimed = True
@@ -304,14 +284,7 @@ class CoordinatorTest(unittest.TestCase):
         self.node.run({'action': 'cancel'})
         self.assertFalse(self.node.reserved)
 
-    def test_losing_ownership_does_not_leave_a_false_reservation_or_start_ranging(self):
-        self.guard.set_locked.side_effect = ValueError('Another coordinator owns the anchors')
-        self.node.run(self.measure)
-        self.assertFalse(self.node.reserved)
-        self.ble.measure.assert_not_called()
-        self.ble.save.assert_not_called()
-
-    def test_missing_tag_verification_keeps_flight_inhibited_and_expired_preview_cannot_write(self):
+    def test_missing_tag_verification_retains_warning_and_expired_preview_cannot_write(self):
         self.node.run(self.measure)
         self.node.preview_at -= 121
         self.node.run(dict(action='apply', token=self.node.state['token']))
@@ -320,54 +293,41 @@ class CoordinatorTest(unittest.TestCase):
         self.node.run(self.measure)
         self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
         self.guard.verify_layout.side_effect = ValueError('Second tag has not reported the layout')
-        self.guard.set_locked.reset_mock()
+        self.guard.reserve.reset_mock()
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.assertTrue(self.node.dirty)
         self.assertTrue(self.node.reserved)
-        self.guard.set_locked.assert_not_called()
+        self.guard.reserve.assert_not_called()
 
 
-class FlightInterlockTest(unittest.TestCase):
-    def test_lock_is_ground_only_blocks_arming_and_preserves_disarm(self):
-        # Execute the controller's real callbacks without opening the serial board.
+class FlightOwnershipTest(unittest.TestCase):
+    def test_calibration_ownership_never_blocks_flight_modes(self):
         source = str(Path(__file__).resolve().parents[2] / 'scripts' / 'flight_controller_node.py')
         with open(source) as stream: tree = ast.parse(stream.read())
         kind = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == 'FlightController')
         kind.body = [m for m in kind.body if isinstance(m, ast.FunctionDef) and m.name in
-                     ('desired_mode_callback', 'calibration_callback', 'calibration_owner_callback', 'update_command')]
-        namespace = dict(rospy=NS(set_param=mock.Mock(), logwarn=mock.Mock()), json=json,
+                     ('desired_mode_callback', 'calibration_owner_callback', 'update_command')]
+        namespace = dict(rospy=NS(set_param=mock.Mock()), json=json,
                          cmds=NS(disarm_cmd=[0], arm_cmd=[1], idle_cmd=[2]))
         exec(compile(ast.Module(body=[kind], type_ignores=[]), source, 'exec'), namespace)
         fc = namespace['FlightController']()
-        fc.mode_lock, fc.curr_mode, fc.prev_mode, fc.calibrating = threading.RLock(), 'ARMED', 'DISARMED', False
+        fc.mode_lock, fc.curr_mode, fc.prev_mode = threading.RLock(), 'DISARMED', 'DISARMED'
         fc.calibration_owner, fc.calibration_request = '', ''
-        fc.calibration_callback(NS(data=True))
-        self.assertFalse(fc.calibrating)
-        fc.desired_mode_callback(NS(mode='DISARMED'))
-        fc.calibration_callback(NS(data=True))
-        for mode in ('ARMED', 'FLYING'): fc.desired_mode_callback(NS(mode=mode))
-        self.assertEqual(fc.curr_mode, 'DISARMED')
-        fc.desired_mode_callback(NS(mode='DISARMED'))
-        self.assertEqual(fc.command, [0])
-        fc.calibration_callback(NS(data=False))
-        fc.desired_mode_callback(NS(mode='ARMED'))
-        self.assertEqual(fc.curr_mode, 'ARMED')
         def claim(owner, action):
             fc.calibration_owner_callback(NS(data=json.dumps(dict(owner=owner, action=action, request=owner + action))))
         claim('first', 'acquire')
-        self.assertFalse(fc.calibrating)  # An armed controller cannot grant ownership.
-        fc.desired_mode_callback(NS(mode='DISARMED'))
-        claim('first', 'acquire')
         claim('second', 'acquire')
         claim('second', 'release')
-        fc.calibration_callback(NS(data=False))
-        fc.desired_mode_callback(NS(mode='ARMED'))
         self.assertEqual(fc.calibration_owner, 'first')
-        self.assertTrue(fc.calibrating)
-        self.assertEqual(fc.curr_mode, 'DISARMED')
-        claim('first', 'release')
+        for mode in ('ARMED', 'FLYING', 'DISARMED'):
+            fc.desired_mode_callback(NS(mode=mode))
+            self.assertEqual(fc.curr_mode, mode)
+        self.assertEqual(fc.command, [0])
         fc.desired_mode_callback(NS(mode='ARMED'))
-        self.assertEqual(fc.curr_mode, 'ARMED')
+        claim('first', 'release')  # Cancellation can release ownership even after arming.
+        self.assertEqual(fc.calibration_owner, '')
+        claim('second', 'acquire')  # Starting calibration still requires DISARMED.
+        self.assertEqual(fc.calibration_owner, '')
 
 
 class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
@@ -448,7 +408,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
 
 
 class LaptopCancellationTest(unittest.TestCase):
-    def test_lost_flight_interlock_cancels_inflight_ble_and_waits_for_cleanup(self):
+    def test_lost_disarmed_state_cancels_inflight_ble_and_waits_for_cleanup(self):
         ble = PansBLE()
         self.addCleanup(ble.close)
         started, cleaned = threading.Event(), threading.Event()
@@ -460,7 +420,7 @@ class LaptopCancellationTest(unittest.TestCase):
                 cleaned.set()
         ble._scan = stalled
         def guard():
-            if started.is_set(): raise ValueError('Flight interlock lost')
-        with self.assertRaisesRegex(ValueError, 'Flight interlock lost'):
+            if started.is_set(): raise ValueError('Disarmed state lost')
+        with self.assertRaisesRegex(ValueError, 'Disarmed state lost'):
             ble.call('scan', guard)
         self.assertTrue(cleaned.is_set())

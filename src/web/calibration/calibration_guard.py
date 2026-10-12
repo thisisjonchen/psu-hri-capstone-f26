@@ -9,10 +9,12 @@ import uuid
 from time import monotonic
 from urllib.parse import urlsplit
 
-LOCK = '/pidrone/localization/calibration_owner/request'
+REQUEST = '/pidrone/localization/calibration_owner/request'
 OWNER = '/pidrone/localization/calibration_owner/status'
-ACK = '/pidrone/localization/calibration_locked'
 ANCHORS = '/pidrone/localization/anchors'
+# Calibration is performed disarmed; tolerate brief telemetry gaps without
+# changing the stricter freshness limits used by flight/navigation.
+CONTROL_STATE_TIMEOUT = 2.0
 
 
 def connect_bridge(websocket, url):
@@ -50,7 +52,7 @@ class BridgeGuard(object):
         self.selection = []
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
                        'error': 'Connecting...',
-                       'locked': None, 'ack_at': 0, 'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
+                       'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
                        'anchors': None, 'anchors_at': 0, 'anchor_stamp': None} for url in urls]
         for peer in self.peers:
             worker = threading.Thread(target=self.watch, args=(peer,))
@@ -72,8 +74,8 @@ class BridgeGuard(object):
                 with self.lock:
                     peer['socket'] = socket
                     peer['error'] = None
-                self.send(peer, {'op': 'advertise', 'topic': LOCK, 'type': 'std_msgs/String'})
-                for topic, kind in (('/pidrone/mode', 'pidrone_pkg/Mode'), (ACK, 'std_msgs/Bool'),
+                self.send(peer, {'op': 'advertise', 'topic': REQUEST, 'type': 'std_msgs/String'})
+                for topic, kind in (('/pidrone/mode', 'pidrone_pkg/Mode'),
                                     (OWNER, 'std_msgs/String'),
                                     (ANCHORS, 'pidrone_pkg/AnchorLayout')):
                     self.send(peer, {'op': 'subscribe', 'topic': topic, 'type': kind, 'queue_length': 1})
@@ -95,7 +97,7 @@ class BridgeGuard(object):
             finally:
                 with self.lock:
                     peer['socket'] = None
-                    peer['mode_at'] = peer['ack_at'] = peer['owner_at'] = peer['anchors_at'] = 0
+                    peer['mode_at'] = peer['owner_at'] = peer['anchors_at'] = 0
                     peer['anchor_stamp'] = None
                 if socket is not None:
                     socket.close()
@@ -106,8 +108,6 @@ class BridgeGuard(object):
         with self.lock:
             if topic == '/pidrone/mode':
                 peer['mode'], peer['mode_at'] = message.get('mode'), now
-            elif topic == ACK and type(message.get('data')) is bool:
-                peer['locked'], peer['ack_at'] = message['data'], now
             elif topic == OWNER and isinstance(message.get('data'), str):
                 try:
                     status = json.loads(message['data'])
@@ -158,40 +158,45 @@ class BridgeGuard(object):
             self.participants = [p['url'] for p in self.selected()]
             return list(self.participants)
 
-    def check(self, locked=False, allow_other=False):
+    def check(self, owned=False, allow_other=False):
         now = monotonic()
         with self.lock:
             for peer in self.selected(include_new=not allow_other):
-                if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5:
-                    if peer['socket'] is None:
-                        raise ValueError('Laptop calibration cannot connect to drone rosbridge: %s (%s)' %
-                                         (peer['url'], peer.get('error') or 'Disconnected'))
-                    raise ValueError('Fresh flight state required from %s; start its flight controller' % peer['url'])
+                if peer['socket'] is None:
+                    raise ValueError('Laptop calibration cannot connect to drone rosbridge: %s (%s)' %
+                                     (peer['url'], peer.get('error') or 'Disconnected'))
+                # Releasing a coordinator reservation does not depend on flight state.
+                if allow_other:
+                    continue
+                if not 0 <= now - peer['mode_at'] <= CONTROL_STATE_TIMEOUT:
+                    if not peer['mode_at']:
+                        raise ValueError('No flight state received from %s; start its flight controller' % peer['url'])
+                    raise ValueError('Flight state delayed from %s (last update %.1f s ago); retry calibration' %
+                                     (peer['url'], now - peer['mode_at']))
                 if peer['mode'] != 'DISARMED':
                     raise ValueError('Disarm %s before calibration' % peer['url'])
-                if not allow_other and (not 0 <= now - peer['owner_at'] <= 0.5 or peer['owner'] is None):
+                if not 0 <= now - peer['owner_at'] <= CONTROL_STATE_TIMEOUT or peer['owner'] is None:
                     raise ValueError('Fresh calibration ownership required from %s; update its flight controller' % peer['url'])
-                if not allow_other and peer['owner'] not in ('', self.owner):
+                if peer['owner'] not in ('', self.owner):
                     raise ValueError('Anchor calibration is owned by another coordinator')
-                if locked and (peer['owner'] != self.owner or peer['locked'] is not True
-                               or not 0 <= now - peer['ack_at'] <= 0.5):
-                    raise ValueError('Every participating flight controller must acknowledge the calibration lock; measure again if another drone joined')
+                if owned and peer['owner'] != self.owner:
+                    raise ValueError('Every participating drone must acknowledge calibration ownership; measure again if another drone joined')
 
-    def set_locked(self, value):
+    def reserve(self, value):
         with self.lock:
             had_claim = self.claimed or any(p['owner'] == self.owner for p in self.peers)
         try:
-            self.change_lock(value)
+            self.change_reservation(value)
         except Exception:
             if value and self.claimed and not had_claim:
                 # A competing coordinator may have won one master. Release only our claims.
                 try:
-                    self.change_lock(False)
+                    self.change_reservation(False)
                 except Exception:
                     pass  # Keep the reservation if either release is unconfirmed.
             raise
 
-    def change_lock(self, value):
+    def change_reservation(self, value):
         if value and self.participants is None:
             self.prepare()
         self.check(allow_other=not value)
@@ -201,31 +206,32 @@ class BridgeGuard(object):
                 self.claimed = True
             peers = self.selected(include_new=False)
             for peer in peers:
-                peer['ack_at'] = peer['owner_at'] = 0
+                peer['owner_at'] = 0
                 request = json.dumps({'owner': self.owner, 'action': 'acquire' if value else 'release', 'request': nonce})
-                self.send(peer, {'op': 'publish', 'topic': LOCK, 'msg': {'data': request}})
+                self.send(peer, {'op': 'publish', 'topic': REQUEST, 'msg': {'data': request}})
         deadline = monotonic() + 3
         while monotonic() < deadline:
             # Wait for new acknowledgments after publishing; old ownership cannot confirm a change.
             now = monotonic()
             with self.lock:
-                fresh = all(p['request'] == nonce and p['owner_at'] > 0 and p['ack_at'] > 0 and
-                            0 <= now - p['owner_at'] <= 0.5 and 0 <= now - p['ack_at'] <= 0.5
+                fresh = all(p['request'] == nonce and p['owner_at'] > 0 and
+                            0 <= now - p['owner_at'] <= CONTROL_STATE_TIMEOUT
                             for p in peers)
                 if fresh:
                     self.check(allow_other=not value)
-                    if all((p['owner'] == self.owner and p['locked'] is True) if value else
+                    if all(p['owner'] == self.owner if value else
                            p['owner'] != self.owner for p in peers):
                         self.claimed = value
                         if not value:
                             self.participants = None
                         return
                 for peer in peers:
-                    if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5 or peer['mode'] != 'DISARMED':
+                    if (peer['socket'] is None or (value and
+                            (not 0 <= now - peer['mode_at'] <= CONTROL_STATE_TIMEOUT or peer['mode'] != 'DISARMED'))):
                         raise ValueError('Fresh disarmed flight state required from %s' % peer['url'])
             if self.stop_event.wait(0.05):
                 break
-        raise ValueError('Flight-controller calibration lock was not acknowledged by every participant')
+        raise ValueError('Calibration ownership was not acknowledged by every participant')
 
     def sequences(self):
         with self.lock:
@@ -253,7 +259,7 @@ class BridgeGuard(object):
                 return
             if self.stop_event.wait(0.1):
                 break
-        raise ValueError('Every participating tag must report the four newly saved anchors; flight stays inhibited')
+        raise ValueError('Layout verification incomplete: every participating tag must report the four saved anchors')
 
     def close(self):
         self.stop_event.set()

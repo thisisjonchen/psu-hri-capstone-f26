@@ -186,6 +186,9 @@ Use the same addresses for the dashboard's drone connections. Start rosbridge,
 flight controller, tag reader and fusion on each drone; keep them disarmed.
 Calibration follows the drones connected in the dashboard: connect one or both,
 with no server option needed. Each selected drone must report a fresh disarmed state.
+Calibration tolerates up to two seconds between flight-state and ownership updates;
+disconnects, armed states or longer gaps stop calibration. Calibration never blocks
+flight commands. Flight/navigation freshness limits are unchanged.
 Participants remain required until calibration finishes or is cancelled; a newly
 connected drone must join through another measurement.
 
@@ -198,22 +201,22 @@ connected drone must join through another measurement.
    distances between all six anchor pairs and rejects conflicting reported PAN IDs.
 2. Press **Measure layout** and review the shape and dimensions. Flight controllers
    must acknowledge exclusive calibration ownership before ranging begins.
-3. Press **Save layout** within two minutes. Flight stays inhibited until BLE
-   readback and each participating tag confirm the saved layout.
+3. Press **Save layout** within two minutes. BLE readback and each participating tag
+   verify the saved layout; missing reports produce a calibration error.
 4. Keep the startup heading aligned with map +Y. A new live room fix is required
    after calibration; ToF remains the Z source.
 
-**Cancel** or preview expiry releases locks only if no coordinates were written.
-An interrupted save keeps flight inhibited: reconnect the same laptop server,
-then **Measure layout → Save layout** to recover. Recovery information is stored
-in `.calibration-state.json` at the repository root; do not delete it to bypass
-recovery. It contains no offline map fallback. An offline companion needs heading
-calibration before flying with a changed layout.
+**Cancel** releases calibration ownership even after a save was interrupted.
+An incomplete save retains a layout warning and recovery information in
+`.calibration-state.json`, without blocking commands. Use **Measure layout → Save
+layout** to verify a new layout. The recovery file contains no offline map fallback.
 
 The HTTP request/status endpoint is `/api/calibration` on the local server.
 Drone ownership still uses `/pidrone/localization/calibration_owner/request` and
-`/status`; `/pidrone/localization/calibration_locked` reports flight inhibit.
-Rebuild and restart participating flight controllers if they lack these interlocks.
+`/status`; ownership prevents competing calibrations and does not restrict flight.
+Update and restart the flight controller and fusion node on each drone when removing
+the old flight lock. The controller clears the old lock parameter and publishes
+`false` on `/pidrone/localization/calibration_locked` for compatibility.
 The old drone **Calibration** Screen window and launch file are no longer used;
 cancel any old preview, then stop coordinators still running from an older checkout.
 

@@ -11,7 +11,7 @@ import threading
 import uuid
 
 from calibration.anchor_calibration import solve_layout
-from calibration.calibration_guard import BridgeGuard
+from calibration.calibration_guard import BridgeGuard, CONTROL_STATE_TIMEOUT
 from calibration.pans_ble import PansBLE
 from time import monotonic
 
@@ -55,7 +55,7 @@ class AnchorCalibration:
         self.cancel = threading.Event()
         self.busy = False
         self.dirty = bool(saved.get('incomplete_save', False))
-        self.reserved = self.dirty
+        self.reserved = bool(saved.get('participants'))
         self.preview = None
         self.preview_at = None
         self.boards = saved.get('recovery_boards', []) if self.dirty else []
@@ -64,7 +64,7 @@ class AnchorCalibration:
         if self.dirty:
             self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
         owner = saved.get('owner', str(uuid.uuid4()))
-        self.guard = BridgeGuard(bridges, owner, claimed=self.dirty, participants=saved.get('participants', []))
+        self.guard = BridgeGuard(bridges, owner, claimed=self.reserved, participants=saved.get('participants', []))
         self.persist()
         self.ble = PansBLE()
         self.stopping = threading.Event()
@@ -95,10 +95,10 @@ class AnchorCalibration:
         with self.lock:
             self.state.update(stage=stage, message=message, **values)
 
-    def check(self, locked=True):
+    def check(self, owned=True):
         if self.cancel.is_set() or self.stopping.is_set():
             raise ValueError('Calibration cancelled')
-        self.guard.check(locked=locked)
+        self.guard.check(owned=owned)
 
     def request(self, request):
         if not isinstance(request, dict) or request.get('action') not in ('scan', 'measure', 'apply', 'cancel'):
@@ -120,10 +120,8 @@ class AnchorCalibration:
             self.worker.start()
 
     def release(self):
-        if self.dirty:
-            raise ValueError('Coordinates may be partially saved. Measure and apply again to recover; flight stays inhibited.')
         if self.reserved:
-            self.guard.set_locked(False)
+            self.guard.reserve(False)
             self.reserved = False
             self.persist()
         self.preview = None
@@ -139,18 +137,19 @@ class AnchorCalibration:
             action = request['action']
             if action == 'cancel':
                 self.release()
-                self.update('idle', 'Calibration cancelled. No new coordinates saved.')
+                self.update('idle', 'Calibration cancelled. The saved layout is unverified.' if self.dirty
+                            else 'Calibration cancelled. No new coordinates saved.')
                 return
             if action == 'measure' or (action == 'scan' and self.dirty):
                 self.guard.prepare()
                 self.persist()
-            self.check(locked=False)
+            self.check(owned=False)
             ble = self.ble
             if action == 'scan':
                 if self.reserved and not self.dirty:
                     raise ValueError('Cancel the current preview before scanning again')
                 if self.dirty:
-                    self.guard.set_locked(True)
+                    self.guard.reserve(True)
                 self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
                 self.boards = ble.call('scan', lambda: self.check(self.dirty))
                 message = 'Found %d anchors. Select an anchor for each corner.' % len(self.boards)
@@ -165,9 +164,9 @@ class AnchorCalibration:
                 boards = [dict(known[c['ble']], z=0.0) for c in choices]
                 self.preview = None
                 self.preview_at = None
-                self.reserved = True  # Also recover a one-sided/unknown lock outcome.
+                self.reserved = True  # Also recover an unconfirmed ownership request.
                 try:
-                    self.guard.set_locked(True)
+                    self.guard.reserve(True)
                 except Exception:
                     self.reserved = self.dirty or self.guard.claimed
                     raise
@@ -191,29 +190,31 @@ class AnchorCalibration:
                 self.update('verifying', 'Waiting for participating tags to report the saved layout...')
                 self.guard.verify_layout(self.preview['positions'], self.guard.sequences(), self.check)
                 self.check()
-                # Keep dirty set until every participant acknowledges unlock.
-                self.guard.set_locked(False)
+                # Keep the recovery warning until saved coordinates are verified.
+                self.guard.reserve(False)
                 self.dirty = self.reserved = False
                 self.persist()
                 self.preview = None
                 self.preview_at = None
-                self.update('complete', 'Layout saved and verified. Recalibrate room heading before using each drone.',
+                self.update('complete', 'Layout saved and verified.',
                             token=None, preview=None)
         except Exception as error:
             logging.warning('Anchor calibration: %s', error)
             self.preview = None
             self.preview_at = None
-            if self.cancel.is_set() and not self.dirty:
+            if self.cancel.is_set():
                 try:
                     self.release()
                 except Exception as release_error:
                     error = release_error
             # Unknown or partial coordinate writes require a successful retry.
-            self.update('error', str(error), preview=None, token=None)
+            message = ('Calibration cancelled. The saved layout is unverified.'
+                       if self.cancel.is_set() and self.dirty and not self.reserved else str(error))
+            self.update('error', message, preview=None, token=None)
         finally:
             with self.lock:
                 self.busy = False
-                if not self.reserved and not self.dirty and not self.guard.claimed:
+                if not self.reserved and not self.guard.claimed:
                     self.guard.participants = None
                 try:
                     self.persist()
@@ -224,7 +225,7 @@ class AnchorCalibration:
         with self.lock:
             if self.guard.claimed and not self.reserved and not self.busy:
                 self.reserved = True
-                self.update('error', 'Previous calibration still holds flight locks. Cancel or measure again.')
+                self.update('error', 'Previous calibration is unfinished. Cancel or measure again.')
             if self.preview_at is not None and monotonic() - self.preview_at > 120 and not self.busy:
                 self.request({'action': 'cancel'})
 
@@ -235,6 +236,7 @@ class AnchorCalibration:
             state = copy.deepcopy(self.state)
             state.update(reserved=self.reserved, dirty=self.dirty, busy=self.busy)
             state['selection'] = list(self.guard.selection)
+            state['flight_state_timeout_ms'] = int(CONTROL_STATE_TIMEOUT * 1000)
             state['bridges'] = self.guard.connections()
             try:
                 self.guard.check()
