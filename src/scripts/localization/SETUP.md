@@ -74,7 +74,7 @@ Label each board as you go. The script:
 | A1–A3 | mode `an`, UWB `act`, the position you set |
 | Tag | mode `tn`, UWB `act`, location engine `le` |
 
-Every board should show the same PAN ID (`0x1234`). If a command errored, check its name against `help` for your PANS version. As a fallback, you can configure everything from the Decawave DRTLS Manager app over BLE.
+Every board should show the same PAN ID (`0x0000` by default). For a board using a different ID, run `nis 0x0000` followed by `reset`. If a command errored, check its name against `help` for your PANS version. As a fallback, you can configure everything from the Decawave DRTLS Manager app over BLE.
 
 For boards already running PANS, set one anchor with `nmi`, the other three with
 `nma`, and each drone tag with `nmt`; verify active UWB, BLE enabled, and matching
