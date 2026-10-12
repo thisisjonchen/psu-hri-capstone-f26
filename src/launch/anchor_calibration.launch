@@ -1,0 +1,9 @@
+<launch>
+  <arg name="interface" default="0"/>
+  <arg name="drone1_bridge" default="ws://drone1.local:9090"/>
+  <arg name="drone2_bridge" default="ws://drone2.local:9090"/>
+  <node pkg="pidrone_pkg" type="anchor_calibration_node" name="anchor_calibration" output="screen">
+    <param name="interface" value="$(arg interface)" type="int"/>
+    <rosparam param="bridges" subst_value="true">["$(arg drone1_bridge)", "$(arg drone2_bridge)"]</rosparam>
+  </node>
+</launch>

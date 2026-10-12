@@ -43,7 +43,14 @@ pidrone_screen_node() {
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|uwb|shell}' >&2
+        calibration)
+            if [[ "${ROS_MASTER_URI:-}" != http://drone1:* && "${ROS_MASTER_URI:-}" != http://drone1.local:* && "${PALS_CALIBRATION_ENABLED:-}" != 1 ]]; then
+                echo 'Anchor calibration coordinator runs on drone1 only.'
+                return 0
+            fi
+            command=(roslaunch --wait "$package_dir/launch/anchor_calibration.launch")
+            ;;
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|uwb|calibration|shell}' >&2
            return 2 ;;
     esac
 

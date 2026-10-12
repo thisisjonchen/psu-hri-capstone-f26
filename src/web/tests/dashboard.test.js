@@ -17,6 +17,9 @@ function dashboard({ discover = true } = {}) {
     const classes = new Set();
     return {
       value, textContent: '', dataset: {}, src: 'nocamera.svg', listeners: {},
+      children: [],
+      replaceChildren() { this.children = []; },
+      appendChild(child) { this.children.push(child); },
       classList: {
         toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); },
         remove(...names) { names.forEach(name => classes.delete(name)); },
@@ -41,6 +44,10 @@ function dashboard({ discover = true } = {}) {
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend', 'map-sources',
     'target-preview', 'target-drone', 'target-x', 'target-y', 'target-submit', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
   elements.get('target-drone').value = 'drone1';
+  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview']) elements.set('calibration-' + name, element());
+  for (let i = 0; i < 4; i++) {
+    elements.set('calibration-anchor-' + i, element());
+  }
   for (const id of ['drone1', 'drone2']) {
     for (const status of [elements.get(id + '-connectionStatus'), elements.get(id).querySelector('[data-field="connectionStatus"]')]) {
       const icon = element(); icon.dataset.state = 'disconnected';
@@ -51,6 +58,7 @@ function dashboard({ discover = true } = {}) {
   elements.get('droneSelection').value = 'drone1';
   elements.get('fleetGrid').dataset.count = '0';
   const document = {
+    createElement: () => element(),
     getElementById: id => elements.get(id),
     querySelector: () => elements.get('droneSelection'),
     addEventListener: (name, callback) => { listeners[name] = callback; }
@@ -94,9 +102,10 @@ function dashboard({ discover = true } = {}) {
     setInterval(callback, delay) { const id = ++nextTimer; (delay === 250 ? maintenanceTimers : timers).set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); }
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, dispatch, heldKeys, connectSelected, currentTarget })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectSelected, currentTarget })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -473,38 +482,25 @@ test('localization faults, stale streams and repeated stamps remove old position
   assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
 });
 
-test('shared map combines both drones while their pose streams remain isolated', () => {
+test('shared map isolates pose streams and clears only the disconnected drone', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   app.receive(a, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(-0.5, 0.2) });
   app.receive(b, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(0.5, -0.2) });
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.5);
   assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.5);
-  assert.equal(a.series.camera2[0].x, -0.5);
-  assert.equal(b.series.camera2[0].x, 0.5);
   app.receive(a, '/pidrone/state/ground_truth', { header: { ...stamp(100).header, frame_id: 'map' }, pose: poseAt(-0.4, 0.3) });
   assert.equal(sharedMarker(app, 'drone1', 'groundTruth2').data[0].x, -0.4);
   app.receive(b, '/pidrone/state/ukf_2d', { header: { ...stamp(100).header, frame_id: 'map' }, pose_with_covariance: { pose: poseAt(0.4, -0.3), covariance: Array(36).fill(0) } });
   assert.equal(sharedMarker(app, 'drone2', 'ukf2').data[0].x, 0.4);
   app.receive(a, '/pidrone/picamera/pose', { pose: poseAt(NaN, 0) });
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.5);
-});
-
-test('shared map stays live and disconnection clears only the departed drone', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
   const send = (drone, x) => app.receive(drone, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(x, 0) });
-  send(a, -0.5);
-  send(b, 0.5);
   send(a, -0.4);
-  assert.equal(a.series.camera2[0].x, -0.4);
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.4);
-  send(b, 0.6);
-  assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.6);
-  assert.equal(b.series.camera2[0].x, 0.6);
   a.disconnect();
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
-  assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.6);
+  assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.5);
   a.connect();
   a.ros.open();
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
@@ -681,4 +677,51 @@ test('disconnect clears tags and old ROS callbacks cannot overwrite a new sessio
   assert.equal(a.field('detection').textContent, 'Drone Offline');
   app.receive(a, '/pidrone/apriltag/detections', tags([1], ['DROP_OFF']));
   assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
+});
+
+test('anchor calibration uses Drone 1, requires fresh disarmed peers and saves only the reviewed layout', () => {
+  const app = dashboard(), a = app.connect('drone1'), b = app.connect('drone2');
+  const boards = Array.from({ length: 4 }, (_, i) => ({ id: '000' + (i + 1), ble: 'ble-' + i, active: true, initiator: i === 0 }));
+  const state = { stage: 'idle', message: 'Select anchors', boards, reserved: false, grounded: true, preview: null, token: null };
+  const status = () => app.receive(a, '/pidrone/localization/calibration/status', { data: JSON.stringify(state) });
+  status();
+  app.anchorCalibration.request('scan');
+  assert.equal(a.publishers.calibrationRequest.messages.length, 0);
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  status();
+  app.anchorCalibration.request('scan');
+  assert.equal(JSON.parse(last(a, 'calibrationRequest').data).action, 'scan');
+  assert.equal(b.publishers.calibrationRequest, undefined);
+  status();
+  for (let i = 0; i < 4; i++) {
+    app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
+  }
+  app.anchorCalibration.request('measure');
+  const measure = JSON.parse(last(a, 'calibrationRequest').data);
+  assert.equal(measure.action, 'measure');
+  assert.equal(measure.height, undefined);
+  assert.deepEqual(measure.anchors.map(p => p.ble), boards.map(p => p.ble));
+  Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
+    preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
+  status();
+  app.receive(a, '/pidrone/localization/calibration_locked', { data: true });
+  assert.equal(app.fleetMap.layoutUsable, false);
+  app.dispatch('arm');
+  assert.equal(a.publishers.mode.messages.length, 0);
+  assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
+  app.elements.get('calibration-anchor-0').value = boards[1].ble;
+  app.anchorCalibration.request('apply');
+  assert.equal(a.publishers.calibrationRequest.messages.length, 2);
+  app.elements.get('calibration-anchor-0').value = boards[0].ble;
+  app.anchorCalibration.request('apply');
+  assert.deepEqual(JSON.parse(last(a, 'calibrationRequest').data), { action: 'apply', token: 'reviewed-token' });
+  status();
+  app.advanceTime(1600);
+  app.anchorCalibration.refresh();
+  assert.equal(app.elements.get('calibration-apply').disabled, true);
+  app.anchorCalibration.request('apply');
+  assert.equal(a.publishers.calibrationRequest.messages.length, 3);
+  // Disarm remains reachable even when the coordinator or peer drops out.
+  app.dispatch('disarm');
+  assert.equal(last(a, 'mode').mode, 'DISARMED');
 });

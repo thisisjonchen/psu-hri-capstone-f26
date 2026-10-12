@@ -90,6 +90,22 @@ class FusionMathTest(unittest.TestCase):
 
 
 class FusionNodeTest(unittest.TestCase):
+    def test_anchor_calibration_invalidates_heading_and_keeps_local_odometry(self):
+        previous = self.node.filter.odom.copy()
+        generation = self.node.generation
+        self.node.calibration_callback(NS(data=True))
+        self.node.step()
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertIsNone(self.node.filter.yaw_offset)
+        self.assertGreater(self.node.generation, generation)
+        np.testing.assert_array_equal(self.node.filter.odom, previous)
+        self.node.calibration_callback(NS(data=False))
+        self.uwb()
+        self.node.step()
+        self.assertIsNone(self.node.filter.room)
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+
     def setUp(self):
         # Reuse the existing transport doubles; execute the real node/controller.
         ros_doubles.NodeTest.setUp(self)

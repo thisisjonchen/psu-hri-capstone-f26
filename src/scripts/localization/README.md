@@ -25,7 +25,8 @@ source devel/setup.bash
 
 The Dockerfile includes `python-monotonic` for Python 2. `pyserial` is already
 installed by the image. Configure the anchors and each tag with [SETUP.md](SETUP.md).
-The default coordinates in `anchors.json` are examples; survey the installed anchors.
+The coordinates in `anchors.json` are examples; measure the installed anchors or
+use dashboard BLE calibration below.
 
 **The UWB tag defaults to `/dev/ttyACM1`.** The flight controller already
 probes `/dev/ttyACM0` and `/dev/ttyACM1`; confirm the tag still owns its configured
@@ -145,10 +146,90 @@ layout, and marker display/target editing wait for fresh complete discovery. Onl
 live reports with matching anchors enable a drone's measured markers. Reports from
 a disconnected bridge are discarded; reconnect requires a fresh observation.
 
-`scripts/localization/anchors.json` remains a **board setup input only**. Survey
-the four anchors, including their heights, and program those coordinates using
-the setup tool. Reading coordinates from UWB does not survey the room or detect
-physical movement of an anchor. If an anchor moves, update its programmed position.
+`scripts/localization/anchors.json` remains a **manual board setup input only**.
+Program measured coordinates with the setup tool, or use the BLE calibration below.
+Reading coordinates from UWB does not detect physical movement of an anchor.
+If an anchor moves, recalibrate before using room targets again.
+
+### Dashboard anchor calibration
+
+Drone 1 hosts a Bluetooth calibration coordinator for four DWM1001 PANS anchors.
+It triggers PANS inter-anchor ranging, fits XY using all six pairwise distances with
+all anchor Z coordinates fixed at 0, previews the result, then writes and reads back each anchor.
+The room map continues to use live tag reports only; there is no offline layout.
+Calibration is an explicit grounded operation, not continuous tracking of moving anchors.
+
+On **Drone 1**, rebuild the Docker image to install Bluetooth support, or install
+these dependencies inside the existing ROS Kinetic container:
+
+```bash
+sudo apt-get update
+sudo apt-get install bluez libglib2.0-dev libcap2-bin build-essential python-websocket
+sudo python -m pip install bluepy==1.3.0
+sudo setcap cap_net_raw,cap_net_admin+eip "$(python -c 'import os, bluepy; print(os.path.join(os.path.dirname(bluepy.__file__), "bluepy-helper"))')"
+hciconfig
+```
+
+The Pi must have a working Bluetooth LE adapter visible inside the container
+(`hci0` by default), with the host adapter powered and unblocked. The repository's
+privileged container with host networking exposes host Bluetooth; a USB BLE adapter
+can be used if the Pi adapter is unavailable. Close Qorvo's phone app and other BLE
+connections to the anchors. All four anchors need BLE reachability from this Pi
+and UWB line of sight between each other.
+
+Rebuild the ROS workspace and restart the flight-controller and fusion nodes on
+**both drones** to install their calibration interlock. Start both rosbridges, tags
+and flight controllers; keep both drones disarmed. The **Calibration** Screen window
+starts the coordinator only on Drone 1. For a running Screen session, start it manually:
+
+```bash
+roslaunch pidrone_pkg anchor_calibration.launch
+# For another Bluetooth adapter: append interface:=1 (hci1).
+```
+
+Bridge addresses default to `ws://drone1.local:9090` and `ws://drone2.local:9090`;
+override `drone1_bridge` / `drone2_bridge` launch arguments if Pi-to-Pi name resolution
+requires different addresses. Run only one coordinator. Custom hostnames can opt
+into Screen startup on the coordinator Pi with `PALS_CALIBRATION_ENABLED=1`.
+
+1. Connect **both** drones in the dashboard and open **Calibrate anchors → Scan anchors**.
+2. Select four anchors in counterclockwise physical order. First is XY origin;
+   second defines +X. The other two corners must be on the +Y side of this baseline.
+   Mount all four antennas at the same height. Calibration treats their plane as
+   Z = 0, so inter-anchor ranges are horizontal distances and no height entry is needed.
+   Drone height still comes from ToF. With the default `floor_z:=0`, published Z is
+   height above the floor. To express drone Z relative to an elevated anchor plane,
+   set `floor_z` to minus the physical anchor height on both localization nodes;
+   local controller height remains above the floor. The XY map uses only anchor XY.
+   One selected anchor must be the active network initiator; the other three must
+   be active anchors on the same PAN. Calibration does not configure these roles.
+3. Press **Measure layout**. Both flight controllers must acknowledge the flight
+   inhibit before ranging starts. Check the preview against the real room and its
+   dimensions. Distances alone cannot distinguish a mirrored physical arrangement;
+   selecting the correct corner order is essential. A small fit residual is not an
+   absolute accuracy guarantee.
+4. Press **Save layout** within two minutes. The coordinator verifies BLE readback
+   and waits for fresh reports of the same four saved coordinates from **both tags**
+   before releasing flight inhibit. It rejects missing/low-quality ranges, inconsistent
+   geometry and poor fits. If needed, move the grounded tags where they see all four anchors.
+5. Recalibrate heading and restart fusion with the new measured `room_yaw_offset`
+   on each drone. Starting measurement invalidates the previous heading even if you
+   cancel, because the chosen origin and axes may change. ToF remains the Z source.
+
+**Cancel** or an expired preview releases flight inhibit if no coordinate write
+has started. A failed or partial save keeps it active: correct Bluetooth/tag reception
+and **Measure layout → Save layout** again to recover. Recovery state survives a
+coordinator process restart through ROS parameters while the ROS master stays up.
+Do not reset interlock parameters to bypass recovery. After any complete system
+restart, verify both tags' anchor coordinates before flight.
+
+Request/status use `/pidrone/localization/calibration/request` and `/status` on
+Drone 1 (`std_msgs/String` JSON). Each master uses
+`/pidrone/localization/calibration_lock` and `/calibration_locked` (`std_msgs/Bool`)
+for the request and periodically refreshed flight-controller acknowledgement.
+The implementation follows the [PANS API guide, section 7.2](https://forum.qorvo.com/uploads/short-url/jT6U3NQKKCCsDP0Zjh6QFMiZ3jW.pdf).
+Its BLE payload handling and full workflow require validation on your flashed boards
+before flight; the software tests use simulated BLE responses.
 
 Only streams whose header frame matches the configured room frame are drawn.
 Leading `/` is ignored; `map`, `global`, `World` and `Body` are otherwise different

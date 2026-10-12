@@ -58,6 +58,7 @@
   <run_depend>diagnostic_msgs</run_depend>
   <run_depend>python-serial</run_depend>
   <run_depend>python-monotonic</run_depend>
+  <run_depend>python-websocket</run_depend>
   <run_depend>python-numpy</run_depend>
   <run_depend>python-opencv</run_depend>
 

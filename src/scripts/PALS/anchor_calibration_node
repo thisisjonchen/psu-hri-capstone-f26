@@ -1,0 +1,184 @@
+#!/usr/bin/env python
+"""Ground-only BLE anchor calibration coordinator, hosted on drone1."""
+from __future__ import print_function
+
+import copy
+import json
+import threading
+import uuid
+
+import rospy
+from std_msgs.msg import String
+
+from localization.anchor_calibration import solve_layout
+from localization.calibration_guard import BridgeGuard
+from localization.pans_ble import PansBLE
+from localization.uwb_locator import monotonic
+
+
+class AnchorCalibrationNode(object):
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cancel = threading.Event()
+        self.busy = False
+        self.dirty = bool(rospy.get_param('~incomplete_save', False))
+        self.reserved = self.dirty
+        self.preview = None
+        self.preview_at = None
+        self.boards = rospy.get_param('~recovery_boards', []) if self.dirty else []
+        self.state = {'stage': 'idle', 'message': 'Connect and disarm both drones to scan for anchors.',
+                      'boards': self.boards, 'preview': None, 'token': None}
+        if self.dirty:
+            self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
+        self.guard = BridgeGuard(rospy.get_param('~bridges', ['ws://drone1.local:9090', 'ws://drone2.local:9090']))
+        self.interface = int(rospy.get_param('~interface', 0))
+        self.publisher = rospy.Publisher('/pidrone/localization/calibration/status', String, queue_size=1)
+        self.subscriber = rospy.Subscriber('/pidrone/localization/calibration/request', String,
+                                           self.request, queue_size=1)
+        self.timer = rospy.Timer(rospy.Duration(0.25), self.tick)
+        rospy.on_shutdown(self.guard.close)
+
+    def update(self, stage, message, **values):
+        with self.lock:
+            self.state.update(stage=stage, message=message, **values)
+
+    def check(self, locked=True):
+        if self.cancel.is_set() or rospy.is_shutdown():
+            raise ValueError('Calibration cancelled')
+        self.guard.check(locked=locked)
+
+    def request(self, message):
+        try:
+            if len(message.data) > 4096:
+                raise ValueError('Calibration request is too large')
+            request = json.loads(message.data)
+            action = request['action']
+            if action not in ('scan', 'measure', 'apply', 'cancel'):
+                raise ValueError('Unknown calibration action')
+            with self.lock:
+                if action == 'cancel':
+                    self.cancel.set()
+                    if self.busy:
+                        return
+                elif self.busy:
+                    return
+                self.busy = True
+                if action != 'cancel':
+                    self.cancel.clear()
+            worker = threading.Thread(target=self.run, args=(request,))
+            worker.daemon = True
+            worker.start()
+        except (ValueError, KeyError, TypeError) as error:
+            rospy.logwarn('Invalid calibration request: %s', error)
+
+    def release(self):
+        if self.dirty:
+            raise ValueError('Coordinates may be partially saved. Measure and apply again to recover; flight stays inhibited.')
+        if self.reserved:
+            self.guard.set_locked(False)
+            self.reserved = False
+        self.preview = None
+        self.preview_at = None
+        self.state.update(preview=None, token=None)
+
+    def mark_write(self):
+        rospy.set_param('~recovery_boards', self.boards)
+        rospy.set_param('~incomplete_save', True)
+        self.dirty = True
+
+    def run(self, request):
+        try:
+            action = request['action']
+            if action == 'cancel':
+                self.release()
+                self.update('idle', 'Calibration cancelled. No new coordinates saved.')
+                return
+            self.check(locked=False)
+            ble = PansBLE(self.interface)
+            if action == 'scan':
+                if self.reserved and not self.dirty:
+                    raise ValueError('Cancel the current preview before scanning again')
+                if self.dirty:
+                    self.guard.set_locked(True)
+                self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
+                self.boards = ble.scan(lambda: self.check(self.dirty))
+                self.update('idle', 'Select four anchors counterclockwise; first is origin, second sets +X.',
+                            boards=self.boards)
+            elif action == 'measure':
+                choices = request.get('anchors', [])
+                if len(choices) != 4 or len(set(c['ble'] for c in choices)) != 4:
+                    raise ValueError('Select four different anchors')
+                known = {b['ble']: b for b in self.boards}
+                boards = [dict(known[c['ble']], z=0.0) for c in choices]
+                self.preview = None
+                self.preview_at = None
+                self.reserved = True  # Also recover a one-sided/unknown lock outcome.
+                self.guard.set_locked(True)
+                self.update('measuring', 'Measuring distances between anchors...', preview=None, token=None)
+                rows = ble.measure(boards, self.check)
+                preview = solve_layout(boards, rows)
+                self.check()
+                self.preview = preview
+                self.preview_at = monotonic()
+                self.update('preview', 'Review the layout, then save it to all four anchors.',
+                            preview=preview, token=str(uuid.uuid4()))
+            elif action == 'apply':
+                if self.preview_at is not None and monotonic() - self.preview_at > 120 and not self.dirty:
+                    self.release()
+                if (self.preview is None or self.preview_at is None or monotonic() - self.preview_at > 120
+                        or request.get('token') != self.state['token']):
+                    raise ValueError('Preview expired or changed; measure again')
+                self.check()
+                self.update('saving', 'Saving and verifying anchor coordinates...')
+                ble.save(self.preview['positions'], self.check, self.mark_write)
+                self.update('verifying', 'Waiting for both tags to report the saved layout...')
+                self.guard.verify_layout(self.preview['positions'], self.guard.sequences(), self.check)
+                self.check()
+                # Keep dirty set until unlock is acknowledged on both masters.
+                self.guard.set_locked(False)
+                rospy.set_param('~incomplete_save', False)
+                self.dirty = self.reserved = False
+                self.preview = None
+                self.preview_at = None
+                self.update('complete', 'Layout saved and verified. Recalibrate room heading on both drones.',
+                            token=None)
+        except Exception as error:
+            rospy.logwarn('Anchor calibration: %s', error)
+            self.preview = None
+            self.preview_at = None
+            if self.cancel.is_set() and not self.dirty:
+                try:
+                    self.release()
+                except Exception as release_error:
+                    error = release_error
+            # Unknown or partial coordinate writes require a successful retry.
+            self.update('error', str(error), preview=None, token=None)
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def tick(self, _event):
+        with self.lock:
+            if self.preview_at is not None and monotonic() - self.preview_at > 120 and not self.busy:
+                self.cancel.set()
+                self.request(String(data=json.dumps({'action': 'cancel'})))
+            state = copy.deepcopy(self.state)
+            state['reserved'], state['dirty'] = self.reserved, self.dirty
+            try:
+                self.guard.check()
+                state['grounded'] = True
+            except ValueError as error:
+                state['grounded'] = False
+                state['ground_reason'] = str(error)
+            state['stamp'] = rospy.get_time()
+            self.publisher.publish(String(data=json.dumps(state, allow_nan=False)))
+
+
+def main():
+    rospy.init_node('anchor_calibration')
+    AnchorCalibrationNode()
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()

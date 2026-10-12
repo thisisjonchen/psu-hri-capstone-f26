@@ -2,6 +2,7 @@
 import traceback
 import sys
 import yaml
+import threading
 
 import rospy
 import rospkg
@@ -17,7 +18,7 @@ import command_values as cmds
 from sensor_msgs.msg import Imu
 from h2rMultiWii import MultiWii
 from serial import SerialException
-from std_msgs.msg import Header, Empty
+from std_msgs.msg import Header, Empty, Bool
 from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State
 from sensor_msgs.msg import Range
@@ -51,6 +52,8 @@ class FlightController(object):
         # stores the current and previous modes
         self.curr_mode = 'DISARMED'         #initialize as disarmed
         self.prev_mode = 'DISARMED'         #initialize as disarmed
+        self.mode_lock = threading.RLock()
+        self.calibrating = bool(rospy.get_param('/pidrone/localization/calibration_lock', False))
         # store the command to send to the flight controller
         self.command = cmds.disarm_cmd      #initialize as disarmed
         self.last_command = cmds.disarm_cmd
@@ -94,9 +97,20 @@ class FlightController(object):
     ##################################
     def desired_mode_callback(self, msg):
         """ Set the current mode to the desired mode """
-        self.prev_mode = self.curr_mode
-        self.curr_mode = msg.mode
-        self.update_command()
+        with self.mode_lock:
+            if self.calibrating and msg.mode != 'DISARMED':
+                rospy.logwarn('Flight inhibited during anchor calibration')
+                return
+            self.prev_mode = self.curr_mode
+            self.curr_mode = msg.mode
+            self.update_command()
+
+    def calibration_callback(self, msg):
+        with self.mode_lock:
+            if self.curr_mode != 'DISARMED':
+                return
+            rospy.set_param('/pidrone/localization/calibration_lock', msg.data)
+            self.calibrating = bool(msg.data)
 
     def fly_commands_callback(self, msg):
         """ Store and send the flight commands if the current mode is FLYING """
@@ -332,6 +346,7 @@ def main():
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
+    calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
     print('Publishing:')
     print('/pidrone/imu')
     print('/pidrone/mode')
@@ -340,6 +355,7 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
+    rospy.Subscriber('/pidrone/localization/calibration_lock', Bool, fc.calibration_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
     # heartbeat subscribers
@@ -374,6 +390,7 @@ def main():
 
             # publish the current mode of the drone
             fc.modepub.publish(fc.curr_mode)
+            calibration_pub.publish(Bool(data=fc.calibrating))
 
             # sleep for the remainder of the loop time
             r.sleep()

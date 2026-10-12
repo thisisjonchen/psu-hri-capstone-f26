@@ -41,7 +41,10 @@ Use the same `.hex` for every board.
 
 ## 4. Set anchor positions
 
-Mount the anchors, measure their positions in meters with A0 as the origin, and enter them in `anchors.json`. Each anchor stores its position when it's configured, so if you move an anchor later you have to configure it again.
+Mount the anchors. You can measure XYZ manually and enter them in `anchors.json`,
+or use [dashboard BLE calibration](README.md#dashboard-anchor-calibration) to measure
+XY automatically after configuring the roles below. Each anchor stores coordinates;
+repeat calibration after moving one. The dashboard assumes level anchors and saves their Z as 0.
 
 Keep exactly one anchor as `"initiator": true` (A0).
 
@@ -72,6 +75,11 @@ Label each board as you go. The script:
 | Tag | mode `tn`, UWB `act`, location engine `le` |
 
 Every board should show the same PAN ID (`0x1234`). If a command errored, check its name against `help` for your PANS version. As a fallback, you can configure everything from the Decawave DRTLS Manager app over BLE.
+
+For boards already running PANS, set one anchor with `nmi`, the other three with
+`nma`, and each drone tag with `nmt`; verify active UWB, BLE enabled, and matching
+PAN IDs with `si`. The dashboard calibrates coordinates, not roles or network IDs.
+Do not use the example coordinates for flight. Calibrate before enabling room targets.
 
 ## 6. Bring it up
 

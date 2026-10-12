@@ -10,6 +10,7 @@
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
+  <script src="js/anchor-calibration.js" defer></script>
   <script src="js/main.js" defer></script>
 </head>
 <body>
@@ -75,6 +76,24 @@
         </form>
         <p class="map-note" id="target-command-status" role="status" aria-live="polite"></p>
         <p class="map-note target-status" id="target-status" role="status" aria-live="polite"></p>
+        <details class="anchor-calibration">
+          <summary>Calibrate anchors</summary>
+          <p class="map-note">Disarm both drones. Mount all four antennas level; anchor Z is fixed at 0. Select corners counterclockwise from the origin; the second anchor sets +X and the other corners are on the +Y side.</p>
+          <div class="calibration-grid">
+            <label>Origin<select id="calibration-anchor-0" disabled><option value="">Select anchor</option></select></label>
+            <label>+X anchor<select id="calibration-anchor-1" disabled><option value="">Select anchor</option></select></label>
+            <label>Corner 3<select id="calibration-anchor-2" disabled><option value="">Select anchor</option></select></label>
+            <label>Corner 4<select id="calibration-anchor-3" disabled><option value="">Select anchor</option></select></label>
+          </div>
+          <div class="calibration-actions">
+            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>Scan anchors</button>
+            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>Measure layout</button>
+            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>Save layout</button>
+            <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
+          </div>
+          <pre class="calibration-preview" id="calibration-preview" hidden></pre>
+          <p class="map-note" id="calibration-status" role="status" aria-live="polite">Connect both drones and start the calibration service on Drone 1.</p>
+        </details>
         </div>
       </section></div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
