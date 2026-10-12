@@ -108,8 +108,10 @@ class AnchorCalibrationNode(object):
                     self.guard.set_locked(True)
                 self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
                 self.boards = ble.scan(lambda: self.check(self.dirty))
-                self.update('idle', 'Select four anchors counterclockwise; first is origin, second sets +X.',
-                            boards=self.boards)
+                message = 'Found %d anchors. Select four counterclockwise; first is origin, second sets +X.' % len(self.boards)
+                if ble.scan_warnings:
+                    message += ' Unreadable boards: ' + '; '.join(ble.scan_warnings)
+                self.update('idle', message, boards=self.boards)
             elif action == 'measure':
                 choices = request.get('anchors', [])
                 if len(choices) != 4 or len(set(c['ble'] for c in choices)) != 4:

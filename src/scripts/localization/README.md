@@ -177,6 +177,17 @@ can be used if the Pi adapter is unavailable. Close Qorvo's phone app and other 
 connections to the anchors. All four anchors need BLE reachability from this Pi
 and UWB line of sight between each other.
 
+If scanning fails, run `hciconfig -a` inside the ROS container. It should list the
+selected adapter (normally `hci0`). If it is down, run `sudo hciconfig hci0 up`;
+if it is blocked, run `sudo rfkill unblock bluetooth` on the Pi host. If no adapter
+appears, check the host Bluetooth setup or use a USB BLE adapter. A permission
+error requires the `setcap` command above for the helper installed by this Python.
+
+If an anchor advertises but cannot connect, close other BLE apps, power-cycle that
+board and check BLE range from the Pi. Discovery tries the advertised address type
+first, then the other type once. It skips tags and lists unreadable boards while
+retaining reachable anchors; four verified anchors are still required to measure.
+
 Rebuild the ROS workspace and restart the flight-controller and fusion nodes on
 each participating drone to install their calibration interlock. Start its rosbridge,
 tag and flight controller; keep it disarmed. One drone is enough. The **Calibration** Screen window

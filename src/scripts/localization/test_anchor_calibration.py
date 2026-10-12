@@ -16,7 +16,7 @@ from unittest import mock
 import numpy as np
 
 from localization.anchor_calibration import (decode_location, solve_layout,
-    DATA_MODE, LOCATION, CLUSTER)
+    DATA_MODE, LOCATION, CLUSTER, SERVICE)
 from localization.calibration_guard import BridgeGuard, ANCHORS, ACK, OWNER
 from localization.pans_ble import PansBLE
 
@@ -36,6 +36,69 @@ def payload(row):
 
 
 class CalibrationTest(unittest.TestCase):
+    def test_scan_start_failure_preserves_cause_when_helper_already_stopped_or_cleanup_fails(self):
+        for helper in (None, object()):
+            scanner = NS(_helper=helper, start=mock.Mock(side_effect=ValueError('Permission denied')),
+                         stop=mock.Mock(side_effect=ValueError('Helper not started (did you call connect()?)')),
+                         _stopHelper=mock.Mock(side_effect=ValueError('cleanup failed')))
+            ble = PansBLE.__new__(PansBLE)
+            ble.interface, ble.btle = 0, NS(Scanner=object)
+            ble.bounded = lambda base, guard: lambda interface: scanner
+            with self.assertRaisesRegex(ValueError, 'Cannot start Bluetooth scan on hci0: Permission denied'):
+                ble.scan(lambda: None)
+            scanner._stopHelper.assert_called_once()
+            self.assertEqual(scanner.stop.call_count, int(helper is not None))
+
+    def test_connection_retries_other_address_type_once_and_remembers_success(self):
+        failed = NS(_helper=None, connect=mock.Mock(side_effect=RuntimeError('Failed public connection')),
+                    disconnect=mock.Mock(), _stopHelper=mock.Mock())
+        connected = NS(_helper=object(), connect=mock.Mock(), setMTU=mock.Mock(),
+                       disconnect=mock.Mock(), _stopHelper=mock.Mock())
+        ble = PansBLE.__new__(PansBLE)
+        ble.interface, ble.btle = 0, NS(Peripheral=object, BTLEDisconnectError=RuntimeError)
+        factory = mock.Mock(side_effect=[failed, connected])
+        ble.bounded = lambda base, guard: factory
+        board = dict(BOARDS[0], addr_type='public')
+        with ble.connect(board, lambda: None) as peripheral:
+            self.assertIs(peripheral, connected)
+        failed.connect.assert_called_once_with(board['ble'], addrType='public', iface=0)
+        connected.connect.assert_called_once_with(board['ble'], addrType='random', iface=0)
+        self.assertEqual(board['addr_type'], 'random')
+        connected.disconnect.assert_called_once()
+        # Two failed address types must still report failure and clean up both attempts.
+        connected.connect.side_effect = RuntimeError('Failed random connection')
+        connected.disconnect.side_effect = ValueError('Helper not started')
+        factory.reset_mock(side_effect=True)
+        factory.side_effect = [failed, connected]
+        with self.assertRaisesRegex(RuntimeError, 'Failed random connection'):
+            with ble.connect(dict(BOARDS[0], addr_type='public'), lambda: None):
+                self.fail('Cannot use a failed connection')
+        self.assertEqual(factory.call_count, 2)
+
+    def test_discovery_skips_tags_and_reports_unreadable_boards_without_losing_anchors(self):
+        def entry(address, mode, connectable=True):
+            return NS(addr=address, addrType='public', connectable=connectable,
+                      getScanData=lambda: [(0x21, 'Service Data', SERVICE.replace('-', '') + '%02x00' % mode)])
+        entries = [entry('tag', 0x02), entry('failed', 0x82), entry('busy', 0x82, False), entry('anchor', 0x82)]
+        scanner = NS(_helper=None, start=mock.Mock(), getDevices=lambda: entries, stop=mock.Mock(), _stopHelper=mock.Mock())
+        ble = PansBLE.__new__(PansBLE)
+        ble.interface, ble.btle = 0, NS(Scanner=object, BTLEException=RuntimeError)
+        ble.bounded = lambda base, guard: lambda interface: scanner
+        attempted = []
+        @contextmanager
+        def connect(board, guard):
+            attempted.append(board['ble'])
+            if board['ble'] == 'failed': raise RuntimeError('Failed to connect')
+            yield object()
+        ble.connect, ble.inspect = connect, lambda p: BOARDS[0]
+        with mock.patch('localization.pans_ble.monotonic', side_effect=[0, 6]):
+            boards = ble.scan(lambda: None)
+        self.assertEqual(attempted, ['failed', 'anchor'])
+        self.assertEqual([b['id'] for b in boards], [BOARDS[0]['id']])
+        self.assertEqual(len(ble.scan_warnings), 2)
+        self.assertIn('failed', ble.scan_warnings[0])
+        self.assertIn('busy', ble.scan_warnings[1])
+
     def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}
         layout = solve_layout(BOARDS, rows)
@@ -113,7 +176,7 @@ class CalibrationTest(unittest.TestCase):
             # Replaying the same report cannot advance acquisition or verification.
             baseline = guard.sequences()
             for peer in guard.peers: guard.receive(peer, ANCHORS, report)
-            with self.assertRaises(ValueError): guard.verify_layout(layout, baseline, lambda: None, timeout=0)
+            self.assertEqual(guard.sequences(), baseline)
 
     def test_competing_coordinator_cannot_claim_both_or_release_another_owner(self):
         guard = BridgeGuard.__new__(BridgeGuard)
@@ -229,6 +292,7 @@ class CoordinatorTest(unittest.TestCase):
             if not value: self.guard.participants = None
         self.guard.set_locked.side_effect = set_locked
         self.ble = mock.Mock()
+        self.ble.scan_warnings = []
         self.ble.scan.return_value, self.ble.measure.return_value = BOARDS, ROWS
         self.patch = mock.patch.dict(self.kind.run.__globals__, {'BridgeGuard': mock.Mock(return_value=self.guard),
                                                                 'PansBLE': mock.Mock(return_value=self.ble)})

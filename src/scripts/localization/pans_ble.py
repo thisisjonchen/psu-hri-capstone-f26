@@ -4,6 +4,7 @@ from __future__ import division
 import struct
 import uuid
 import binascii
+import sys
 from contextlib import contextmanager
 
 from localization.anchor_calibration import (SERVICE, MODE, PAN, DATA_MODE, LOCATION,
@@ -35,21 +36,49 @@ class PansBLE(object):
                 raise ValueError('Bluetooth operation timed out; check adapter and anchor range')
         return Bounded
 
+    def cleanup(self, helper, stop):
+        failed = sys.exc_info()[0] is not None
+        cleanup_error = None
+        helper.check = lambda: None
+        try:
+            # Bluepy stops its helper itself after some startup/management failures.
+            if helper._helper is not None:
+                stop()
+        except Exception as error:
+            cleanup_error = error
+        finally:
+            try:
+                helper._stopHelper()
+            except Exception as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None and not failed:
+            raise cleanup_error
+
     @contextmanager
     def connect(self, board, guard):
-        guard()
-        peripheral = self.bounded(self.btle.Peripheral, guard)()
+        preferred = board.get('addr_type', 'random')
+        if preferred not in ('public', 'random'):
+            raise ValueError('Unknown Bluetooth address type for %s' % board['ble'])
+        address_types = [preferred, 'random' if preferred == 'public' else 'public']
+        for index, address_type in enumerate(address_types):
+            guard()
+            peripheral = self.bounded(self.btle.Peripheral, guard)()
+            try:
+                peripheral.connect(board['ble'], addrType=address_type, iface=self.interface)
+            except Exception as error:
+                self.cleanup(peripheral, peripheral.disconnect)
+                if not isinstance(error, self.btle.BTLEDisconnectError) or index == len(address_types) - 1:
+                    raise
+            else:
+                board['addr_type'] = address_type
+                break
         try:
-            peripheral.connect(board['ble'], addrType=board.get('addr_type', 'random'), iface=self.interface)
             peripheral.setMTU(128)  # Four-anchor range notifications exceed the default ATT payload.
             guard()
             yield peripheral
         finally:
-            peripheral.check = lambda: None
-            try:
-                peripheral.disconnect()
-            finally:
-                peripheral._stopHelper()
+            self.cleanup(peripheral, peripheral.disconnect)
 
     def characteristic(self, peripheral, uuid):
         items = peripheral.getCharacteristics(uuid=uuid)
@@ -62,29 +91,46 @@ class PansBLE(object):
         return decode_info(read(INFO), read(MODE), read(PAN))
 
     def scan(self, guard):
+        self.scan_warnings = []
         scanner = self.bounded(self.btle.Scanner, guard)(self.interface)
         try:
-            scanner.start()
+            try:
+                scanner.start()
+            except Exception as error:
+                raise ValueError('Cannot start Bluetooth scan on hci%d: %s. Check adapter power and bluepy-helper permissions.'
+                                 % (self.interface, error))
             deadline = monotonic() + 5
             while monotonic() < deadline:
                 guard()
                 scanner.process(0.25)
             entries = scanner.getDevices()
         finally:
-            scanner.check = lambda: None
-            try:
-                scanner.stop()
-            finally:
-                scanner._stopHelper()
+            self.cleanup(scanner, scanner.stop)
         boards = []
+        service_ids = (SERVICE.replace('-', ''), binascii.hexlify(uuid.UUID(SERVICE).bytes[::-1]).decode('ascii'))
         for entry in entries:
-            service_ids = (SERVICE.replace('-', ''), binascii.hexlify(uuid.UUID(SERVICE).bytes[::-1]).decode('ascii'))
+            guard()
+            advertised = entry.getScanData()
             if not any(any(service in value.lower().replace('-', '') for service in service_ids)
-                       for _, _, value in entry.getScanData()):
+                       for kind, _, value in advertised if kind in (0x06, 0x07, 0x21)):
+                continue
+            # PANS presence broadcasts include the anchor/tag bit after the 16-byte UUID.
+            modes = [int(value[32:34], 16) for kind, _, raw in advertised
+                     for value in [raw.lower().replace('-', '')] if kind == 0x21 and len(value) >= 36
+                     and any(value.startswith(service) for service in service_ids)]
+            if modes and not any(mode & 0x80 for mode in modes):
+                continue
+            if not entry.connectable:
+                self.scan_warnings.append('%s is advertising but not connectable; close other BLE connections and retry' % entry.addr)
                 continue
             board = {'ble': entry.addr, 'addr_type': entry.addrType}
-            with self.connect(board, guard) as peripheral:
-                board.update(self.inspect(peripheral))
+            try:
+                with self.connect(board, guard) as peripheral:
+                    board.update(self.inspect(peripheral))
+            except self.btle.BTLEException as error:
+                guard()  # Cancellation or a lost flight interlock still aborts discovery.
+                self.scan_warnings.append('%s: %s. Close other BLE connections, check range, and retry' % (entry.addr, error))
+                continue
             if board['anchor']:
                 boards.append(board)
         return sorted(boards, key=lambda b: b['id'])

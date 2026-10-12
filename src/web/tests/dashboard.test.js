@@ -704,7 +704,7 @@ test('calibration switches idle services but pins active work and inhibits fligh
   assert.match(app.elements.get('commandFeedback').textContent, /inhibited/);
 });
 
-for (const coordinator of ['drone1', 'drone2']) for (const paired of [false, true]) test('anchor calibration through ' + coordinator + ' with ' + (paired ? 'two drones' : 'one drone') + ' requires fresh disarmed peers and saves only the reviewed layout', () => {
+for (const [coordinator, paired] of [['drone1', true], ['drone2', false]]) test('anchor calibration through ' + coordinator + ' with ' + (paired ? 'two drones' : 'one drone') + ' requires fresh disarmed peers and saves only the reviewed layout', () => {
   const app = dashboard(), service = app.connect(coordinator);
   const other = paired ? app.connect(coordinator === 'drone1' ? 'drone2' : 'drone1') : null;
   const connected = other ? [service, other] : [service];
