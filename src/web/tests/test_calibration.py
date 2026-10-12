@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
-from calibration.calibration_guard import BridgeGuard, ANCHORS, OWNER, connect_bridge
+from calibration.calibration_guard import BridgeGuard, OWNER, connect_bridge
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
 from tempfile import TemporaryDirectory
@@ -148,8 +148,7 @@ class CalibrationTest(unittest.TestCase):
         guard.peers = [dict(url='ws://drone1:9090', socket=object(), mode=None, mode_at=0,
                             owner=None, owner_at=0),
                        dict(url='ws://drone2:9090', socket=object(), mode='DISARMED', mode_at=10,
-                            owner='', owner_at=10,
-                            anchor_seq=1, anchor_stamp=None, anchors=None, anchors_at=0)]
+                            owner='', owner_at=10)]
         active = guard.peers[1]
         guard.select([active['url']])
         for invalid in (None, 'ws://drone2:9090', ['ws://other:9090'], [active['url']] * 2, [{}]):
@@ -176,23 +175,6 @@ class CalibrationTest(unittest.TestCase):
             guard.select([])
             guard.check(owned=True)  # Dashboard changes retain the current calibration participant.
             guard.select([active['url']])
-            baseline = guard.sequences()
-            layout = solve_layout(BOARDS, ROWS)['positions']
-            guard.receive(active, ANCHORS, dict(header=dict(stamp=dict(secs=10, nsecs=0), frame_id='map'),
-                                               anchor_ids=[p['id'] for p in layout], positions=layout))
-            guard.verify_layout(layout, baseline, lambda: guard.check(True))
-            baseline = guard.sequences()
-            guard.receive(active, ANCHORS, active['anchors'])
-            self.assertEqual(guard.sequences(), baseline)  # Replayed reports cannot renew verification.
-            other = guard.peers[0]
-            other.update(anchor_seq=0, anchors=None, anchors_at=0)
-            guard.participants.append(other['url'])
-            guard.verify_layout(layout, {active['url']: 0, other['url']: 0}, lambda: None, timeout=0.05)
-            # Neither tag has a new report after this baseline.
-            with mock.patch.object(guard.stop_event, 'wait', return_value=True):
-                with self.assertRaisesRegex(ValueError, 'at least one participating tag'):
-                    guard.verify_layout(layout, guard.sequences(), lambda: None)
-            guard.participants.remove(other['url'])
             active['socket'] = None
             with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check(True)
             with self.assertRaises(ValueError): guard.reserve(False)
@@ -296,7 +278,7 @@ class CoordinatorTest(unittest.TestCase):
         self.node.run({'action': 'cancel'})
         self.assertFalse(self.node.reserved)
 
-    def test_missing_tag_verification_retains_warning_and_expired_preview_cannot_write(self):
+    def test_expired_preview_cannot_write_and_ble_readback_completes_save(self):
         self.node.run(self.measure)
         self.node.preview_at -= 121
         self.node.run(dict(action='apply', token=self.node.state['token']))
@@ -304,12 +286,12 @@ class CoordinatorTest(unittest.TestCase):
         self.assertFalse(self.node.reserved)
         self.node.run(self.measure)
         self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
-        self.guard.verify_layout.side_effect = ValueError('No tag has reported the saved layout')
         self.guard.reserve.reset_mock()
         self.node.run(dict(action='apply', token=self.node.state['token']))
-        self.assertTrue(self.node.dirty)
-        self.assertTrue(self.node.reserved)
-        self.guard.reserve.assert_not_called()
+        self.assertFalse(self.node.dirty)
+        self.assertFalse(self.node.reserved)
+        self.assertEqual(self.node.state['stage'], 'complete')
+        self.guard.reserve.assert_called_once_with(False)
 
 
 class FlightOwnershipTest(unittest.TestCase):

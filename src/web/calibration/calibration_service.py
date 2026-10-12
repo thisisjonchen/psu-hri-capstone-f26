@@ -187,8 +187,6 @@ class AnchorCalibration:
                 self.check()
                 self.update('saving', 'Saving and verifying anchor coordinates...')
                 ble.call('save', self.check, self.preview['positions'], self.mark_write)
-                self.update('verifying', 'Waiting for one drone to confirm the saved layout...')
-                self.guard.verify_layout(self.preview['positions'], self.guard.sequences(), self.check)
                 self.check()
                 # Keep the recovery warning until saved coordinates are verified.
                 self.guard.reserve(False)

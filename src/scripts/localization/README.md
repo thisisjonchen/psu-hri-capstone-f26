@@ -163,7 +163,7 @@ If an anchor moves, recalibrate before using room targets again.
 The laptop dashboard server uses its Bluetooth to calibrate four DWM1001 PANS anchors.
 The drones read localization through their USB tags; they do not need Bluetooth.
 Calibration measures all six inter-anchor distances, fits XY with shared Z = 0,
-and verifies saved coordinates through BLE and a fresh report from any participating tag.
+and verifies saved coordinates by reading them back from all four anchors through BLE.
 The map uses live tag reports only, with no offline layout.
 
 From the repository root on your laptop (macOS or Linux, Python 3.9+):
@@ -201,8 +201,8 @@ connected drone must join through another measurement.
    distances between all six anchor pairs and rejects conflicting reported PAN IDs.
 2. Press **Measure layout** and review the shape and dimensions. Flight controllers
    must acknowledge exclusive calibration ownership before ranging begins.
-3. Press **Save layout** within two minutes. BLE readback and any one participating tag
-   verify the saved layout; missing reports produce a calibration error.
+3. Press **Save layout** within two minutes. Calibration completes after BLE readback
+   confirms the saved coordinates on all four anchors.
 4. Keep the startup heading aligned with map +Y. A new live room fix is required
    after calibration; ToF remains the Z source.
 

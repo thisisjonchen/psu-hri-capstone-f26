@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 
 REQUEST = '/pidrone/localization/calibration_owner/request'
 OWNER = '/pidrone/localization/calibration_owner/status'
-ANCHORS = '/pidrone/localization/anchors'
 # Calibration is performed disarmed; tolerate brief telemetry gaps without
 # changing the stricter freshness limits used by flight/navigation.
 CONTROL_STATE_TIMEOUT = 2.0
@@ -52,8 +51,7 @@ class BridgeGuard(object):
         self.selection = []
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
                        'error': 'Connecting...',
-                       'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
-                       'anchors': None, 'anchors_at': 0, 'anchor_stamp': None} for url in urls]
+                       'owner': None, 'owner_at': 0, 'request': None} for url in urls]
         for peer in self.peers:
             worker = threading.Thread(target=self.watch, args=(peer,))
             worker.daemon = True
@@ -76,8 +74,7 @@ class BridgeGuard(object):
                     peer['error'] = None
                 self.send(peer, {'op': 'advertise', 'topic': REQUEST, 'type': 'std_msgs/String'})
                 for topic, kind in (('/pidrone/mode', 'pidrone_pkg/Mode'),
-                                    (OWNER, 'std_msgs/String'),
-                                    (ANCHORS, 'pidrone_pkg/AnchorLayout')):
+                                    (OWNER, 'std_msgs/String')):
                     self.send(peer, {'op': 'subscribe', 'topic': topic, 'type': kind, 'queue_length': 1})
                 while not self.stop_event.is_set():
                     try:
@@ -97,8 +94,7 @@ class BridgeGuard(object):
             finally:
                 with self.lock:
                     peer['socket'] = None
-                    peer['mode_at'] = peer['owner_at'] = peer['anchors_at'] = 0
-                    peer['anchor_stamp'] = None
+                    peer['mode_at'] = peer['owner_at'] = 0
                 if socket is not None:
                     socket.close()
             self.stop_event.wait(1)
@@ -116,17 +112,6 @@ class BridgeGuard(object):
                         if status['owner'] == self.owner:
                             self.claimed = True
                 except (ValueError, KeyError, TypeError):
-                    pass
-            elif topic == ANCHORS:
-                try:
-                    stamp = message['header']['stamp']
-                    stamp = int(stamp['secs']) * 1000000000 + int(stamp['nsecs'])
-                    if stamp <= 0 or (peer['anchor_stamp'] is not None and stamp <= peer['anchor_stamp']):
-                        return
-                    peer['anchor_stamp'] = stamp
-                    peer['anchors'], peer['anchors_at'] = message, now
-                    peer['anchor_seq'] += 1
-                except (KeyError, TypeError, ValueError):
                     pass
 
     def select(self, urls):
@@ -232,34 +217,6 @@ class BridgeGuard(object):
             if self.stop_event.wait(0.05):
                 break
         raise ValueError('Calibration ownership was not acknowledged by every participant')
-
-    def sequences(self):
-        with self.lock:
-            return {p['url']: p['anchor_seq'] for p in self.selected(include_new=False)}
-
-    def verify_layout(self, positions, baseline, guard, timeout=8):
-        expected = {p['id']: p for p in positions}
-        deadline = monotonic() + timeout
-        while monotonic() < deadline:
-            guard()
-            matched = []
-            with self.lock:
-                for peer in self.selected(include_new=False):
-                    sequence = baseline.get(peer['url'], peer['anchor_seq'])
-                    report = peer['anchors'] or {}
-                    ids, actual = report.get('anchor_ids', []), report.get('positions', [])
-                    valid = (peer['anchor_seq'] > sequence and monotonic() - peer['anchors_at'] <= 0.5
-                             and report.get('header', {}).get('frame_id', '').lstrip('/') == 'map'
-                             and len(ids) == len(actual) == 4 and set(ids) == set(expected))
-                    if valid:
-                        valid = all(all(abs(float(point[axis]) - expected[key][axis]) <= 0.02
-                                        for axis in ('x', 'y', 'z')) for key, point in zip(ids, actual))
-                    matched.append(valid)
-            if any(matched):
-                return
-            if self.stop_event.wait(0.1):
-                break
-        raise ValueError('Layout verification incomplete: at least one participating tag must report the four saved anchors')
 
     def close(self):
         self.stop_event.set()
