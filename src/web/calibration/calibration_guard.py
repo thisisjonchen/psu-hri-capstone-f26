@@ -1,4 +1,4 @@
-"""Observe reachable drones and retain calibration participants until release."""
+"""Observe dashboard-selected drones and retain participants until release."""
 import json
 import logging
 import socket
@@ -47,6 +47,7 @@ class BridgeGuard(object):
         self.owner = owner
         self.claimed = claimed
         self.participants = list(participants) if participants else None
+        self.selection = []
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
                        'error': 'Connecting...',
                        'locked': None, 'ack_at': 0, 'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
@@ -128,14 +129,22 @@ class BridgeGuard(object):
                 except (KeyError, TypeError, ValueError):
                     pass
 
+    def select(self, urls):
+        with self.lock:
+            known = {p['url'] for p in self.peers}
+            if (not isinstance(urls, list) or len(urls) > len(known) or
+                    any(not isinstance(url, str) or url not in known for url in urls) or
+                    len(set(urls)) != len(urls)):
+                raise ValueError('Select connected dashboard drones for calibration')
+            self.selection = list(urls)
+
     def selected(self, include_new=True):
         with self.lock:
             peers = [p for p in self.peers if
                      (self.participants is not None and p['url'] in self.participants) or
-                     ((include_new or self.participants is None) and p['socket'] is not None)]
+                     ((include_new or self.participants is None) and p['url'] in self.selection)]
             if not peers:
-                failures = '; '.join('%s (%s)' % (p['url'], p.get('error') or 'Disconnected') for p in self.peers)
-                raise ValueError('Laptop calibration cannot connect to drone rosbridge: ' + failures)
+                raise ValueError('Connect at least one drone in the dashboard to calibrate anchors')
             return peers
 
     def connections(self):
@@ -154,6 +163,9 @@ class BridgeGuard(object):
         with self.lock:
             for peer in self.selected(include_new=not allow_other):
                 if peer['socket'] is None or not 0 <= now - peer['mode_at'] <= 0.5:
+                    if peer['socket'] is None:
+                        raise ValueError('Laptop calibration cannot connect to drone rosbridge: %s (%s)' %
+                                         (peer['url'], peer.get('error') or 'Disconnected'))
                     raise ValueError('Fresh flight state required from %s; start its flight controller' % peer['url'])
                 if peer['mode'] != 'DISARMED':
                     raise ValueError('Disarm %s before calibration' % peer['url'])

@@ -20,6 +20,8 @@ class FakeSerial(object):
         self.fail = False
         self.in_waiting = 0
         self.prompt = b'dwm> '
+        self.rate_reply = b'err code: 0\r\n'
+        self.replies = deque()
 
     def write(self, data):
         self.writes.append(data)
@@ -27,10 +29,14 @@ class FakeSerial(object):
             self.streaming = False
         if data == b'lec\r':
             self.streaming = not self.streaming
+        if data == b'aurs 1 1\r':
+            self.replies.append(self.rate_reply)
 
     def readline(self):
         if self.fail:
             raise serial.SerialException('device unplugged')
+        if self.replies:
+            return self.replies.popleft()
         if self.streaming and self.lines:
             return self.lines.popleft()
         time.sleep(0.001)
@@ -102,6 +108,27 @@ class LocatorTest(unittest.TestCase):
         self.assertEqual(fake.writes.count(b'lec\r'), 1)
         self.assertEqual(len(loc.anchor_sample.anchors), 4)
         self.assertIn(b'reset\r', fake.writes)
+        self.assertLess(fake.writes.index(b'reset\r'), fake.writes.index(b'aurs 1 1\r'))
+        self.assertLess(fake.writes.index(b'aurs 1 1\r'), fake.writes.index(b'lec\r'))
+
+    def test_rate_failure_closes_port_without_starting_position_stream(self):
+        fake = FakeSerial()
+        fake.rate_reply = b'err code: -1\r\n'
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: not loc.running))
+        self.assertIn('PANS rejected 10 Hz', loc.error)
+        self.assertNotIn(b'lec\r', fake.writes)
+        self.assertFalse(fake.is_open)
+
+        fake = FakeSerial()
+        loc = UWBLocator(port='fake')
+        loc._serial = fake
+        loc._stop.wait = lambda timeout: False
+        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3]):
+            loc._run()
+        self.assertIn('No PANS response', loc.error)
+        self.assertNotIn(b'lec\r', fake.writes)
+        self.assertFalse(fake.is_open)
 
     def test_partial_lines_and_quality_filter(self):
         raw = LEC.encode('ascii')

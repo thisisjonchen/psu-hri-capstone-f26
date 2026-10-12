@@ -105,6 +105,8 @@ class AnchorCalibration:
             raise ValueError('Unknown calibration action')
         action = request['action']
         with self.lock:
+            if action != 'cancel':
+                self.guard.select(request.get('bridges'))
             if action == 'cancel':
                 self.cancel.set()
                 if self.busy:
@@ -226,10 +228,13 @@ class AnchorCalibration:
             if self.preview_at is not None and monotonic() - self.preview_at > 120 and not self.busy:
                 self.request({'action': 'cancel'})
 
-    def status(self):
+    def status(self, selection=None):
         with self.lock:
+            if selection is not None:
+                self.guard.select(selection)
             state = copy.deepcopy(self.state)
             state.update(reserved=self.reserved, dirty=self.dirty, busy=self.busy)
+            state['selection'] = list(self.guard.selection)
             state['bridges'] = self.guard.connections()
             try:
                 self.guard.check()

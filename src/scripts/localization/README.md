@@ -51,7 +51,10 @@ screen -c pi.screenrc
 An explicitly empty `port:=` disables serial access and publishes an actionable
 error diagnostic. With a port configured, setup and reading run in a worker.
 The reader verifies the `dwm>` PANS prompt, reboots the tag once to establish a known
-stream state, then enables `lec` once. A delayed first fix does not toggle it off.
+stream state, sets moving and stationary updates to 10 Hz (`aurs 1 1`), then enables
+`lec` once. Rate configuration must succeed before streaming starts. The ROS loop
+checks at 20 Hz and publishes each new fix once. A delayed first fix does not toggle
+the stream off.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,
 plus the tag's position. AN0/AN1 slot numbers are not used as anchor identities.
 Serial failures invalidate the last fix immediately and trigger periodic reconnects.
@@ -145,9 +148,10 @@ outline. A consistent complete layout change automatically updates the room and
 clears targets. A missing anchor or interrupted stream never shrinks the map. The
 last complete report has a 1.5 s grace period; partial or repeated samples cannot
 renew that period. Afterwards the retained outline is labeled as the last observed
-layout, and marker display/target editing wait for fresh complete discovery. Only
-live reports with matching anchors enable a drone's measured markers. Reports from
-a disconnected bridge are discarded; reconnect requires a fresh observation.
+layout. The map and last known positions stay visible through telemetry gaps, with
+held markers faded and labeled. Fresh matching anchor and position reports resume
+updates; target sending still requires live localization. Temporary fusion resets
+retain held positions; disconnects and confirmed layout changes clear old markers.
 
 `scripts/localization/anchors.json` remains a **manual board setup input only**.
 Program measured coordinates with the setup tool, or use the BLE calibration below.
@@ -180,9 +184,10 @@ The server connects to `ws://drone1.local:9090` and `ws://drone2.local:9090`.
 For different addresses, pass `--bridges ws://ADDRESS:9090 [ws://SECOND:9090]`.
 Use the same addresses for the dashboard's drone connections. Start rosbridge,
 flight controller, tag reader and fusion on each drone; keep them disarmed.
-One connected drone is enough. A reachable companion must also be disarmed,
-even if its dashboard connection is closed. Participants cannot disappear during
-calibration, and a newly connected drone must join through another measurement.
+Calibration follows the drones connected in the dashboard: connect one or both,
+with no server option needed. Each selected drone must report a fresh disarmed state.
+Participants remain required until calibration finishes or is cancelled; a newly
+connected drone must join through another measurement.
 
 1. Open **Calibrate anchors → Scan anchors**. Select an anchor for each labeled corner.
    Bottom left is the origin; +X runs right and +Y runs up on the map.

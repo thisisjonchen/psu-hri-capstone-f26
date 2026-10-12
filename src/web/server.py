@@ -15,6 +15,10 @@ from calibration.calibration_service import AnchorCalibration
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+
     def allowed(self):
         host = self.headers.get('Host', '')
         allowed = {'localhost:%d' % self.server.server_port, '127.0.0.1:%d' % self.server.server_port}
@@ -29,7 +33,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
-        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(data)
 
@@ -56,6 +59,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if not 0 < length <= 4096:
                 raise ValueError('Calibration request must be between 1 and 4096 bytes')
             request = json.loads(self.rfile.read(length))
+            if isinstance(request, dict) and request.get('action') == 'status':
+                if not isinstance(request.get('bridges'), list):
+                    raise ValueError('Select connected dashboard drones for calibration')
+                self.respond(200, self.server.calibration.status(request['bridges']))
+                return
             self.server.calibration.request(request)
         except (ValueError, TypeError) as error:
             self.respond(400, {'error': str(error)})

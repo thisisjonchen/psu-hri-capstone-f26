@@ -179,6 +179,7 @@ class FleetMap {
           Object.values(drones).forEach(drone => xySources.forEach(([key]) => {
             [0, 1, 2].forEach(i => { drone.series[key + i] = []; });
           }));
+          this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           document.getElementById('target-x').value = '';
           document.getElementById('target-y').value = '';
         }
@@ -188,9 +189,7 @@ class FleetMap {
         this.chart.options.scales.xAxes[0].display = true;
         this.chart.options.scales.yAxes[0].display = true;
       }
-      const r = this.room;
-      status = 'Live UWB anchors · ' + r.frame + ' · ' + (r.xMax - r.xMin).toFixed(1) + ' × ' +
-        (r.yMax - r.yMin).toFixed(1) + ' m · Equal X/Y scale';
+      status = '';
     } else {
       status = Object.values(drones).some(drone => drone.connected)
         ? 'Waiting for a complete report of four UWB corner anchors'
@@ -201,7 +200,8 @@ class FleetMap {
     }
     if (!this.layoutUsable && this.room) status += ' · Last observed layout retained';
     document.getElementById('room-status').textContent = status;
-    ['room-fit', 'room-zoom-in', 'room-zoom-out'].forEach(id => { document.getElementById(id).disabled = !this.layoutUsable; });
+    document.getElementById('room-status').hidden = !status;
+    ['room-fit', 'room-zoom-in', 'room-zoom-out'].forEach(id => { document.getElementById(id).disabled = !this.room; });
     document.getElementById('target-submit').disabled = !this.layoutUsable;
     document.getElementById('target-clear').disabled = !this.room;
     this.render();
@@ -303,10 +303,14 @@ class FleetMap {
   }
 
   render() {
-    document.getElementById('map-frame').classList.toggle('map-unavailable', !this.layoutUsable);
-    document.getElementById('map-placeholder').hidden = this.layoutUsable;
-    document.getElementById('fleet-xyChart').setAttribute('aria-hidden', String(!this.layoutUsable));
-    ['map-legend', 'map-sources'].forEach(id => { document.getElementById(id).hidden = !this.layoutUsable; });
+    const frame = document.getElementById('map-frame');
+    // Once discovered, keep the map visible for the rest of this page session.
+    const visible = !!this.room || frame.classList.contains('map-ready');
+    frame.classList.toggle('map-ready', visible);
+    frame.classList.toggle('map-unavailable', !visible);
+    document.getElementById('map-placeholder').hidden = visible;
+    document.getElementById('fleet-xyChart').setAttribute('aria-hidden', String(!visible));
+    ['map-legend', 'map-sources'].forEach(id => { document.getElementById(id).hidden = !visible; });
     const selected = document.getElementById('target-drone').value;
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
     document.getElementById('target-stop').disabled = !drones[selected].connected;
@@ -317,8 +321,19 @@ class FleetMap {
         dataset.data = this.layoutUsable && this.targets[dataset.targetDrone] ? [this.targets[dataset.targetDrone]] : [];
       } else {
         const drone = drones[dataset.droneId];
-        dataset.data = this.layoutUsable && this.hasMatchingReport(drone.id) && roomFrame(drone.xyFrames[dataset.source]) === this.room.frame
-          ? drone.series[dataset.key].map(point => ({ ...point })) : [];
+        const aligned = this.room && drone.connected && roomFrame(drone.xyFrames[dataset.source]) === this.room.frame;
+        const points = drone.series[dataset.key];
+        const receivedAt = drone.xyReceivedAt[dataset.source];
+        const live = aligned && this.layoutUsable && this.hasMatchingReport(drone.id) && points.length > 0 &&
+          receivedAt !== undefined && Date.now() - receivedAt <= 500;
+        // Keep display-only coordinates through gaps; never renew flight freshness.
+        if (!aligned) dataset.lastData = [];
+        else if (live) dataset.lastData = points.map(point => ({ ...point }));
+        dataset.data = dataset.lastData || [];
+        dataset.stale = dataset.data.length > 0 && !live;
+        dataset.borderColor = dataset.stale
+          ? (drone.id === 'drone1' ? 'rgba(0, 114, 178, 0.45)' : 'rgba(213, 94, 0, 0.45)')
+          : droneColor(drone.id);
       }
     });
     document.getElementById('target-status').textContent = Object.entries(this.targets).map(([id, p]) =>
@@ -335,7 +350,10 @@ class FleetMap {
         const y = (dataset.data[0].y + dataset.data[1].y) / 2;
         return x < xTicks.min || x > xTicks.max || y < yTicks.min || y > yTicks.max;
       }).map(dataset => dataset.label);
+    const held = this.chart.data.datasets.filter(dataset => dataset.stale && dataset.key === dataset.source + '0')
+      .map(dataset => dataset.label);
     document.getElementById('map-stream-status').textContent = [
+      held.length ? 'Last known position: ' + held.join(', ') : '',
       omitted.length ? 'Hidden until aligned to ' + this.room.frame + ': ' + omitted.join(', ') : '',
       outside.length ? 'Outside current view: ' + outside.join(', ') : ''
     ].filter(Boolean).join('. ');
@@ -344,6 +362,7 @@ class FleetMap {
   clearDrone(id) {
     // Remove measured markers while preserving this drone's proposed destination.
     xySources.forEach(([key]) => { [0, 1, 2].forEach(i => { drones[id].series[key + i] = []; }); });
+    this.chart.data.datasets.filter(dataset => dataset.droneId === id).forEach(dataset => { dataset.lastData = []; });
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     this.refreshAnchors();
@@ -380,6 +399,7 @@ class DroneSession {
     this.analysis = false;
     this.series = {};
     this.xyFrames = {};
+    this.xyReceivedAt = {};
     this.heightChart = this.makeChart('heightChart', this.heightDatasets(), 'Height (m)', 0, 0.6);
     this.speedChart = this.makeChart('speedChart', [
       this.dataset('speed', 'Horizontal speed', '#e46555'),
@@ -462,6 +482,7 @@ class DroneSession {
     this.localizationStamp = time;
     this.xyFrames.uwb = message.header.frame_id;
     this.localizationReceivedAt = Date.now();
+    this.xyReceivedAt.uwb = this.localizationReceivedAt;
     this.lastLocalizationText = 'X ' + p.x.toFixed(2) + ' · Y ' + p.y.toFixed(2) + ' · Z ' + p.z.toFixed(2) + ' m';
     this.field('localizationPosition').textContent = this.lastLocalizationText;
     this.field('localizationPosition').dataset.state = 'ready';
@@ -572,6 +593,7 @@ class DroneSession {
 
   resetTelemetry() {
     this.xyFrames = {};
+    this.xyReceivedAt = {};
     this.startTime = null;
     this.latestTime = 0;
     this.positionMode = false;
@@ -672,8 +694,11 @@ class DroneSession {
       if (!Number.isInteger(message.data)) return;
       if (this.fusionGeneration !== null && this.fusionGeneration !== message.data) {
         this.fusedStamp = this.localizationStamp = null;
-        this.clearFusion('Localization reference changed');
-        this.clearLocalization('Localization reference changed', false);
+        this.xyReceivedAt = {};
+        this.clearFusion('Waiting for fresh position');
+        this.clearLocalization('Waiting for fresh position');
+        // Fusion also resets on brief sensor gaps. Retain display-only markers;
+        // a confirmed anchor-layout change clears them in refreshAnchors().
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         fleetMap.refreshAnchors();
@@ -831,6 +856,7 @@ class DroneSession {
     const { position: p, orientation: q } = pose;
     if (![p.x, p.y, q.w, q.x, q.y, q.z].every(Number.isFinite)) return;
     this.xyFrames[key] = frame;
+    this.xyReceivedAt[key] = Date.now();
     const rotation = new Quaternion([q.w, q.x, q.y, q.z]);
     [[0.09, 0.09, 0], [0.09, -0.09, 0], [0, 0.15, 0]].forEach((vector, i) => {
       const rotated = rotation.rotateVector(vector);

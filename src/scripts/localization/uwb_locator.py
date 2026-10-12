@@ -5,6 +5,7 @@ Position timestamps are host monotonic receipt times, not UWB measurement times.
 from __future__ import print_function
 
 import math
+import re
 import threading
 from collections import namedtuple
 
@@ -179,6 +180,8 @@ class UWBLocator(object):
             self._in_shell = False
             if self._stop.wait(3) or not self._enter_shell():
                 return
+            if not self._set_update_rate():
+                return
             self._serial.write(b'lec\r')
             self._connected = True
             pending = b''
@@ -212,6 +215,22 @@ class UWBLocator(object):
                 pass
             finally:
                 self._serial.close()
+
+    def _set_update_rate(self):
+        # PANS intervals are in 100 ms units: 10 Hz even when stationary.
+        self._serial.write(b'aurs 1 1\r')
+        deadline = monotonic() + 2
+        response = ''
+        while not self._stop.is_set() and monotonic() < deadline:
+            response = (response + self._serial.readline().decode('ascii', 'ignore'))[-2048:]
+            result = re.search(r'err code:\s*(-?\d+)\s*\r?\n', response)
+            if result:
+                if int(result.group(1)) != 0:
+                    raise RuntimeError('PANS rejected 10 Hz update rate: error {}'.format(result.group(1)))
+                return True
+        if self._stop.is_set():
+            return False
+        raise RuntimeError('No PANS response while setting 10 Hz update rate')
 
     def __enter__(self):
         self.start()

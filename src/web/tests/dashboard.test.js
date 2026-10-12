@@ -9,6 +9,7 @@ const vm = require('node:vm');
 function dashboard({ discover = true } = {}) {
   const listeners = {};
   const calibrationRequests = [];
+  const calibrationPolls = [];
   const timers = new Map();
   const maintenanceTimers = new Map();
   let nextTimer = 0;
@@ -100,7 +101,12 @@ function dashboard({ discover = true } = {}) {
       assert.equal(url, '/api/calibration');
       if (options.method === 'POST') {
         assert.equal(options.headers['X-Calibration-Request'], '1');
-        calibrationRequests.push(JSON.parse(options.body));
+        const request = JSON.parse(options.body);
+        if (request.action === 'status') {
+          calibrationPolls.push(request);
+          return new Promise(() => {}); // Status delivery is controlled by each test.
+        }
+        calibrationRequests.push(request);
         return Promise.resolve({ ok: true });
       }
       return new Promise(() => {}); // Status delivery is controlled by each test.
@@ -124,7 +130,7 @@ function dashboard({ discover = true } = {}) {
     return api.drones[id];
   };
   const key = (name, value, target = element(), repeat = false) => listeners[name]({ key: value, target, repeat, preventDefault() {} });
-  return { ...api, calibrationRequests, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
+  return { ...api, calibrationRequests, calibrationPolls, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
 }
 const stamp = secs => ({ header: { stamp: { secs, nsecs: 0 } } });
 const rangeAt = (secs, range) => ({ ...stamp(secs), range, min_range: 0.05, max_range: 1.2 });
@@ -165,22 +171,45 @@ test('room targets require live fused localization and explicit send, stay isola
   assert.equal(b.publishers.cancelRoomTarget.messages.length, 1);
 });
 
-test('fusion faults and reference resets clear old markers and permit a new ROS clock epoch', () => {
+test('fusion gaps and resets retain display markers without live control data and permit a new ROS clock epoch', () => {
   const app = dashboard(), a = app.connect('drone1');
   const pose = secs => ({ header: { stamp: { secs, nsecs: 0 }, frame_id: 'map' },
     pose: { pose: { position: { x: .5, y: 1, z: .4 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } });
   app.receive(a, '/pidrone/localization/generation', { data: 0 });
+  app.receive(a, '/pidrone/localization/pose', localizationAt(100, .5, 1, .4));
   app.receive(a, '/pidrone/localization/fused', pose(100));
   app.receive(a, '/pidrone/localization/fusion_status', { status: [{ level: 1, message: 'UWB innovation rejected' }] });
   assert.equal(a.fusedPose, null);
   assert.equal(a.series.fused0.length, 0);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.match(app.elements.get('map-stream-status').textContent, /Last known position: Drone 1 · Fused position/);
   app.receive(a, '/pidrone/localization/fused', pose(100));
   assert.equal(a.fusedPose, null);
   app.receive(a, '/pidrone/localization/generation', { data: 1 });
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
+  assert.equal(a.fusedPose, null);
+  assert.equal(a.localizationReceivedAt, null);
+  assert.match(a.field('localizationPosition').textContent, /X 0.50/);
+  assert.equal(app.elements.get('target-send').disabled, true);
   app.receive(a, '/pidrone/localization/anchors', anchorsAt(50));
   assert.equal(app.fleetMap.layoutUsable, true);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
   app.receive(a, '/pidrone/localization/fused', pose(50));
   assert.equal(a.fusedStamp, 50);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, false);
+  for (let generation = 2; generation < 5; generation++) {
+    app.receive(a, '/pidrone/localization/generation', { data: generation });
+    assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
+    assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+    assert.equal(app.elements.get('map-placeholder').hidden, true);
+    app.receive(a, '/pidrone/localization/anchors', anchorsAt(50 + generation));
+    app.receive(a, '/pidrone/localization/fused', pose(50 + generation));
+    assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, false);
+  }
 });
 
 test('two connections keep telemetry, charts, clocks, and cameras isolated', () => {
@@ -468,7 +497,7 @@ test('UWB and ToF telemetry stays per drone and room coordinates remain visible'
   assert.equal(sharedMarker(app, 'drone2', 'uwb1').data[0].x, 1);
 });
 
-test('localization gaps retain a labeled last reading while stale map markers clear', () => {
+test('localization gaps retain labeled last readings and map markers until fresh data returns', () => {
   const app = dashboard();
   const a = app.connect('drone1');
   const send = (seconds, z = 0.4) => app.receive(a, '/pidrone/localization/pose', localizationAt(seconds, 1, 2, z));
@@ -481,14 +510,17 @@ test('localization gaps retain a labeled last reading while stale map markers cl
   assert.equal(a.field('localizationPosition').textContent, reading);
   assert.equal(a.field('localizationPosition').dataset.state, 'stale');
   assert.match(a.field('localizationStatus').textContent, /^Last reading · Localization stale$/);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
+  assert.match(app.elements.get('map-stream-status').textContent, /Last known position/);
   send(101);
   for (const message of ['Sensor timestamps are not aligned', 'UWB missing or stale', 'ToF missing, invalid or stale']) {
     app.receive(a, '/pidrone/localization/status', { status: [{ level: 1, message }] });
     assert.equal(a.field('localizationStatus').textContent, 'Last reading · ' + message);
     assert.equal(a.field('localizationPosition').textContent, reading);
     assert.equal(a.field('localizationPosition').dataset.state, 'stale');
-    assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
+    assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
+    assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
     assert.equal(a.localizationReceivedAt, null);
   }
   send(102, NaN);
@@ -499,12 +531,15 @@ test('localization gaps retain a labeled last reading while stale map markers cl
   app.receive(a, '/pidrone/localization/pose', unstamped);
   assert.equal(a.field('localizationPosition').textContent, reading);
   assert.equal(a.localizationStamp, 101);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data[0].x, 0.92);
   send(102);
   assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
   assert.equal(a.field('localizationPosition').dataset.state, 'ready');
   assert.match(a.field('localizationStatus').textContent, /^Ready/);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, false);
   a.disconnect();
   assert.equal(a.field('localizationPosition').textContent, '—');
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
   app.connect('drone1');
   send(1);
   assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
@@ -607,12 +642,16 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
 test('anchor discovery waits for four, matches hardware IDs, and freezes on stale or conflicting reports', () => {
   const app = dashboard({ discover: false }), map = app.fleetMap;
   assert.equal(map.room, null);
+  assert.equal(app.elements.get('map-placeholder').hidden, false);
   assert.equal(app.elements.get('target-submit').disabled, true);
   const a = app.connect('drone1'), b = app.connect('drone2');
   const send = (drone, message) => app.receive(drone, '/pidrone/localization/anchors', message);
   send(a, anchorsAt(100, [[0, 0, 2.25], [3, 0, 2.25], [3, 6, 2.25]]));
   assert.equal(map.room, null);
   send(a, anchorsAt(101));
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(app.elements.get('room-status').textContent, '');
+  assert.equal(app.elements.get('room-status').hidden, true);
   const original = map.room;
   app.receive(a, '/pidrone/localization/pose', localizationAt(100, 1, 2, 0.5));
   map.previewTarget('drone1', 1, 2);
@@ -628,6 +667,9 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   send(b, changed);
   assert.equal(map.room, original);
   assert.equal(map.layoutUsable, false);
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
   assert.match(app.elements.get('room-status').textContent, /disagree/);
   assert.equal(app.elements.get('target-submit').disabled, true);
   send(a, changed);
@@ -636,6 +678,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.zoom, 1);
   assert.equal(Object.keys(map.targets).length, 0);
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
+  app.receive(a, '/pidrone/localization/pose', localizationAt(101, 2, 3, 0.5));
   const agreed = map.room;
   app.advanceTime(1000);
   const partial = anchorsAt(104, [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25]]);
@@ -650,8 +693,28 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.room, agreed);
   assert.equal(map.layoutUsable, false);
   assert.match(app.elements.get('room-status').textContent, /Last observed layout/);
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(app.elements.get('map-frame').classList.contains('map-unavailable'), false);
+  assert.equal(app.elements.get('fleet-xyChart').getAttribute('aria-hidden'), 'false');
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data[0].x, 1.92);
+  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
+  assert.equal(app.elements.get('target-send').disabled, true);
+  assert.equal(app.elements.get('target-submit').disabled, true);
+  assert.equal(app.elements.get('room-fit').disabled, false);
   send(a, { ...changed, header: { ...changed.header, stamp: { secs: 105, nsecs: 0 } } });
   assert.equal(map.layoutUsable, true);
+  for (let i = 0; i < 3; i++) {
+    app.advanceTime(1600);
+    app.maintenanceTimers.forEach(callback => callback());
+    assert.equal(map.layoutUsable, false);
+    assert.equal(app.elements.get('map-frame').classList.contains('map-ready'), true);
+    assert.equal(app.elements.get('map-placeholder').hidden, true);
+    assert.equal(app.elements.get('fleet-xyChart').getAttribute('aria-hidden'), 'false');
+    send(a, { ...changed, header: { ...changed.header, stamp: { secs: 106 + i, nsecs: 0 } } });
+    assert.equal(map.layoutUsable, true);
+    assert.equal(app.elements.get('map-placeholder').hidden, true);
+    assert.equal(app.elements.get('room-status').hidden, true);
+  }
   const oldTopic = a.subscribers.find(topic => topic.name === '/pidrone/localization/anchors');
   a.disconnect();
   b.disconnect();
@@ -712,7 +775,7 @@ test('laptop calibration retains flight inhibition when its server becomes unava
   const app = dashboard(), drone = app.connect('drone2');
   app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
   app.anchorCalibration.update({ stage: 'preview', message: 'Review', boards: [],
-    reserved: true, grounded: true, preview: { positions: [], rms: 0 }, token: 'reviewed' });
+    selection: ['ws://drone2.local:9090'], reserved: true, grounded: true, preview: { positions: [], rms: 0 }, token: 'reviewed' });
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
   assert.match(app.elements.get('calibration-status').textContent, /Reconnect the laptop/);
@@ -728,7 +791,9 @@ test('laptop calibration retains flight inhibition when its server becomes unava
 test('laptop calibration with only Drone 2 requires disarmed state and sends the reviewed layout through HTTP', () => {
   const app = dashboard(), service = app.connect('drone2');
   const boards = ['4d12', '980C', '9781', 'CA83'].map((id, i) => ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
-  const state = { stage: 'idle', message: 'Select anchors', boards, reserved: false, grounded: true, preview: null, token: null };
+  const bridges = ['ws://drone2.local:9090'];
+  const state = { stage: 'idle', message: 'Select anchors', boards, selection: bridges,
+    reserved: false, grounded: true, preview: null, token: null };
   const status = () => app.anchorCalibration.update({ ...state });
   status();
   assert.deepEqual(app.elements.get('calibration-anchor-0').children.slice(1).map(option => option.textContent),
@@ -742,12 +807,12 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
   status();
   app.anchorCalibration.request('scan');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan' });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges });
   assert.equal(service.publishers.calibrationRequest, undefined);
   status();
   for (let i = 0; i < 4; i++) app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
   app.anchorCalibration.request('measure');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'measure', anchors: boards.map(b => ({ ble: b.ble })) });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'measure', bridges, anchors: boards.map(b => ({ ble: b.ble })) });
   Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
@@ -761,11 +826,40 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   assert.equal(app.calibrationRequests.length, 2);
   app.elements.get('calibration-anchor-0').value = boards[0].ble;
   app.anchorCalibration.request('apply');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'reviewed-token' });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', bridges, token: 'reviewed-token' });
   status();
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
   assert.equal(app.elements.get('calibration-apply').disabled, true);
   app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 3);
+});
+
+test('calibration follows dashboard connections and waits for matching server readiness', () => {
+  const app = dashboard(), second = app.connect('drone2');
+  app.receive(second, '/pidrone/mode', { mode: 'DISARMED' });
+  const state = { stage: 'idle', message: 'Ready', boards: [], reserved: false, grounded: true,
+    selection: ['ws://drone2.local:9090'] };
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('calibration-scan').disabled, false);
+  const first = app.connect('drone1');
+  app.receive(first, '/pidrone/mode', { mode: 'DISARMED' });
+  app.anchorCalibration.refresh();
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
+  app.anchorCalibration.polling = false;
+  app.anchorCalibration.poll();
+  const both = ['ws://drone1.local:9090', 'ws://drone2.local:9090'];
+  assert.deepEqual(app.calibrationPolls.at(-1), { action: 'status', bridges: both });
+  app.anchorCalibration.update({ ...state, selection: both });
+  assert.equal(app.elements.get('calibration-scan').disabled, false);
+  first.disconnect();
+  app.anchorCalibration.refresh();
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
+  app.anchorCalibration.polling = false;
+  app.anchorCalibration.poll();
+  assert.deepEqual(app.calibrationPolls.at(-1), { action: 'status', bridges: state.selection });
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('calibration-scan').disabled, false);
+  app.anchorCalibration.request('scan');
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges: state.selection });
 });

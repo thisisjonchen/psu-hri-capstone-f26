@@ -105,6 +105,7 @@ class CalibrationTest(unittest.TestCase):
         guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10, locked=True, ack_at=10,
                             owner='coordinator', owner_at=10, url='ws://drone%d:9090' % i,
                             anchor_seq=1, anchor_stamp=None, anchors=None, anchors_at=0) for i in range(2)]
+        guard.select([p['url'] for p in guard.peers])
         layout = solve_layout(BOARDS, ROWS)['positions']
         with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
             guard.check(locked=True)
@@ -130,6 +131,7 @@ class CalibrationTest(unittest.TestCase):
         guard.participants = None
         guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10, locked=False, ack_at=10,
                             owner='', owner_at=10, request='', url='ws://drone%d:9090' % i) for i in range(2)]
+        guard.select([p['url'] for p in guard.peers])
         controllers = ['', 'other']
         def send(peer, message):
             i = guard.peers.index(peer)
@@ -168,18 +170,21 @@ class CalibrationTest(unittest.TestCase):
             guard.set_locked(False)
             self.assertEqual(controllers, ['', ''])
 
-    def test_one_drone_can_lock_verify_and_unlock_but_participants_cannot_disappear(self):
+    def test_dashboard_selects_one_or_both_without_dropping_calibration_participants(self):
         guard = BridgeGuard.__new__(BridgeGuard)
         guard.lock, guard.stop_event = threading.RLock(), threading.Event()
         guard.owner, guard.claimed, guard.participants = 'ours', False, None
-        guard.peers = [dict(url='ws://drone1:9090', socket=None, mode=None, mode_at=0,
+        guard.peers = [dict(url='ws://drone1:9090', socket=object(), mode=None, mode_at=0,
                             owner=None, owner_at=0, locked=None, ack_at=0),
                        dict(url='ws://drone2:9090', socket=object(), mode='DISARMED', mode_at=10,
                             owner='', owner_at=10, locked=False, ack_at=10,
                             anchor_seq=1, anchor_stamp=None, anchors=None, anchors_at=0)]
         active = guard.peers[1]
+        guard.select([active['url']])
+        for invalid in (None, 'ws://drone2:9090', ['ws://other:9090'], [active['url']] * 2, [{}]):
+            with self.assertRaises(ValueError): guard.select(invalid)
         def send(peer, message):
-            self.assertIs(peer, active)  # Never send to the absent drone.
+            self.assertIs(peer, active)  # An unselected bridge is reachable, but has no flight state.
             request = json.loads(message['msg']['data'])
             locked = request['action'] == 'acquire'
             guard.receive(peer, ACK, {'data': locked})
@@ -190,26 +195,32 @@ class CalibrationTest(unittest.TestCase):
             guard.set_locked(True)
             guard.check(locked=True)
             self.assertEqual(guard.participants, [active['url']])
+            guard.select([])
+            guard.check(locked=True)  # Disconnecting in the dashboard cannot bypass an existing lock.
+            guard.select([active['url']])
             baseline = guard.sequences()
             layout = solve_layout(BOARDS, ROWS)['positions']
             guard.receive(active, ANCHORS, dict(header=dict(stamp=dict(secs=10, nsecs=0), frame_id='map'),
                                                anchor_ids=[p['id'] for p in layout], positions=layout))
             guard.verify_layout(layout, baseline, lambda: guard.check(True))
             active['socket'] = None
-            with self.assertRaisesRegex(ValueError, 'Fresh flight state'): guard.check(True)
+            with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check(True)
             with self.assertRaises(ValueError): guard.set_locked(False)
             self.assertEqual(guard.participants, [active['url']])
             active['socket'] = object()
             newcomer = guard.peers[0]
+            guard.select([p['url'] for p in guard.peers])
+            with self.assertRaisesRegex(ValueError, 'Fresh flight state'): guard.check(True)
             newcomer.update(socket=object(), mode='DISARMED', mode_at=10, owner='', owner_at=10, locked=False, ack_at=10)
             with self.assertRaisesRegex(ValueError, 'Every participating'): guard.check(True)
             guard.set_locked(False)  # Cancel releases the original participant without touching the newcomer.
             self.assertIsNone(guard.participants)
             guard.prepare()
             self.assertEqual(set(guard.participants), {p['url'] for p in guard.peers})
+            guard.select([active['url']])
             newcomer['socket'] = None
             guard.prepare()  # A retry also retains the disconnected participant.
-            with self.assertRaisesRegex(ValueError, 'Fresh flight state'): guard.check()
+            with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check()
 
 
 class CoordinatorTest(unittest.TestCase):

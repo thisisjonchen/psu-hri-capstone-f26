@@ -38,7 +38,12 @@ class AnchorCalibration {
     if (this.polling) return;
     this.polling = true;
     try {
-      const response = await fetch('/api/calibration', { cache: 'no-store', signal: AbortSignal.timeout(2000) });
+      const response = await fetch('/api/calibration', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Calibration-Request': '1' },
+        body: JSON.stringify({ action: 'status', bridges: this.selection() }),
+        signal: AbortSignal.timeout(2000)
+      });
       if (!response.ok) throw new Error('Calibration server unavailable');
       this.update(await response.json());
     } catch (error) {
@@ -80,9 +85,19 @@ class AnchorCalibration {
     return !!(this.state && (this.state.reserved || this.state.dirty));
   }
 
+  selection() {
+    return Object.values(drones).filter(drone => drone.connected)
+      .map(drone => 'ws://' + drone.host + ':9090');
+  }
+
+  matchesSelection() {
+    return !!(this.state && Array.isArray(this.state.selection) &&
+      JSON.stringify(this.state.selection) === JSON.stringify(this.selection()));
+  }
+
   grounded() {
     const connected = Object.values(drones).filter(drone => drone.connected);
-    return this.fresh() && this.state.grounded === true && connected.length > 0 && connected.every(drone =>
+    return this.fresh() && this.matchesSelection() && this.state.grounded === true && connected.length > 0 && connected.every(drone =>
       drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
       Date.now() - drone.modeReceivedAt <= 500);
   }
@@ -100,7 +115,7 @@ class AnchorCalibration {
   async request(action) {
     this.refresh();
     if (!this.fresh() || (action !== 'cancel' && (!this.grounded() || this.busy()))) return;
-    const request = { action };
+    const request = { action, bridges: this.selection() };
     if (action === 'measure') {
       request.anchors = Array.from({ length: 4 }, (_, i) => ({
         ble: document.getElementById('calibration-anchor-' + i).value
@@ -144,7 +159,8 @@ class AnchorCalibration {
     document.getElementById('calibration-status').textContent = !fresh
       ? (state && state.reserved ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
         : 'Open the dashboard through the laptop server: http://localhost:8000.')
-      : !grounded ? (state.ground_reason || 'Waiting for drones to be ready.')
+      : !this.matchesSelection() ? 'Updating connected drones...'
+        : !grounded ? (state.ground_reason || 'Waiting for drones to be ready.')
         : state.message;
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
