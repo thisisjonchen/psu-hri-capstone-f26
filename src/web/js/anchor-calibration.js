@@ -56,8 +56,7 @@ class AnchorCalibration {
           this.state.boards.forEach(board => {
             const option = document.createElement('option');
             option.value = board.ble;
-            option.textContent = board.id + (board.initiator ? ' · Initiator' : '') +
-              (!board.active ? ' · UWB inactive' : '');
+            option.textContent = board.id + (!board.active ? ' · Unavailable' : '');
             option.disabled = !board.active;
             select.appendChild(option);
           });
@@ -139,12 +138,15 @@ class AnchorCalibration {
     document.getElementById('calibration-status').textContent = !fresh
       ? (state && state.reserved ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
         : 'Open the dashboard through the laptop server: http://localhost:8000.')
-      : !grounded ? (state.ground_reason || 'Disarm connected drones; fresh flight state is required.')
+      : !grounded ? (state.ground_reason || 'Waiting for drones to be ready.')
         : state.message;
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
-    preview.textContent = fresh && state.preview ? state.preview.positions.map(p =>
-      p.id + ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ', Z ' + p.z.toFixed(2) + ' m').join('\n') +
-      '\nRange fit RMS: ' + state.preview.rms.toFixed(3) + ' m' : '';
+    const corners = ['Top Left', 'Top Right', 'Bottom Left', 'Bottom Right'];
+    // Present rows from top to bottom; the solver retains its counterclockwise order.
+    preview.textContent = fresh && state.preview ? [3, 2, 0, 1]
+      .map(index => state.preview.positions[index]).filter(Boolean).map((p, i) =>
+        'Corner ' + (i + 1) + ' (' + corners[i] + ') · ' + p.id +
+        ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ' m').join('\n') : '';
   }
 }

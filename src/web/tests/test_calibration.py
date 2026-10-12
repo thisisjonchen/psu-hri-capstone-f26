@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import os
+import socket
 import sys
 from pathlib import Path
 import struct
@@ -18,9 +19,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibration.anchor_calibration import (decode_location, solve_layout,
+from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
-from calibration.calibration_guard import BridgeGuard, ANCHORS, ACK, OWNER
+from calibration.calibration_guard import BridgeGuard, ANCHORS, ACK, OWNER, connect_bridge
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
 from tempfile import TemporaryDirectory
@@ -41,6 +42,43 @@ def payload(row):
 
 
 class CalibrationTest(unittest.TestCase):
+    def test_device_info_accepts_legacy_zero_padding_but_rejects_malformed_fields(self):
+        info = struct.pack('<Q', 0xDECA71FB90744D12) + bytes(21)
+        mode, pan = b'\xc0\x80', b'\x00\x00'
+        expected = dict(id='4D12', address='DECA71FB90744D12', anchor=True,
+                        active=True, initiator=True, pan=0)
+        for data in (info, info + bytes(16)):
+            self.assertEqual(decode_info(data, mode, pan), expected)
+            self.assertEqual(decode_info(data, mode, b''), dict(expected, pan=None))
+        self.assertEqual(decode_info(info, mode, b'\x34\x12')['pan'], 0x1234)
+        for data, flags, network in ((info[:22], mode, pan), (info + bytes(15), mode, pan),
+                                     (info + bytes(15) + b'\x01', mode, pan),
+                                     (info, mode[:1], pan), (info, mode, pan[:1])):
+            with self.assertRaisesRegex(ValueError, 'info=.*mode=.*PAN='):
+                decode_info(data, flags, network)
+
+    def test_bridge_retries_resolved_addresses_after_timeout_and_closes_failed_handshake(self):
+        url = 'ws://drone2.local:9090'
+        addresses = [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('fe80::2', 9090, 0, 1)),
+                     (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('192.0.2.2', 9090))]
+        first, second = mock.Mock(), mock.Mock()
+        first.connect.side_effect = TimeoutError('timed out')
+        websocket = mock.Mock()
+        with mock.patch('socket.getaddrinfo', return_value=addresses), \
+                mock.patch('socket.socket', side_effect=[first, second]):
+            bridge = connect_bridge(websocket, url)
+        first.close.assert_called_once()
+        second.connect.assert_called_once_with(addresses[1][4])
+        second.settimeout.assert_called_once_with(5)
+        websocket.create_connection.assert_called_once_with(url, socket=second, timeout=5)
+        bridge.settimeout.assert_called_once_with(1)
+        second.close.assert_not_called()
+        websocket.create_connection.side_effect = RuntimeError('handshake failed')
+        with mock.patch('socket.create_connection', return_value=second):
+            with self.assertRaisesRegex(RuntimeError, 'handshake failed'):
+                connect_bridge(websocket, url)
+        second.close.assert_called_once()
+
     def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}
         layout = solve_layout(BOARDS, rows)
@@ -332,7 +370,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         scanner = mock.AsyncMock()
         scanner.discovered_devices_and_advertisement_data = entries
         client = mock.AsyncMock()
-        info = {INFO: struct.pack('<Q', 1) + bytes(21), MODE: b'\xc0\x80', PAN: b'\x00\x00'}
+        info = {INFO: struct.pack('<Q', 1) + bytes(37), MODE: b'\xc0\x80', PAN: b''}
         client.read_gatt_char.side_effect = lambda key: info[key]
         def create(device, **kwargs):
             if device.address == 'failed':
@@ -342,6 +380,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(sys.modules, {'bleak': fake}), mock.patch('calibration.pans_ble.asyncio.sleep', new=mock.AsyncMock()):
             boards = await ble._scan(lambda: None)
         self.assertEqual([(b['ble'], b['id']) for b in boards], [('anchor-uuid', '0001')])
+        self.assertIsNone(boards[0]['pan'])
         self.assertNotIn('tag', ble.devices)
         self.assertIn('failed', ble.scan_warnings[0])
         client.disconnect.assert_awaited_once()
@@ -372,8 +411,15 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             guard()
             yield clients[board['id']]
         ble.connect = connect
-        rows = await ble._measure(BOARDS, lambda: None)
-        self.assertEqual(rows, ROWS)
+        for pans in ([None] * 4, [0, None, 0, None], [0] * 4):
+            with self.subTest(pans=pans):
+                boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, pans)]
+                rows = await ble._measure(boards, lambda: None)
+                self.assertEqual(rows, ROWS)
+                np.testing.assert_allclose(
+                    [[p[k] for k in ('x', 'y', 'z')] for p in solve_layout(boards, rows)['positions']], POINTS)
+        with self.assertRaisesRegex(ValueError, 'same PAN'):
+            await ble._measure([dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 1, None])], lambda: None)
         clients['0001'].stop_notify.assert_awaited_with(LOCATION)
         positions = solve_layout(BOARDS, rows)['positions']
         on_write = mock.Mock()

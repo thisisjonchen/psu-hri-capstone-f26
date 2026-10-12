@@ -578,7 +578,8 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
   const invalid = anchorsAt(101);
   invalid.positions[3] = invalid.positions[0];
   app.receive(b, '/pidrone/localization/anchors', invalid);
-  assert.match(app.elements.get('room-status').textContent, /convex room outline/);
+  assert.equal(app.elements.get('room-status').textContent,
+    'Drone 2: Check the four anchor positions. Map updates and target editing are paused. · Last observed layout retained');
   assert.equal(target('drone2').length, 0);
   assert.equal(map.targets.drone2.y, 4);
   app.receive(b, '/pidrone/localization/anchors', anchorsAt(102, [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25], [0, 6, 2.25]]));

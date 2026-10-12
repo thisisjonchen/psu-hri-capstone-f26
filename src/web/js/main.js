@@ -106,7 +106,7 @@ class FleetMap {
     if (!anchors.every((a, i) => {
       const b = anchors[(i + 1) % 4], c = anchors[(i + 2) % 4];
       return (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) > 0;
-    })) throw new Error('The four anchors must form a convex room outline.');
+    })) throw new Error('Check the four anchor positions');
     return { frame, margin, anchors, xMin, xMax, yMin, yMax };
   }
 
@@ -170,7 +170,7 @@ class FleetMap {
       status = 'Anchor calibration in progress. Map and room targets paused.';
     } else if (bad) {
       status = bad[1].error || 'Anchor layouts disagree between drones';
-      status += '. Map markers and target editing paused.';
+      status += '. Map updates and target editing are paused.';
     } else if (candidate) {
       if (!this.room || this.room.anchors.length !== candidate.anchors.length || !this.matchesRoom(this.room, candidate)) {
         if (this.room) {

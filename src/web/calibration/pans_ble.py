@@ -76,7 +76,12 @@ class PansBLE:
 
     async def inspect(self, client):
         values = [bytes(await self.io(client.read_gatt_char(key))) for key in (INFO, MODE, PAN)]
-        return decode_info(*values)
+        try:
+            return decode_info(*values)
+        except ValueError:
+            logging.warning('Unexpected PANS response: info=%s mode=%s PAN=%s',
+                            *(value[:64].hex() for value in values))
+            raise
 
     async def _scan(self, guard):
         from bleak import BleakScanner, BleakError
@@ -104,7 +109,7 @@ class PansBLE:
             try:
                 async with self.connect(board, guard) as client:
                     board.update(await self.inspect(client))
-            except (BleakError, TimeoutError) as error:
+            except (BleakError, TimeoutError, ValueError) as error:
                 guard()
                 self.scan_warnings.append('%s: %s' % (device.address, error))
                 continue
@@ -121,7 +126,10 @@ class PansBLE:
 
     async def _measure(self, boards, guard):
         initiators = [board for board in boards if board['initiator']]
-        if len(initiators) != 1 or len({board['pan'] for board in boards}) != 1:
+        known_pans = {board['pan'] for board in boards if board['pan'] is not None}
+        # An empty BLE PAN value is unknown, not zero. Live ranges must still
+        # connect all six selected pairs before the coordinator offers a save.
+        if len(initiators) != 1 or len(known_pans) > 1:
             raise ValueError('Select one initiator and three anchors on the same PAN')
         initiator = initiators[0]
         for board in boards:

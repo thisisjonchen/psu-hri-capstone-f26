@@ -151,7 +151,7 @@ class AnchorCalibration:
                     self.guard.set_locked(True)
                 self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
                 self.boards = ble.call('scan', lambda: self.check(self.dirty))
-                message = 'Found %d anchors. Select four counterclockwise; first is origin, second sets +X.' % len(self.boards)
+                message = 'Found %d anchors. Select an anchor for each corner.' % len(self.boards)
                 if ble.scan_warnings:
                     message += ' Unreadable boards: ' + '; '.join(ble.scan_warnings)
                 self.update('idle', message, boards=self.boards)
@@ -230,6 +230,7 @@ class AnchorCalibration:
         with self.lock:
             state = copy.deepcopy(self.state)
             state.update(reserved=self.reserved, dirty=self.dirty, busy=self.busy)
+            state['bridges'] = self.guard.connections()
             try:
                 self.guard.check()
                 state['grounded'] = True

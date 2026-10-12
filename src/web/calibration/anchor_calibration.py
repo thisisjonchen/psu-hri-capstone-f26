@@ -16,13 +16,19 @@ CLUSTER = '17b1613e-98f2-4436-bcde-23af17a10c72'
 
 
 def decode_info(info, mode, pan):
-    if len(info) != 29 or len(mode) != 2 or len(pan) != 2:
-        raise ValueError('Unsupported PANS device information format')
+    # Older PANS releases append 16 zero bytes to the 29-byte device info.
+    if len(info) == 45 and info[29:] == bytes(16):
+        info = info[:29]
+    if len(info) != 29 or len(mode) != 2 or len(pan) not in (0, 2):
+        raise ValueError('Unsupported PANS device information format '
+                         '(info=%d bytes, mode=%d bytes, PAN=%d bytes)' %
+                         (len(info), len(mode), len(pan)))
     flags, options = struct.unpack('<BB', mode)
     address = struct.unpack('<Q', info[:8])[0]
     return {'id': '%04X' % (address & 0xffff), 'address': '%016X' % address,
             'anchor': bool(flags & 0x80), 'active': ((flags >> 5) & 3) == 2,
-            'initiator': bool(options & 0x80), 'pan': struct.unpack('<H', pan)[0]}
+            'initiator': bool(options & 0x80),
+            'pan': struct.unpack('<H', pan)[0] if pan else None}
 
 
 def decode_location(data):

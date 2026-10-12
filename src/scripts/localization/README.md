@@ -181,11 +181,13 @@ One connected drone is enough. A reachable companion must also be disarmed,
 even if its dashboard connection is closed. Participants cannot disappear during
 calibration, and a newly connected drone must join through another measurement.
 
-1. Open **Calibrate anchors → Scan anchors**. Select four corners counterclockwise:
-   first is origin, second sets +X, remaining corners are on the +Y side.
+1. Open **Calibrate anchors → Scan anchors**. Select an anchor for each labeled corner.
+   Bottom left is the origin; +X runs right and +Y runs up on the map.
    All antennas must share the same height. One anchor must be the active initiator;
    the other three must be active anchors on the same PAN (default `0x0000`).
    The dashboard does not configure roles or PAN IDs.
+   An empty BLE PAN value stays unknown; calibration still requires valid live
+   distances between all six anchor pairs and rejects conflicting reported PAN IDs.
 2. Press **Measure layout** and review the shape and dimensions. Flight controllers
    must acknowledge exclusive calibration ownership before ranging begins.
 3. Press **Save layout** within two minutes. Flight stays inhibited until BLE

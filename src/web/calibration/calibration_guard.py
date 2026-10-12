@@ -1,14 +1,37 @@
 """Observe reachable drones and retain calibration participants until release."""
 import json
+import logging
+import socket
+import ssl
 import threading
 import uuid
 
 from time import monotonic
+from urllib.parse import urlsplit
 
 LOCK = '/pidrone/localization/calibration_owner/request'
 OWNER = '/pidrone/localization/calibration_owner/status'
 ACK = '/pidrone/localization/calibration_locked'
 ANCHORS = '/pidrone/localization/anchors'
+
+
+def connect_bridge(websocket, url):
+    """Try all resolved addresses, preserving the bridge hostname for WebSocket/TLS."""
+    endpoint = urlsplit(url)
+    if endpoint.scheme not in ('ws', 'wss') or not endpoint.hostname:
+        raise ValueError('Use a ws:// or wss:// drone rosbridge URL')
+    port = endpoint.port or (443 if endpoint.scheme == 'wss' else 80)
+    # socket.create_connection retries other addresses even after a timeout.
+    stream = socket.create_connection((endpoint.hostname, port), timeout=5)
+    try:
+        if endpoint.scheme == 'wss':
+            stream = ssl.create_default_context().wrap_socket(stream, server_hostname=endpoint.hostname)
+        bridge = websocket.create_connection(url, socket=stream, timeout=5)
+        bridge.settimeout(1)
+        return bridge
+    except Exception:
+        stream.close()
+        raise
 
 
 class BridgeGuard(object):
@@ -25,6 +48,7 @@ class BridgeGuard(object):
         self.claimed = claimed
         self.participants = list(participants) if participants else None
         self.peers = [{'url': url, 'socket': None, 'mode': None, 'mode_at': 0,
+                       'error': 'Connecting...',
                        'locked': None, 'ack_at': 0, 'owner': None, 'owner_at': 0, 'request': None, 'anchor_seq': 0,
                        'anchors': None, 'anchors_at': 0, 'anchor_stamp': None} for url in urls]
         for peer in self.peers:
@@ -43,9 +67,10 @@ class BridgeGuard(object):
         while not self.stop_event.is_set():
             socket = None
             try:
-                socket = websocket.create_connection(peer['url'], timeout=1)
+                socket = connect_bridge(websocket, peer['url'])
                 with self.lock:
                     peer['socket'] = socket
+                    peer['error'] = None
                 self.send(peer, {'op': 'advertise', 'topic': LOCK, 'type': 'std_msgs/String'})
                 for topic, kind in (('/pidrone/mode', 'pidrone_pkg/Mode'), (ACK, 'std_msgs/Bool'),
                                     (OWNER, 'std_msgs/String'),
@@ -59,8 +84,13 @@ class BridgeGuard(object):
                     if data.get('op') != 'publish':
                         continue
                     self.receive(peer, data.get('topic'), data.get('msg', {}))
-            except Exception:
-                pass  # Readiness below describes the unavailable peer; reconnect is bounded.
+            except Exception as error:
+                reason = '%s: %s' % (type(error).__name__, error)
+                with self.lock:
+                    changed = peer['error'] != reason
+                    peer['error'] = reason
+                if changed and not self.stop_event.is_set():
+                    logging.warning('Calibration rosbridge %s: %s', peer['url'], reason)
             finally:
                 with self.lock:
                     peer['socket'] = None
@@ -104,8 +134,14 @@ class BridgeGuard(object):
                      (self.participants is not None and p['url'] in self.participants) or
                      ((include_new or self.participants is None) and p['socket'] is not None)]
             if not peers:
-                raise ValueError('Connect at least one drone rosbridge before calibration')
+                failures = '; '.join('%s (%s)' % (p['url'], p.get('error') or 'Disconnected') for p in self.peers)
+                raise ValueError('Laptop calibration cannot connect to drone rosbridge: ' + failures)
             return peers
+
+    def connections(self):
+        with self.lock:
+            return [{'url': peer['url'], 'connected': peer['socket'] is not None,
+                     'error': peer['error']} for peer in self.peers]
 
     def prepare(self):
         with self.lock:

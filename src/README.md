@@ -101,16 +101,13 @@ source devel/setup.bash
 
 ## Camera + UWB + ToF Localization
 
-Camera + UWB provide XY position; ToF provides height. The map loads the four
-anchor positions automatically when a drone connects.
+When calibrating:
+- 4D12: Tag 6
+- 980C: Tag 5
+- 9781: Tag 4
+- CA83: Tag 3
 
-- UWB defaults to `/dev/ttyACM1`. Export `PALS_UWB_PORT` before starting Screen to use another port.
-- The **SE** window runs fusion; do not also run EMA.
-- Room targets require a calibrated heading. Set `PALS_ROOM_YAW_OFFSET` before starting Screen, or restart fusion with the measured offset after FC startup.
-- **Calibrate anchors** works with one or both drones and measures XY over your laptop’s Bluetooth; review, then save. Anchors share Z = 0. Participating drones must be disarmed. Repeat after moving anchors.
-- **Preview** selects a target, **Send target** commands the selected drone, and **Stop target** cancels it. Sending requires flying mode and valid localization.
-
-Start the dashboard on your laptop (Python 3.9+):
+Start the dashboard on your laptop:
 
 ```bash
 python3 -m venv .venv
@@ -120,10 +117,6 @@ python src/web/server.py
 ```
 
 Run these commands from the repository root, then open `http://localhost:8000`.
-Allow Bluetooth access for your terminal when prompted on macOS.
-
-See [localization setup](scripts/localization/README.md) for dependencies, rebuilding,
-board configuration and heading calibration.
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session
