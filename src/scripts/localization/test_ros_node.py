@@ -62,6 +62,9 @@ class FakeLocator(object):
         self.running = False
         self.position = None
 
+    def diagnostics(self, now):
+        return [('reader_state', 'streaming')]
+
 
 class NodeTest(unittest.TestCase):
     def setUp(self):
@@ -137,6 +140,7 @@ class NodeTest(unittest.TestCase):
         self.assertEqual(len(self.poses), 1)
         self.assertEqual(self.health.level, 0)
         self.assertEqual(self.health.values[1].value, 'ToF')
+        self.assertEqual({item.key: item.value for item in self.health.values}['reader_state'], 'streaming')
         xy = self.messages['pidrone/localization/uwb'][-1]
         self.assertEqual(xy.header.stamp.to_sec(), 100)
         self.assertEqual(xy.pose.covariance[14], 1e6)

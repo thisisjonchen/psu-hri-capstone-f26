@@ -146,6 +146,7 @@ class UWBLocalizationNode(object):
                          KeyValue(key='height_source', value='ToF'),
                          KeyValue(key='frame_id', value=self.frame_id),
                          KeyValue(key='anchor_count', value=str(len(sample.anchors) if sample else 0))]
+        status.values.extend(KeyValue(key=key, value=value) for key, value in self.locator.diagnostics(now))
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = rospy.Time.from_sec(ros_now)
         diagnostics.status = [status]

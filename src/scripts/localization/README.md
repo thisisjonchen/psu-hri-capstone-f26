@@ -52,12 +52,17 @@ An explicitly empty `port:=` disables serial access and publishes an actionable
 error diagnostic. With a port configured, setup and reading run in a worker.
 The reader verifies the `dwm>` PANS prompt, reboots the tag once to establish a known
 stream state, sets moving and stationary updates to 10 Hz (`aurs 1 1`), then enables
-`lec` once. Rate configuration must succeed before streaming starts. The ROS loop
+`lec` once. It accepts the update-rate ACK or verifies the settings through `si`.
+If 10 Hz cannot be confirmed, it logs a warning and still reads live data at the
+tag's configured rate. Freshness and quality limits remain in effect. The ROS loop
 checks at 20 Hz and publishes each new fix once. A delayed first fix does not toggle
 the stream off.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,
 plus the tag's position. AN0/AN1 slot numbers are not used as anchor identities.
 Serial failures invalidate the last fix immediately and trigger periodic reconnects.
+For a missing/stale fix, inspect `/pidrone/localization/status`. It includes the
+reader startup stage, serial/parsed-record ages, last reported quality, rejected
+record count, and the last serial line to distinguish silence from rejected data.
 
 The **SE** Screen window now starts fusion instead of EMA. Do not run
 `state_estimator.py -p ema` alongside it: only fusion should publish

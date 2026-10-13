@@ -5,6 +5,7 @@ Position timestamps are host monotonic receipt times, not UWB measurement times.
 from __future__ import print_function
 
 import math
+import logging
 import re
 import threading
 from collections import namedtuple
@@ -104,6 +105,27 @@ class UWBLocator(object):
         self._connected = False
         self._in_shell = False
         self.error = None
+        self.reader_state = 'stopped'
+        self.last_line = ''
+        self.last_serial_at = None
+        self.last_record_at = None
+        self.last_quality = None
+        self.rejected_records = 0
+        self.rate_verified = False
+        self.rate_warning = ''
+
+    def diagnostics(self, now):
+        def age(timestamp):
+            return 'none' if timestamp is None else '{:.3f}'.format(max(0, now - timestamp))
+        return [('reader_state', self.reader_state),
+                ('serial_age_s', age(self.last_serial_at)),
+                ('record_age_s', age(self.last_record_at)),
+                ('last_reported_quality', str(self.last_quality) if self.last_quality is not None else 'none'),
+                ('min_quality', str(self.min_quality)),
+                ('rejected_records', str(self.rejected_records)),
+                ('update_rate_verified', str(self.rate_verified)),
+                ('update_rate_warning', self.rate_warning),
+                ('last_serial_line', self.last_line)]
 
     @property
     def running(self):
@@ -134,13 +156,21 @@ class UWBLocator(object):
         self._stop.clear()
         self.error = None
         self._in_shell = False
+        self.reader_state = 'opening'
+        self.last_line = ''
+        self.last_serial_at = self.last_record_at = self.last_quality = None
+        self.rejected_records = 0
+        self.rate_verified = False
+        self.rate_warning = ''
         try:
             self._serial = serial.Serial(self.port, self.baud, timeout=0.1, write_timeout=1)
             self._thread = threading.Thread(target=self._run)
             self._thread.daemon = True
             self._thread.start()
-        except Exception:
+        except Exception as error:
             self.stop()
+            self.error = str(error)
+            self.reader_state = 'error'
             raise
 
     def stop(self):
@@ -160,8 +190,10 @@ class UWBLocator(object):
         self._latest = None
         self._latest_anchors = None
         self._connected = False
+        self.reader_state = 'stopped'
 
     def _enter_shell(self):
+        self.reader_state = 'entering shell'
         self._serial.write(b'\r\r')
         if self._stop.wait(1):
             return False
@@ -176,6 +208,7 @@ class UWBLocator(object):
         try:
             if not self._enter_shell():
                 return
+            self.reader_state = 'resetting tag'
             self._serial.write(b'reset\r')
             self._in_shell = False
             if self._stop.wait(3) or not self._enter_shell():
@@ -184,28 +217,43 @@ class UWBLocator(object):
                 return
             self._serial.write(b'lec\r')
             self._connected = True
+            self.reader_state = 'streaming'
             pending = b''
             while not self._stop.is_set():
                 raw = self._serial.readline()
+                if raw:
+                    self.last_serial_at = monotonic()
                 pending += raw
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
                     text = line.decode('ascii', 'ignore')
+                    self.last_line = text.strip()[-512:]
                     if 'DIST,' in text:
                         record = parse_lec_line(text)
                         if record is None:
+                            self.rejected_records += 1
                             continue
                         self._latest_anchors, p = record
+                        self.last_record_at = self._latest_anchors.timestamp
                     else:
                         p = parse_lep_line(text)
+                        if p is not None:
+                            self.last_record_at = p.timestamp
+                        elif 'POS,' in text:
+                            self.rejected_records += 1
+                    if p is not None:
+                        self.last_quality = p.quality
                     if p is not None and p.quality >= self.min_quality:
                         self._latest = p
                 if len(pending) > 2048:
                     pending = b''
         except (serial.SerialException, OSError, ValueError, RuntimeError) as error:
             self.error = str(error)
+            self.reader_state = 'error'
         finally:
             self._connected = False
+            if self.reader_state != 'error':
+                self.reader_state = 'stopped'
             self._latest = None
             self._latest_anchors = None
             try:
@@ -217,20 +265,39 @@ class UWBLocator(object):
                 self._serial.close()
 
     def _set_update_rate(self):
+        self.reader_state = 'setting update rate'
         # PANS intervals are in 100 ms units: 10 Hz even when stationary.
-        self._serial.write(b'aurs 1 1\r')
+        response = self._shell_reply(b'aurs 1 1\r',
+                                     r'err\s+code:\s*(-?\d+)(?=[\r\n,])')
+        result = re.search(r'err\s+code:\s*(-?\d+)(?=[\r\n,])', response, re.I)
+        if result and int(result.group(1)) == 0:
+            self.rate_verified = True
+            return not self._stop.is_set()
+        if self._stop.is_set():
+            return False
+        # Some shell responses differ or omit the ACK. Verify the actual settings
+        # using the system-information fields instead of requiring one ACK format.
+        settings = self._shell_reply(b'si\r', r'upd_rate_stat=\d+(?=[\s,])')
+        normal = re.search(r'upd_rate_norm=(\d+)(?=[\s,])', settings)
+        stationary = re.search(r'upd_rate_stat=(\d+)(?=[\s,])', settings)
+        if normal and stationary and normal.group(1) == stationary.group(1) == '1':
+            self.rate_verified = True
+        elif not self._stop.is_set():
+            reason = ('PANS returned error %s' % result.group(1) if result else
+                      'No recognized PANS update-rate acknowledgment')
+            self.rate_warning = reason + '; 10 Hz unconfirmed, reading the tag at its configured rate'
+            logging.warning('UWB: %s', self.rate_warning)
+        return not self._stop.is_set()
+
+    def _shell_reply(self, command, completed):
+        self._serial.write(command)
         deadline = monotonic() + 2
         response = ''
         while not self._stop.is_set() and monotonic() < deadline:
             response = (response + self._serial.readline().decode('ascii', 'ignore'))[-2048:]
-            result = re.search(r'err code:\s*(-?\d+)\s*\r?\n', response)
-            if result:
-                if int(result.group(1)) != 0:
-                    raise RuntimeError('PANS rejected 10 Hz update rate: error {}'.format(result.group(1)))
-                return True
-        if self._stop.is_set():
-            return False
-        raise RuntimeError('No PANS response while setting 10 Hz update rate')
+            if re.search(completed, response, re.I) or 'dwm>' in response:
+                break
+        return response
 
     def __enter__(self):
         self.start()
@@ -252,3 +319,5 @@ if __name__ == '__main__':
                 time.sleep(0.2)
         except KeyboardInterrupt:
             pass
+        if locator.error:
+            print('UWB reader failed:', locator.error)

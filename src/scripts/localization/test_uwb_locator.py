@@ -21,6 +21,7 @@ class FakeSerial(object):
         self.in_waiting = 0
         self.prompt = b'dwm> '
         self.rate_reply = b'err code: 0\r\n'
+        self.info_reply = b'dwm> '
         self.replies = deque()
 
     def write(self, data):
@@ -31,6 +32,8 @@ class FakeSerial(object):
             self.streaming = not self.streaming
         if data == b'aurs 1 1\r':
             self.replies.append(self.rate_reply)
+        if data == b'si\r':
+            self.replies.append(self.info_reply)
 
     def readline(self):
         if self.fail:
@@ -111,33 +114,47 @@ class LocatorTest(unittest.TestCase):
         self.assertLess(fake.writes.index(b'reset\r'), fake.writes.index(b'aurs 1 1\r'))
         self.assertLess(fake.writes.index(b'aurs 1 1\r'), fake.writes.index(b'lec\r'))
 
-    def test_rate_failure_closes_port_without_starting_position_stream(self):
-        fake = FakeSerial()
-        fake.rate_reply = b'err code: -1\r\n'
-        loc = self.start_locator(fake)
-        self.assertTrue(wait_until(lambda: not loc.running))
-        self.assertIn('PANS rejected 10 Hz', loc.error)
-        self.assertNotIn(b'lec\r', fake.writes)
-        self.assertFalse(fake.is_open)
+    def test_rate_reply_variations_and_missing_ack_do_not_block_valid_stream(self):
+        for reply, info, verified in (
+                (b'err code: 0\r', b'', True),
+                (b'dwm> ', b'cfg: upd_rate_norm=1 upd_rate_stat=1 label=DW1900\r\n', True),
+                (b'err code: -1\r\n', b'cfg: upd_rate_norm=1 upd_rate_stat=100\r\n', False),
+                (b'dwm> ', b'dwm> ', False)):
+            with self.subTest(reply=reply, info=info):
+                fake = FakeSerial([LEC.encode('ascii')])
+                fake.rate_reply, fake.info_reply = reply, info
+                loc = self.start_locator(fake)
+                self.assertTrue(wait_until(lambda: loc.position is not None))
+                self.assertTrue(loc.is_fresh())
+                self.assertEqual(loc.rate_verified, verified)
+                self.assertEqual(bool(loc.rate_warning), not verified)
+                self.assertIsNone(loc.error)
+                self.assertEqual(fake.writes.count(b'lec\r'), 1)
+                loc.stop()
 
         fake = FakeSerial()
         loc = UWBLocator(port='fake')
         loc._serial = fake
-        loc._stop.wait = lambda timeout: False
-        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3]):
-            loc._run()
-        self.assertIn('No PANS response', loc.error)
-        self.assertNotIn(b'lec\r', fake.writes)
-        self.assertFalse(fake.is_open)
+        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3, 3, 6]):
+            self.assertTrue(loc._set_update_rate())
+        self.assertFalse(loc.rate_verified)
+        self.assertIn('10 Hz unconfirmed', loc.rate_warning)
 
     def test_partial_lines_and_quality_filter(self):
         raw = LEC.encode('ascii')
-        fake = FakeSerial([raw[:30], raw[30:], b'POS,9,9,9,10\r\n'])
+        fake = FakeSerial([raw[:30], raw[30:], b'POS,unsupported\r\n', b'POS,9,9,9,10\r\n'])
         loc = self.start_locator(fake)
         self.assertTrue(wait_until(lambda: not fake.lines))
         self.assertEqual(loc.position.x, 1)
         self.assertEqual(len(loc.anchor_sample.anchors), 4)
         self.assertTrue(loc.is_fresh())
+        details = dict(loc.diagnostics(time.monotonic()))
+        self.assertEqual(details['reader_state'], 'streaming')
+        self.assertEqual(details['last_reported_quality'], '10')
+        self.assertEqual(details['last_serial_line'], 'POS,9,9,9,10')
+        self.assertEqual(details['rejected_records'], '1')
+        self.assertNotEqual(details['serial_age_s'], 'none')
+        self.assertNotEqual(details['record_age_s'], 'none')
         with mock.patch('localization.uwb_locator.monotonic', return_value=loc.position.timestamp + 1):
             self.assertFalse(loc.is_fresh())
 
