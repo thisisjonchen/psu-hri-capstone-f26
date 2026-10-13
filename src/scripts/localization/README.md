@@ -56,13 +56,16 @@ after it is released. For manual access, stop the UWB node first, then close the
 serial Screen window before restarting it; detaching Screen keeps the port open.
 Privileged tools can bypass the kernel lock, so open serial terminals as `duckie`.
 The reader verifies the `dwm>` PANS prompt and reboots the tag once to establish a
-known stream state. It reads the update rates with `aurg` (or `si`), sets both to
+known stream state. Shell commands use 20 ms spacing between characters to avoid
+dropped input. It reads the update rates with `aurg` (or `si`), sets both to
 10 Hz with `aurs 1 1` if needed, and verifies the readback, retrying once before
 enabling `lec` once. This also repairs a reverted rate on reconnect. If 10 Hz cannot
 be confirmed, it logs a warning and still reads live data at the tag's configured
 rate. Freshness and quality limits remain in effect. The ROS loop
 checks at 20 Hz and publishes each new fix once. A delayed first fix does not toggle
-the stream off.
+the stream off. After 30 seconds without any serial data (longer for slow configured
+rates), the reader closes the port and ROS retries setup automatically. It does not
+toggle `lec` during a pause or terminate other programs holding the port.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,
 plus the tag's position. AN0/AN1 slot numbers are not used as anchor identities.
 Serial failures invalidate the last fix immediately and trigger periodic reconnects.

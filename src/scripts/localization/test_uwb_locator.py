@@ -16,6 +16,8 @@ class FakeSerial(object):
         self.lines = deque(lines)
         self.streaming = streaming
         self.writes = []
+        self.byte_writes = []
+        self.command = b''
         self.is_open = True
         self.fail = False
         self.in_waiting = 0
@@ -29,6 +31,14 @@ class FakeSerial(object):
         self.replies = deque()
 
     def write(self, data):
+        self.byte_writes.append(data)
+        self.command += data
+        if not self.command.endswith(b'\r'):
+            return
+        # The double-enter shell handshake is one logical command for assertions.
+        if self.command == b'\r' and (not self.writes or self.writes[-1] == b'reset\r'):
+            return
+        data, self.command = self.command, b''
         self.writes.append(data)
         if data == b'reset\r' or data == b'quit\r':
             self.streaming = False
@@ -77,6 +87,11 @@ def wait_until(condition):
 
 
 class LocatorTest(unittest.TestCase):
+    def setUp(self):
+        pacing = mock.patch('localization.uwb_locator.sleep')
+        self.sleep = pacing.start()
+        self.addCleanup(pacing.stop)
+
     def start_locator(self, fake):
         loc = UWBLocator(port='fake')
         # Skip real hardware boot delays, retaining real reader threads and serial errors.
@@ -125,6 +140,24 @@ class LocatorTest(unittest.TestCase):
         self.assertIn(b'reset\r', fake.writes)
         self.assertLess(fake.writes.index(b'reset\r'), fake.writes.index(b'aurs 1 1\r'))
         self.assertLess(fake.writes.index(b'aurs 1 1\r'), fake.writes.index(b'lec\r'))
+        self.assertTrue(all(len(chunk) == 1 for chunk in fake.byte_writes))
+        self.assertEqual(self.sleep.call_count, len(fake.byte_writes))
+        self.assertTrue(all(call == mock.call(0.02) for call in self.sleep.call_args_list))
+
+    def test_prolonged_serial_silence_closes_reader_for_reconnect(self):
+        for lines in ([], [LEC.encode('ascii')]):
+            with self.subTest(had_position=bool(lines)):
+                fake = FakeSerial(lines)
+                with mock.patch('localization.uwb_locator.SERIAL_SILENCE_TIMEOUT', 0.05):
+                    loc = self.start_locator(fake)
+                    self.assertTrue(wait_until(lambda: not loc.running))
+                self.assertIn('No UWB serial data', loc.error)
+                self.assertFalse(fake.is_open)
+                self.assertIsNone(loc.position)
+                self.assertEqual(fake.writes.count(b'lec\r'), 1)
+        # Unconfirmed slow stationary updates must get time to arrive.
+        loc.update_rate = (1, 100)
+        self.assertGreaterEqual(loc.serial_timeout, 30)
 
     def test_rate_reply_variations_and_missing_ack_do_not_block_valid_stream(self):
         for reply, readback, info, apply_after, verified, writes in (

@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 from collections import namedtuple
+from time import sleep
 
 import serial
 
@@ -22,6 +23,7 @@ except ImportError:  # Python 2.7 on the DD24's ROS Kinetic image
 Position = namedtuple('Position', 'x y z quality timestamp')
 Anchor = namedtuple('Anchor', 'id x y z distance')
 AnchorSample = namedtuple('AnchorSample', 'anchors timestamp')
+SERIAL_SILENCE_TIMEOUT = 30.0
 
 
 def finite(value):
@@ -140,6 +142,7 @@ class UWBLocator(object):
         rates = self.update_rate
         return [('reader_state', self.reader_state),
                 ('serial_age_s', age(self.last_serial_at)),
+                ('serial_timeout_s', str(self.serial_timeout)),
                 ('record_age_s', age(self.last_record_at)),
                 ('last_reported_quality', str(self.last_quality) if self.last_quality is not None else 'none'),
                 ('min_quality', str(self.min_quality)),
@@ -150,6 +153,11 @@ class UWBLocator(object):
                 ('stationary_interval_100ms', str(rates[1]) if rates else 'unknown'),
                 ('update_rate_response', self.rate_response),
                 ('last_serial_line', self.last_line)]
+
+    @property
+    def serial_timeout(self):
+        # Allow three stationary intervals when a slower rate could not be changed.
+        return max(SERIAL_SILENCE_TIMEOUT, self.update_rate[1] * 0.3 if self.update_rate else 0)
 
     @property
     def running(self):
@@ -218,9 +226,16 @@ class UWBLocator(object):
         self._connected = False
         self.reader_state = 'stopped'
 
+    def _write_command(self, command):
+        # PANS shell input can drop characters sent as a single USB/UART burst.
+        # Finish the short command even during shutdown, including its terminator.
+        for index in range(len(command)):
+            self._serial.write(command[index:index + 1])
+            sleep(0.02)
+
     def _enter_shell(self):
         self.reader_state = 'entering shell'
-        self._serial.write(b'\r\r')
+        self._write_command(b'\r\r')
         if self._stop.wait(1):
             return False
         response = self._serial.read(self._serial.in_waiting or 1).decode('ascii', 'ignore')
@@ -235,20 +250,25 @@ class UWBLocator(object):
             if not self._enter_shell():
                 return
             self.reader_state = 'resetting tag'
-            self._serial.write(b'reset\r')
+            self._write_command(b'reset\r')
             self._in_shell = False
             if self._stop.wait(3) or not self._enter_shell():
                 return
             if not self._set_update_rate():
                 return
-            self._serial.write(b'lec\r')
+            self._write_command(b'lec\r')
             self._connected = True
             self.reader_state = 'streaming'
+            stream_started = monotonic()
             pending = b''
             while not self._stop.is_set():
                 raw = self._serial.readline()
                 if raw:
                     self.last_serial_at = monotonic()
+                else:
+                    last_received = self.last_serial_at if self.last_serial_at is not None else stream_started
+                    if monotonic() - last_received >= self.serial_timeout:
+                        raise RuntimeError('No UWB serial data for %.1f seconds; reconnecting tag' % self.serial_timeout)
                 pending += raw
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
@@ -284,7 +304,7 @@ class UWBLocator(object):
             self._latest_anchors = None
             try:
                 if self._serial.is_open and self._in_shell:
-                    self._serial.write(b'quit\r')
+                    self._write_command(b'quit\r')
             except (serial.SerialException, OSError):
                 pass
             finally:
@@ -326,7 +346,7 @@ class UWBLocator(object):
             return ''
         # Only called before lec starts: discard leftovers from the previous prompt.
         self._serial.reset_input_buffer()
-        self._serial.write(command)
+        self._write_command(command)
         deadline = monotonic() + 2
         response = ''
         while not self._stop.is_set() and monotonic() < deadline:
