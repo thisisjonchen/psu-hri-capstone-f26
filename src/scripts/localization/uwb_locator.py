@@ -12,6 +12,8 @@ from collections import namedtuple
 
 import serial
 
+from localization.serial_port import ExclusiveSerial
+
 try:
     from time import monotonic
 except ImportError:  # Python 2.7 on the DD24's ROS Kinetic image
@@ -24,6 +26,22 @@ AnchorSample = namedtuple('AnchorSample', 'anchors timestamp')
 
 def finite(value):
     return not (math.isnan(value) or math.isinf(value))
+
+
+RATE_PATTERNS = (
+    r'\bnom\s*=\s*(\d+)\s+stat\s*=\s*(\d+)(?=[\s,])',
+    r'upd\s+rate:\s*(\d+)\s*,\s*(\d+)\s*\(stat\)',
+    r'upd_rate_norm=(\d+)\s+upd_rate_stat=(\d+)(?=[\s,])')
+
+
+def parse_update_rate(response):
+    for pattern in RATE_PATTERNS:
+        match = re.search(pattern, response, re.I)
+        if match:
+            normal, stationary = [int(v) for v in match.groups()]
+            if normal > 0 and stationary >= normal:
+                return normal, stationary
+    return None
 
 
 def parse_lep_line(line, timestamp=None):
@@ -113,10 +131,13 @@ class UWBLocator(object):
         self.rejected_records = 0
         self.rate_verified = False
         self.rate_warning = ''
+        self.update_rate = None
+        self.rate_response = ''
 
     def diagnostics(self, now):
         def age(timestamp):
             return 'none' if timestamp is None else '{:.3f}'.format(max(0, now - timestamp))
+        rates = self.update_rate
         return [('reader_state', self.reader_state),
                 ('serial_age_s', age(self.last_serial_at)),
                 ('record_age_s', age(self.last_record_at)),
@@ -125,6 +146,9 @@ class UWBLocator(object):
                 ('rejected_records', str(self.rejected_records)),
                 ('update_rate_verified', str(self.rate_verified)),
                 ('update_rate_warning', self.rate_warning),
+                ('normal_interval_100ms', str(rates[0]) if rates else 'unknown'),
+                ('stationary_interval_100ms', str(rates[1]) if rates else 'unknown'),
+                ('update_rate_response', self.rate_response),
                 ('last_serial_line', self.last_line)]
 
     @property
@@ -162,8 +186,10 @@ class UWBLocator(object):
         self.rejected_records = 0
         self.rate_verified = False
         self.rate_warning = ''
+        self.update_rate = None
+        self.rate_response = ''
         try:
-            self._serial = serial.Serial(self.port, self.baud, timeout=0.1, write_timeout=1)
+            self._serial = ExclusiveSerial(self.port, self.baud, timeout=0.1, write_timeout=1)
             self._thread = threading.Thread(target=self._run)
             self._thread.daemon = True
             self._thread.start()
@@ -266,36 +292,47 @@ class UWBLocator(object):
 
     def _set_update_rate(self):
         self.reader_state = 'setting update rate'
-        # PANS intervals are in 100 ms units: 10 Hz even when stationary.
-        response = self._shell_reply(b'aurs 1 1\r',
-                                     r'err\s+code:\s*(-?\d+)(?=[\r\n,])')
-        result = re.search(r'err\s+code:\s*(-?\d+)(?=[\r\n,])', response, re.I)
-        if result and int(result.group(1)) == 0:
-            self.rate_verified = True
-            return not self._stop.is_set()
-        if self._stop.is_set():
-            return False
-        # Some shell responses differ or omit the ACK. Verify the actual settings
-        # using the system-information fields instead of requiring one ACK format.
-        settings = self._shell_reply(b'si\r', r'upd_rate_stat=\d+(?=[\s,])')
-        normal = re.search(r'upd_rate_norm=(\d+)(?=[\s,])', settings)
-        stationary = re.search(r'upd_rate_stat=(\d+)(?=[\s,])', settings)
-        if normal and stationary and normal.group(1) == stationary.group(1) == '1':
-            self.rate_verified = True
-        elif not self._stop.is_set():
-            reason = ('PANS returned error %s' % result.group(1) if result else
-                      'No recognized PANS update-rate acknowledgment')
+        self._read_update_rate()
+        # Read first to avoid unnecessary flash writes; verify after every change.
+        for attempt in range(2):
+            if self._stop.is_set():
+                return False
+            if self.update_rate == (1, 1):
+                break
+            response = self._shell_reply(b'aurs 1 1\r', r'err\s+code:\s*-?\d+(?=[\r\n,])')
+            self.rate_response = 'aurs: ' + response.strip()[-256:]
+            if self._stop.wait(0.5):
+                return False
+            self._read_update_rate()
+        self.rate_verified = self.update_rate == (1, 1)
+        if not self.rate_verified and not self._stop.is_set():
+            reason = ('PANS reports nom=%d stat=%d' % self.update_rate if self.update_rate else
+                      'No recognized PANS update-rate readback')
             self.rate_warning = reason + '; 10 Hz unconfirmed, reading the tag at its configured rate'
             logging.warning('UWB: %s', self.rate_warning)
         return not self._stop.is_set()
 
+    def _read_update_rate(self):
+        completed = '|'.join('(?:%s)' % pattern for pattern in RATE_PATTERNS)
+        response = self._shell_reply(b'aurg\r', completed)
+        self.update_rate = parse_update_rate(response)
+        if self.update_rate is None and not self._stop.is_set():
+            response = self._shell_reply(b'si\r', completed)
+            self.update_rate = parse_update_rate(response)
+        self.rate_response = (self.rate_response + '\nreadback: ' + response.strip())[-512:]
+
     def _shell_reply(self, command, completed):
+        if self._stop.is_set():
+            return ''
+        # Only called before lec starts: discard leftovers from the previous prompt.
+        self._serial.reset_input_buffer()
         self._serial.write(command)
         deadline = monotonic() + 2
         response = ''
         while not self._stop.is_set() and monotonic() < deadline:
-            response = (response + self._serial.readline().decode('ascii', 'ignore'))[-2048:]
-            if re.search(completed, response, re.I) or 'dwm>' in response:
+            raw = self._serial.readline().decode('ascii', 'ignore')
+            response = (response + raw)[-2048:]
+            if 'dwm>' in response or (not raw and re.search(completed, response, re.I)):
                 break
         return response
 

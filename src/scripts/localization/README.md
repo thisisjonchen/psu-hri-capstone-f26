@@ -50,19 +50,25 @@ screen -c pi.screenrc
 
 An explicitly empty `port:=` disables serial access and publishes an actionable
 error diagnostic. With a port configured, setup and reading run in a worker.
-The reader verifies the `dwm>` PANS prompt, reboots the tag once to establish a known
-stream state, sets moving and stationary updates to 10 Hz (`aurs 1 1`), then enables
-`lec` once. It accepts the update-rate ACK or verifies the settings through `si`.
-If 10 Hz cannot be confirmed, it logs a warning and still reads live data at the
-tag's configured rate. Freshness and quality limits remain in effect. The ROS loop
+On the Pi, the reader checks existing serial owners and takes an exclusive terminal
+lock before configuring the port. A busy port produces a clear error and is retried
+after it is released. For manual access, stop the UWB node first, then close the
+serial Screen window before restarting it; detaching Screen keeps the port open.
+Privileged tools can bypass the kernel lock, so open serial terminals as `duckie`.
+The reader verifies the `dwm>` PANS prompt and reboots the tag once to establish a
+known stream state. It reads the update rates with `aurg` (or `si`), sets both to
+10 Hz with `aurs 1 1` if needed, and verifies the readback, retrying once before
+enabling `lec` once. This also repairs a reverted rate on reconnect. If 10 Hz cannot
+be confirmed, it logs a warning and still reads live data at the tag's configured
+rate. Freshness and quality limits remain in effect. The ROS loop
 checks at 20 Hz and publishes each new fix once. A delayed first fix does not toggle
 the stream off.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,
 plus the tag's position. AN0/AN1 slot numbers are not used as anchor identities.
 Serial failures invalidate the last fix immediately and trigger periodic reconnects.
 For a missing/stale fix, inspect `/pidrone/localization/status`. It includes the
-reader startup stage, serial/parsed-record ages, last reported quality, rejected
-record count, and the last serial line to distinguish silence from rejected data.
+reader startup stage, actual update intervals/readback, serial/parsed-record ages,
+last reported quality, rejected record count, and the last serial line.
 
 The **SE** Screen window now starts fusion instead of EMA. Do not run
 `state_estimator.py -p ema` alongside it: only fusion should publish

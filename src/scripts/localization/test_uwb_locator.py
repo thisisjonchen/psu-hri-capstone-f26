@@ -21,6 +21,10 @@ class FakeSerial(object):
         self.in_waiting = 0
         self.prompt = b'dwm> '
         self.rate_reply = b'err code: 0\r\n'
+        self.get_rate_reply = None
+        self.update_rate = (1, 100)
+        self.apply_after = 1
+        self.rate_writes = 0
         self.info_reply = b'dwm> '
         self.replies = deque()
 
@@ -31,7 +35,15 @@ class FakeSerial(object):
         if data == b'lec\r':
             self.streaming = not self.streaming
         if data == b'aurs 1 1\r':
+            self.rate_writes += 1
+            if self.apply_after is not None and self.rate_writes >= self.apply_after:
+                self.update_rate = (1, 1)
             self.replies.append(self.rate_reply)
+        if data == b'aurg\r':
+            reply = self.get_rate_reply
+            if reply is None:
+                reply = ('aurg: nom=%d stat=%d\r\n' % self.update_rate).encode('ascii')
+            self.replies.append(reply)
         if data == b'si\r':
             self.replies.append(self.info_reply)
 
@@ -70,7 +82,7 @@ class LocatorTest(unittest.TestCase):
         # Skip real hardware boot delays, retaining real reader threads and serial errors.
         loc._stop.wait = lambda timeout: loc._stop.is_set()
         self.addCleanup(loc.stop)
-        with mock.patch('serial.Serial', return_value=fake):
+        with mock.patch('localization.uwb_locator.ExclusiveSerial', return_value=fake):
             loc.start()
         self.assertTrue(wait_until(lambda: loc.connected or not loc.running))
         return loc
@@ -115,30 +127,56 @@ class LocatorTest(unittest.TestCase):
         self.assertLess(fake.writes.index(b'aurs 1 1\r'), fake.writes.index(b'lec\r'))
 
     def test_rate_reply_variations_and_missing_ack_do_not_block_valid_stream(self):
-        for reply, info, verified in (
-                (b'err code: 0\r', b'', True),
-                (b'dwm> ', b'cfg: upd_rate_norm=1 upd_rate_stat=1 label=DW1900\r\n', True),
-                (b'err code: -1\r\n', b'cfg: upd_rate_norm=1 upd_rate_stat=100\r\n', False),
-                (b'dwm> ', b'dwm> ', False)):
-            with self.subTest(reply=reply, info=info):
+        for reply, readback, info, apply_after, verified, writes in (
+                (b'err code: 0\r', None, b'', 1, True, 1),
+                (b'dwm> ', None, b'', 2, True, 2),
+                (b'dwm> ', b'err code: 0, upd rate: 1, 1(stat)\r\n', b'', None, True, 0),
+                (b'dwm> ', b'aurg: nom=1 stat=1\r\n', b'', None, True, 0),
+                (b'dwm> ', b'dwm> ', b'cfg: upd_rate_norm=1 upd_rate_stat=1 label=DW1900\r\n', None, True, 0),
+                (b'err code: 0\r\n', None, b'', None, False, 2),
+                (b'err code: -1\r\n', None, b'', None, False, 2),
+                (b'dwm> ', b'dwm> ', b'dwm> ', None, False, 2)):
+            with self.subTest(reply=reply, readback=readback, apply_after=apply_after):
                 fake = FakeSerial([LEC.encode('ascii')])
-                fake.rate_reply, fake.info_reply = reply, info
+                fake.rate_reply, fake.get_rate_reply, fake.info_reply = reply, readback, info
+                fake.apply_after = apply_after
                 loc = self.start_locator(fake)
                 self.assertTrue(wait_until(lambda: loc.position is not None))
                 self.assertTrue(loc.is_fresh())
                 self.assertEqual(loc.rate_verified, verified)
                 self.assertEqual(bool(loc.rate_warning), not verified)
                 self.assertIsNone(loc.error)
+                self.assertEqual(fake.rate_writes, writes)
                 self.assertEqual(fake.writes.count(b'lec\r'), 1)
+                if readback is None:
+                    self.assertEqual(loc.update_rate, (1, 1) if verified else (1, 100))
+                if not verified and readback is None:
+                    self.assertIn('nom=1 stat=100', loc.rate_warning)
                 loc.stop()
 
         fake = FakeSerial()
         loc = UWBLocator(port='fake')
         loc._serial = fake
-        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3, 3, 6]):
+        loc._stop.wait = lambda timeout: False
+        with mock.patch.object(loc, '_shell_reply', return_value='') as reply:
             self.assertTrue(loc._set_update_rate())
+        self.assertEqual(sum(call.args[0] == b'aurs 1 1\r' for call in reply.call_args_list), 2)
         self.assertFalse(loc.rate_verified)
         self.assertIn('10 Hz unconfirmed', loc.rate_warning)
+        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3]):
+            self.assertEqual(loc._shell_reply(b'aurg\r', 'nom='), '')
+
+        # A reconnect must repair a reverted tag, even after an earlier verified run.
+        fake = FakeSerial([LEC.encode('ascii')])
+        loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        loc.stop()
+        replacement = FakeSerial([LEC.encode('ascii')])
+        with mock.patch('localization.uwb_locator.ExclusiveSerial', return_value=replacement):
+            loc.start()
+        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertEqual(replacement.rate_writes, 1)
+        self.assertTrue(loc.rate_verified)
 
     def test_partial_lines_and_quality_filter(self):
         raw = LEC.encode('ascii')
@@ -181,14 +219,14 @@ class LocatorTest(unittest.TestCase):
         self.assertEqual(loc.error, 'device unplugged')
         self.assertFalse(fake.is_open)
         replacement = FakeSerial([b'POS,3,4,0,90\r\n'])
-        with mock.patch('serial.Serial', return_value=replacement):
+        with mock.patch('localization.uwb_locator.ExclusiveSerial', return_value=replacement):
             loc.start()
         self.assertTrue(wait_until(lambda: loc.position is not None))
         self.assertEqual(loc.position.x, 3)
         self.assertIsNone(loc.error)
 
     def test_no_port_never_opens_a_guessed_device(self):
-        with mock.patch('serial.Serial') as opened:
+        with mock.patch('localization.uwb_locator.ExclusiveSerial') as opened:
             with self.assertRaises(ValueError):
                 UWBLocator().start()
             opened.assert_not_called()
