@@ -129,6 +129,7 @@ class FleetMap {
         this.calibrationRevision = layout.revision;
       } catch (error) { return; }
     }
+    this.calibrationVerified = !layout || layout.verified !== false;
     this.refreshAnchors();
   }
 
@@ -184,7 +185,8 @@ class FleetMap {
     const complete = live.filter(([, report]) => report.completeRoom && now - report.completeAt <= 1500);
     const candidate = this.calibratedRoom || (complete.length ? complete[0][1].completeRoom : null);
     const bad = live.find(([, report]) => report.error || (candidate && !this.matchesRoom(candidate, report)));
-    this.layoutUsable = !!candidate && !bad;
+    const awaitingVerification = this.calibratedRoom && !this.calibrationVerified && !complete.length;
+    this.layoutUsable = !!candidate && !bad && !awaitingVerification;
     if (wasUsable && !this.layoutUsable) Object.values(drones).forEach(drone => drone.publish('cancelRoomTarget', {}));
     // A Bluetooth-verified outline can be displayed before tags report it.
     if (candidate && (this.calibratedRoom || !bad)) {
@@ -210,6 +212,8 @@ class FleetMap {
     if (bad) {
       status = bad[1].error || 'Anchor layouts disagree between drones';
       status += '. Map updates and target editing are paused.';
+    } else if (awaitingVerification) {
+      status = 'Saved room · Awaiting verification. Measure and save, or connect a drone for a live anchor report.';
     } else if (candidate) {
       status = this.calibratedRoom && !live.some(([, report]) => report.anchors.length)
         ? 'Waiting for drone positions.' : '';
@@ -221,7 +225,7 @@ class FleetMap {
         'Drone ' + id.slice(-1) + ': ' + report.anchors.length + '/4');
       if (counts.length) status += ' · ' + counts.join(', ');
     }
-    if (!this.layoutUsable && this.room) status += ' · Last observed layout retained';
+    if (!this.layoutUsable && this.room && !awaitingVerification) status += ' · Last observed layout retained';
     document.getElementById('room-status').textContent = status;
     document.getElementById('room-status').hidden = !status;
     ['room-fit', 'room-zoom-in', 'room-zoom-out'].forEach(id => { document.getElementById(id).disabled = !this.room; });

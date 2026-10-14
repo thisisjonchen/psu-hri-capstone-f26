@@ -10,8 +10,8 @@
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
-  <script src="js/anchor-calibration.js?v=20261012-calibration-map" defer></script>
-  <script src="js/main.js?v=20261012-calibration-map" defer></script>
+  <script src="js/anchor-calibration.js?v=20261014-calibration-flow" defer></script>
+  <script src="js/main.js?v=20261014-room-setup" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
@@ -74,20 +74,22 @@
         </form>
         <details class="anchor-calibration">
           <summary>Calibrate anchors</summary>
+          <p class="map-note">Set up the room using this laptop’s Bluetooth. Keep drones powered off or connected and disarmed. Keep anchors at the same height and check their corner assignments after moving them. Returning to the same anchors? Go straight to Measure layout.</p>
           <div class="calibration-grid">
             <label>Corner 1 (Top Left)<select id="calibration-anchor-3" disabled><option value="">Select anchor</option></select></label>
             <label>Corner 2 (Top Right)<select id="calibration-anchor-2" disabled><option value="">Select anchor</option></select></label>
             <label>Corner 3 (Bottom Left)<select id="calibration-anchor-0" disabled><option value="">Select anchor</option></select></label>
             <label>Corner 4 (Bottom Right)<select id="calibration-anchor-1" disabled><option value="">Select anchor</option></select></label>
           </div>
+          <p class="map-note" id="calibration-selection" role="status" aria-live="polite">Scan for at least four anchors with active UWB.</p>
           <div class="calibration-actions">
-            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>Scan anchors</button>
-            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>Measure layout</button>
-            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>Save layout</button>
+            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>1. Scan anchors</button>
+            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>2. Measure layout</button>
+            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>3. Save layout</button>
             <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
           </div>
           <pre class="calibration-preview" id="calibration-preview" hidden></pre>
-          <p class="map-note" id="calibration-status" role="status" aria-live="polite">Start the laptop dashboard server and connect a drone.</p>
+          <p class="map-note" id="calibration-status" role="status" aria-live="polite">Start the laptop dashboard server to set up the room.</p>
         </details>
         <div class="map-feedback">
           <p class="map-note" id="room-status" role="status">Connect a drone to discover the UWB anchor layout</p>

@@ -58,15 +58,18 @@ class AnchorCalibration:
         self.reserved = bool(saved.get('participants'))
         self.preview = None
         self.preview_at = None
-        self.boards = saved.get('recovery_boards', []) if self.dirty else []
-        self.state = {'stage': 'idle', 'message': 'Connect and disarm at least one drone to scan for anchors.',
-                      'boards': self.boards, 'preview': None, 'token': None, 'layout': None}
+        layout = saved.get('layout') if not self.dirty else None
+        if layout:
+            layout['verified'] = False
+        self.boards = saved.get('recovery_boards', []) if self.dirty else saved.get('boards', [])
+        self.state = {'stage': 'idle', 'message': 'Scan for anchors, or measure again using the previous corner assignments.',
+                      'boards': self.boards, 'preview': None, 'token': None, 'layout': layout}
         if self.dirty:
             self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
         owner = saved.get('owner', str(uuid.uuid4()))
         self.guard = BridgeGuard(bridges, owner, claimed=self.reserved, participants=saved.get('participants', []))
         self.persist()
-        self.ble = PansBLE()
+        self.ble = PansBLE(progress=self.ble_progress)
         self.stopping = threading.Event()
         self.worker = None
         self.timer = threading.Thread(target=self.maintain, daemon=True)
@@ -74,6 +77,7 @@ class AnchorCalibration:
 
     def persist(self):
         self.journal.save({'owner': self.guard.owner, 'incomplete_save': self.dirty,
+                           'boards': self.boards, 'layout': self.state['layout'],
                            'recovery_boards': self.boards if self.dirty else [],
                            'participants': self.guard.participants or []})
 
@@ -94,6 +98,10 @@ class AnchorCalibration:
     def update(self, stage, message, **values):
         with self.lock:
             self.state.update(stage=stage, message=message, **values)
+
+    def ble_progress(self, message):
+        with self.lock:
+            self.state['message'] = message
 
     def check(self, owned=True):
         if self.cancel.is_set() or self.stopping.is_set():
@@ -155,6 +163,9 @@ class AnchorCalibration:
                 self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
                 self.boards = ble.call('scan', lambda: self.check(self.dirty))
                 message = 'Found %d anchors. Select an anchor for each corner.' % len(self.boards)
+                if not self.boards:
+                    message = ('No anchors found. Check power and laptop Bluetooth, close other apps '
+                               'connected to the anchors, then scan again.')
                 if ble.scan_warnings:
                     message += ' Unreadable boards: ' + '; '.join(ble.scan_warnings)
                 self.update('idle', message, boards=self.boards)
@@ -193,8 +204,7 @@ class AnchorCalibration:
                 # Keep the recovery warning until saved coordinates are verified.
                 self.guard.reserve(False)
                 self.dirty = self.reserved = False
-                self.persist()
-                layout = {'revision': self.state['token'], 'frame': 'map',
+                layout = {'revision': self.state['token'], 'frame': 'map', 'verified': True,
                           'positions': copy.deepcopy(self.preview['positions'])}
                 self.preview = None
                 self.preview_at = None

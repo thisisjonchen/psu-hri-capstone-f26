@@ -3,7 +3,7 @@ import asyncio
 import logging
 import sys
 import threading
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from calibration.anchor_calibration import (SERVICE, MODE, PAN, DATA_MODE, LOCATION,
                                              INFO, POSITION, CLUSTER, decode_info,
@@ -11,8 +11,9 @@ from calibration.anchor_calibration import (SERVICE, MODE, PAN, DATA_MODE, LOCAT
 
 
 class PansBLE:
-    def __init__(self, timeout=30):
+    def __init__(self, timeout=30, progress=None):
         self.timeout = timeout
+        self.progress = progress or (lambda message: None)
         self.devices = {}
         self.scan_warnings = []
         # CoreBluetooth objects must stay on one event loop across requests.
@@ -66,6 +67,7 @@ class PansBLE:
                 board['ble'], timeout=5))
         if device is None:
             raise ValueError('Anchor %s is not visible from the laptop; scan again' % board.get('id', board['ble']))
+        self.devices[board['ble']] = device
         client = BleakClient(device, timeout=10)
         try:
             await self.io(client.connect())
@@ -86,6 +88,8 @@ class PansBLE:
     async def _scan(self, guard):
         from bleak import BleakScanner, BleakError
         self.scan_warnings = []
+        self.devices.clear()
+        self.progress('Discovering Bluetooth anchors (5 seconds)...')
         scanner = BleakScanner()
         try:
             await self.io(scanner.start())
@@ -106,6 +110,8 @@ class PansBLE:
                 continue
             self.devices[device.address] = device
             board = {'ble': device.address}
+            self.progress('Checking Bluetooth anchor %s; %d anchors found...' %
+                          (device.address, len(boards)))
             try:
                 async with self.connect(board, guard) as client:
                     board.update(await self.inspect(client))
@@ -132,10 +138,10 @@ class PansBLE:
         if len(initiators) != 1 or len(known_pans) > 1:
             raise ValueError('Select one initiator and three anchors on the same PAN')
         initiator = initiators[0]
-        for board in boards:
-            async with self.connect(board, guard) as client:
-                await self.verify(client, board)
         rows = {}
+        # Verify each board in the same connection used to read its ranges.
+        # Measurement does not write coordinates; save retains its full preflight.
+        self.progress('Connecting to initiator %s (anchor 1 of 4)...' % initiator['id'])
         async with self.connect(initiator, guard) as client:
             await self.verify(client, initiator)
             cluster = await self.io(client.read_gatt_char(CLUSTER))
@@ -148,6 +154,8 @@ class PansBLE:
                 guard()
                 # Enabling the initiator's distance notifications starts PANS ranging.
                 await self.io(client.start_notify(LOCATION, lambda _, data: received.put_nowait(bytes(data))))
+                self.progress('Ranging from initiator %s; waiting up to %d seconds...' %
+                              (initiator['id'], self.timeout))
                 deadline = self.loop.time() + self.timeout
                 while self.loop.time() < deadline:
                     guard()
@@ -169,6 +177,8 @@ class PansBLE:
         for board in boards:
             if board == initiator:
                 continue
+            self.progress('Reading distances from %s (anchor %d of 4)...' %
+                          (board['id'], len(rows) + 1))
             async with self.connect(board, guard) as client:
                 await self.verify(client, board)
                 _, rows[board['id']] = decode_location(await self.read_location(client, b'\x01', guard))
@@ -184,11 +194,17 @@ class PansBLE:
             await self.cleanup(lambda: client.write_gatt_char(DATA_MODE, previous, response=True))
 
     async def _save(self, positions, on_write, guard):
-        for board in positions:
-            async with self.connect(board, guard) as client:
+        # Keep the four verified connections until readback finishes. No position
+        # is written until every board passes preflight; all exits disconnect.
+        async with AsyncExitStack() as connections:
+            clients = []
+            for index, board in enumerate(positions, 1):
+                self.progress('Checking %s before saving (anchor %d of 4)...' % (board['id'], index))
+                client = await connections.enter_async_context(self.connect(board, guard))
                 await self.verify(client, board)
-        for board in positions:
-            async with self.connect(board, guard) as client:
+                clients.append(client)
+            for index, (board, client) in enumerate(zip(positions, clients), 1):
+                self.progress('Saving and verifying %s (anchor %d of 4)...' % (board['id'], index))
                 await self.verify(client, board)
                 guard()
                 on_write()

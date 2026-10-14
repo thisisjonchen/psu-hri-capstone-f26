@@ -128,8 +128,6 @@ class BridgeGuard(object):
             peers = [p for p in self.peers if
                      (self.participants is not None and p['url'] in self.participants) or
                      ((include_new or self.participants is None) and p['url'] in self.selection)]
-            if not peers:
-                raise ValueError('Connect at least one drone in the dashboard to calibrate anchors')
             return peers
 
     def connections(self):
@@ -190,6 +188,12 @@ class BridgeGuard(object):
             if value:
                 self.claimed = True
             peers = self.selected(include_new=False)
+            if not peers:
+                # Room setup can run before drones are connected. A drone joining
+                # later still has to acknowledge ownership before ranging/writes.
+                self.claimed = False
+                self.participants = [] if value else None
+                return
             for peer in peers:
                 peer['owner_at'] = 0
                 request = json.dumps({'owner': self.owner, 'action': 'acquire' if value else 'release', 'request': nonce})

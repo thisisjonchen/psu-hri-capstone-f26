@@ -193,6 +193,14 @@ class CalibrationTest(unittest.TestCase):
             newcomer['socket'] = None
             guard.prepare()  # A retry also retains the disconnected participant.
             with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check()
+            guard.participants = None
+            guard.select([])
+            guard.reserve(True)  # Offline room setup needs no drone acknowledgment.
+            guard.check(owned=True)
+            self.assertFalse(guard.claimed)
+            guard.select([active['url']])
+            with self.assertRaisesRegex(ValueError, 'acknowledge calibration ownership'):
+                guard.check(owned=True)
 
 
 class CoordinatorTest(unittest.TestCase):
@@ -238,6 +246,20 @@ class CoordinatorTest(unittest.TestCase):
     def params(self):
         with open(self.state_path) as stream:
             return {'~' + key: value for key, value in json.load(stream).items()}
+
+    def test_offline_room_setup_saves_without_drone_acknowledgments(self):
+        guard = BridgeGuard.__new__(BridgeGuard)
+        guard.lock, guard.stop_event = threading.RLock(), threading.Event()
+        guard.owner, guard.claimed, guard.participants = 'laptop', False, None
+        guard.peers, guard.selection = [], []
+        self.node.guard = guard
+        self.node.run(self.measure)
+        self.assertEqual(self.node.state['stage'], 'preview')
+        self.ble.save.side_effect = lambda positions, check, on_write: (check(), on_write())
+        self.node.run(dict(action='apply', token=self.node.state['token']))
+        self.assertEqual(self.node.state['stage'], 'complete')
+        self.assertTrue(self.node.state['layout']['verified'])
+        self.assertFalse(self.node.reserved)
 
     def test_cancel_releases_reservation_but_retains_unverified_save_for_recovery(self):
         self.node.run(self.measure)
@@ -296,8 +318,12 @@ class CoordinatorTest(unittest.TestCase):
         layout = self.node.status()['layout']
         self.assertEqual(layout['frame'], 'map')
         self.assertEqual(layout['positions'], solve_layout(BOARDS, ROWS)['positions'])
+        self.node.close()
+        self.node = self.create()
+        self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
+        self.assertEqual(self.node.boards, BOARDS)
         self.node.run(self.measure)
-        self.assertEqual(self.node.status()['layout'], layout)
+        self.assertFalse(self.node.status()['layout']['verified'])
         def fail(positions, guard, on_write):
             on_write()
             raise ValueError('BLE write outcome unknown')
@@ -344,7 +370,8 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         import sys
         from calibration.anchor_calibration import INFO, MODE, PAN
         ble = PansBLE.__new__(PansBLE)
-        ble.devices = {}
+        ble.progress = mock.Mock()
+        ble.devices = {'stale': object()}
         entries = {key: (NS(address=key), NS(service_uuids=[], service_data={SERVICE: bytes([mode])}))
                    for key, mode in [('tag', 0x02), ('failed', 0x82), ('anchor-uuid', 0x8a)]}
         scanner = mock.AsyncMock()
@@ -362,12 +389,14 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(b['ble'], b['id']) for b in boards], [('anchor-uuid', '0001')])
         self.assertIsNone(boards[0]['pan'])
         self.assertNotIn('tag', ble.devices)
+        self.assertNotIn('stale', ble.devices)
         self.assertIn('failed', ble.scan_warnings[0])
         client.disconnect.assert_awaited_once()
 
     async def test_pans_ranging_and_save_use_notifications_and_verify_readback_and_cleanup(self):
         from calibration.anchor_calibration import POSITION, encode_position
         ble = PansBLE.__new__(PansBLE)
+        ble.progress = mock.Mock()
         ble.loop, ble.timeout = asyncio.get_running_loop(), 1
         ble.verify = mock.AsyncMock()
         clients, modes, saved = {}, {}, {}
@@ -386,34 +415,61 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             client.read_gatt_char.side_effect, client.write_gatt_char.side_effect = read, write
             client.start_notify.side_effect = lambda uuid, callback, key=key: callback(None, payload(ROWS[key]))
             clients[key] = client
+        connections, active = [], set()
         @asynccontextmanager
         async def connect(board, guard):
             guard()
-            yield clients[board['id']]
+            connections.append(board['id'])
+            active.add(board['id'])
+            try:
+                yield clients[board['id']]
+            finally:
+                active.remove(board['id'])
         ble.connect = connect
         for pans in ([None] * 4, [0, None, 0, None], [0] * 4):
             with self.subTest(pans=pans):
+                connections.clear()
+                ble.verify.reset_mock()
                 boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, pans)]
                 rows = await ble._measure(boards, lambda: None)
                 self.assertEqual(rows, ROWS)
+                self.assertEqual(connections, [board['id'] for board in boards])
+                self.assertEqual(ble.verify.await_count, 4)
                 np.testing.assert_allclose(
                     [[p[k] for k in ('x', 'y', 'z')] for p in solve_layout(boards, rows)['positions']], POINTS)
         with self.assertRaisesRegex(ValueError, 'same PAN'):
             await ble._measure([dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 1, None])], lambda: None)
         clients['0001'].stop_notify.assert_awaited_with(LOCATION)
         positions = solve_layout(BOARDS, rows)['positions']
-        on_write = mock.Mock()
+        on_write = mock.Mock(side_effect=lambda: self.assertEqual(len(active), 4))
+        connections.clear()
         await ble._save(positions, on_write, lambda: None)
+        self.assertEqual(connections, [board['id'] for board in positions])
+        self.assertFalse(active)
         self.assertEqual(on_write.call_count, 4)
         for board in positions:
             clients[board['id']].write_gatt_char.assert_any_await(POSITION, encode_position(board), response=True)
         saved['0001']['x'] = 10
         with self.assertRaisesRegex(ValueError, 'failed verification'):
             await ble._save(positions, on_write, lambda: None)
+        self.assertFalse(active)
         clients['0001'].start_notify.side_effect = ValueError('cancelled')
         with self.assertRaisesRegex(ValueError, 'cancelled'):
             await ble._measure(BOARDS, lambda: None)
         self.assertEqual(set(modes.values()), {b'\x02'})
+
+        # Identity failure must still prevent both a measured result and writes.
+        clients['0001'].start_notify.side_effect = lambda uuid, callback: callback(None, payload(ROWS['0001']))
+        ble.verify.side_effect = [None, ValueError('Anchor identity changed')]
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            await ble._measure(BOARDS, lambda: None)
+        self.assertEqual(set(modes.values()), {b'\x02'})
+        ble.verify.side_effect = [None, ValueError('Anchor identity changed')]
+        on_write.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            await ble._save(positions, on_write, lambda: None)
+        on_write.assert_not_called()
+        self.assertFalse(active)
 
 
 class LaptopCancellationTest(unittest.TestCase):

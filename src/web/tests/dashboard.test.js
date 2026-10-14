@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // Test command routing without opening network sockets or contacting hardware.
-function dashboard({ discover = true } = {}) {
+function dashboard({ discover = true, storage = new Map(), calibrationFetch = null } = {}) {
   const listeners = {};
   const calibrationRequests = [];
   const calibrationPolls = [];
@@ -46,7 +46,7 @@ function dashboard({ discover = true } = {}) {
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend', 'map-sources',
     'target-preview', 'target-drone', 'target-x', 'target-y', 'target-submit', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
   elements.get('target-drone').value = 'drone1';
-  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview']) elements.set('calibration-' + name, element());
+  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview', 'selection']) elements.set('calibration-' + name, element());
   for (let i = 0; i < 4; i++) {
     elements.set('calibration-anchor-' + i, element());
   }
@@ -97,6 +97,7 @@ function dashboard({ discover = true } = {}) {
   Chart.defaults = { global: {} };
   const context = vm.createContext({
     AbortSignal,
+    localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     fetch(url, options = {}) {
       assert.equal(url, '/api/calibration');
       if (options.method === 'POST') {
@@ -104,9 +105,11 @@ function dashboard({ discover = true } = {}) {
         const request = JSON.parse(options.body);
         if (request.action === 'status') {
           calibrationPolls.push(request);
+          if (calibrationFetch) return calibrationFetch(request);
           return new Promise(() => {}); // Status delivery is controlled by each test.
         }
         calibrationRequests.push(request);
+        if (calibrationFetch) return calibrationFetch(request);
         return Promise.resolve({ ok: true });
       }
       return new Promise(() => {}); // Status delivery is controlled by each test.
@@ -844,7 +847,7 @@ test('unfinished calibration and server outages never block flight commands', ()
   assert.equal(last(drone, 'mode').mode, 'DISARMED');
 });
 
-test('laptop calibration with only Drone 2 requires disarmed state and sends the reviewed layout through HTTP', () => {
+test('laptop calibration with only Drone 2 requires disarmed state and sends the reviewed layout through HTTP', async () => {
   const app = dashboard(), service = app.connect('drone2');
   const boards = ['4d12', '980C', '9781', 'CA83'].map((id, i) => ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
   const bridges = ['ws://drone2.local:9090'];
@@ -853,30 +856,30 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   const status = () => app.anchorCalibration.update({ ...state });
   status();
   assert.deepEqual(app.elements.get('calibration-anchor-0').children.slice(1).map(option => option.textContent),
-    ['Tag 6 (4D12)', 'Tag 5 (980C)', 'Tag 4 (9781)', 'Tag 3 (CA83)']);
-  app.anchorCalibration.request('scan');
+    ['Tag 6 (4D12) · Initiator', 'Tag 5 (980C)', 'Tag 4 (9781)', 'Tag 3 (CA83)']);
+  await app.anchorCalibration.request('scan');
   assert.equal(app.calibrationRequests.length, 0);
   app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
   app.receive(service, '/pidrone/mode', { mode: 'ARMED' });
-  app.anchorCalibration.request('scan');
+  await app.anchorCalibration.request('scan');
   assert.equal(app.calibrationRequests.length, 0);
   app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
   status();
-  app.anchorCalibration.request('scan');
+  await app.anchorCalibration.request('scan');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges });
   status();
   for (let i = 0; i < 4; i++) app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
-  app.anchorCalibration.request('measure');
+  await app.anchorCalibration.request('measure');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'measure', bridges, anchors: boards.map(b => ({ ble: b.ble })) });
   Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
   assert.match(app.elements.get('calibration-preview').textContent, /Corner 1 \(Top Left\) · Tag 3 \(CA83\)/);
   app.elements.get('calibration-anchor-0').value = boards[1].ble;
-  app.anchorCalibration.request('apply');
+  await app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 2);
   app.elements.get('calibration-anchor-0').value = boards[0].ble;
-  app.anchorCalibration.request('apply');
+  await app.anchorCalibration.request('apply');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', bridges, token: 'reviewed-token' });
   status();
   app.advanceTime(1600);
@@ -886,7 +889,60 @@ test('laptop calibration with only Drone 2 requires disarmed state and sends the
   assert.equal(app.calibrationRequests.length, 3);
 });
 
-test('calibration follows dashboard connections and waits for matching server readiness', () => {
+test('room setup works without drones and reuses saved corners without a scan', async () => {
+  const app = dashboard({ discover: false });
+  const boards = ['4D12', '980C', '9781', 'CA83'].map((id, i) =>
+    ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0, pan: null }));
+  const positions = boards.map((board, i) => ({ ...board, x: [0, 4, 4, 0][i], y: [0, 0, 3, 3][i], z: 0 }));
+  const state = { stage: 'idle', message: 'Ready', boards, grounded: true, reserved: false,
+    selection: [], layout: { revision: 'saved', frame: 'map', verified: false, positions } };
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('map-placeholder').hidden, true);
+  assert.equal(app.elements.get('calibration-measure').disabled, false);
+  assert.equal(app.fleetMap.layoutUsable, false);
+  assert.match(app.elements.get('room-status').textContent, /Awaiting verification/);
+  await app.anchorCalibration.request('measure');
+  assert.deepEqual(app.calibrationRequests, [{ action: 'measure', bridges: [], anchors: boards.map(b => ({ ble: b.ble })) }]);
+  const drone = app.connect('drone2');
+  app.anchorCalibration.update({ ...state, selection: ['ws://drone2.local:9090'] });
+  assert.equal(app.elements.get('calibration-measure').disabled, true);
+  app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  app.anchorCalibration.refresh();
+  assert.equal(app.elements.get('calibration-measure').disabled, false);
+  app.receive(drone, '/pidrone/localization/anchors', {
+    ...anchorsAt(100, positions.map(p => [p.x, p.y, p.z])), anchor_ids: boards.map(b => b.id) });
+  assert.equal(app.fleetMap.layoutUsable, true);
+  assert.equal(app.elements.get('target-send').disabled, true);
+});
+
+test('late status and request timeouts cannot unlock calibration or trigger duplicate requests', async () => {
+  const polls = [];
+  let rejectAction;
+  const app = dashboard({ calibrationFetch: request => request.action === 'status'
+    ? new Promise(resolve => polls.push(resolve))
+    : new Promise((resolve, reject) => { rejectAction = reject; }) });
+  const idle = { stage: 'idle', message: 'Ready', boards: [], grounded: true, reserved: false, selection: [] };
+  app.anchorCalibration.update(idle);
+  const action = app.anchorCalibration.request('scan');
+  polls.shift()({ ok: true, json: async () => idle });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
+  await app.anchorCalibration.request('scan');
+  rejectAction(Object.assign(new Error('Timeout'), { name: 'TimeoutError' }));
+  await action;
+  app.anchorCalibration.refresh();
+  assert.match(app.elements.get('calibration-status').textContent, /may still be running/);
+  assert.equal(app.elements.get('calibration-scan').disabled, true);
+  await app.anchorCalibration.request('scan');
+  assert.equal(app.calibrationRequests.length, 1);
+  polls.shift()({ ok: true, json: async () => ({ ...idle, stage: 'scanning', busy: true,
+    message: 'Checking Bluetooth anchor 0001...' }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.elements.get('calibration-status').textContent, 'Checking Bluetooth anchor 0001...');
+  assert.equal(app.elements.get('calibration-cancel').disabled, false);
+});
+
+test('calibration follows dashboard connections and waits for matching server readiness', async () => {
   const app = dashboard(), second = app.connect('drone2');
   app.receive(second, '/pidrone/mode', { mode: 'DISARMED' });
   const state = { stage: 'idle', message: 'Ready', boards: [], reserved: false, grounded: true,
@@ -911,7 +967,7 @@ test('calibration follows dashboard connections and waits for matching server re
   assert.deepEqual(app.calibrationPolls.at(-1), { action: 'status', bridges: state.selection });
   app.anchorCalibration.update(state);
   assert.equal(app.elements.get('calibration-scan').disabled, false);
-  app.anchorCalibration.request('scan');
+  await app.anchorCalibration.request('scan');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges: state.selection });
   state.flight_state_timeout_ms = 2000;
   app.advanceTime(1000);
