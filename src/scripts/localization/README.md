@@ -202,7 +202,9 @@ For different addresses, pass `--bridges ws://ADDRESS:9090 [ws://SECOND:9090]`.
 Use the same addresses for the dashboard's drone connections. Room setup does not
 require a drone connection: keep drones powered off, or connect and disarm them.
 For connected drones, start rosbridge, flight controller, tag reader and fusion.
-Each selected drone must report a fresh disarmed state.
+Scanning only reads Bluetooth metadata and does not require drone telemetry, even
+when recovery retains a disconnected participant. Measuring and saving still
+require each participating drone to report a fresh disarmed state.
 Calibration tolerates up to two seconds between flight-state and ownership updates;
 disconnects, armed states or longer gaps stop calibration. Calibration never blocks
 flight commands. Flight/navigation freshness limits are unchanged.

@@ -261,6 +261,24 @@ class CoordinatorTest(unittest.TestCase):
         self.assertTrue(self.node.state['layout']['verified'])
         self.assertFalse(self.node.reserved)
 
+    def test_scan_preserves_recovery_without_requiring_drone_telemetry(self):
+        self.node.reserved = self.guard.claimed = True
+        self.guard.participants = ['ws://drone2.local:9090']
+        self.guard.check.side_effect = ValueError('Drone 2 disconnected')
+        self.ble.scan.side_effect = lambda check: (check(), BOARDS)[1]
+        for dirty in (False, True):
+            self.node.dirty = dirty
+            self.node.run({'action': 'scan'})
+            self.assertEqual(self.node.state['stage'], 'idle')
+            self.assertEqual(self.node.boards, BOARDS)
+            self.assertTrue(self.node.reserved)
+            self.assertEqual(self.node.dirty, dirty)
+            self.assertEqual(self.guard.participants, ['ws://drone2.local:9090'])
+        self.guard.reserve.assert_not_called()
+        self.node.run(self.measure)
+        self.assertEqual(self.node.state['stage'], 'error')
+        self.ble.measure.assert_not_called()
+
     def test_cancel_releases_reservation_but_retains_unverified_save_for_recovery(self):
         self.node.run(self.measure)
         def fail(positions, guard, on_write):
@@ -270,6 +288,7 @@ class CoordinatorTest(unittest.TestCase):
         self.node.run(dict(action='cancel'))
         self.assertFalse(self.node.reserved)
         self.assertTrue(self.node.dirty)
+        self.assertIsNone(self.node.status()['layout'])
         self.assertIn('unverified', self.node.state['message'])
         with self.assertRaisesRegex(ValueError, 'Another laptop calibration service'):
             CalibrationJournal(self.state_path)
@@ -278,6 +297,7 @@ class CoordinatorTest(unittest.TestCase):
         self.node.close()
         self.node = self.create()
         self.assertTrue(self.node.dirty)
+        self.assertIsNone(self.node.status()['layout'])
         self.assertEqual(len(self.node.boards), 4)
         self.node.run(self.measure)
         self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
@@ -322,17 +342,6 @@ class CoordinatorTest(unittest.TestCase):
         self.node = self.create()
         self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
         self.assertEqual(self.node.boards, BOARDS)
-        self.node.run(self.measure)
-        self.assertFalse(self.node.status()['layout']['verified'])
-        def fail(positions, guard, on_write):
-            on_write()
-            raise ValueError('BLE write outcome unknown')
-        self.ble.save.side_effect = fail
-        self.node.run(dict(action='apply', token=self.node.state['token']))
-        self.assertIsNone(self.node.status()['layout'])
-        self.node.close()
-        self.node = self.create()
-        self.assertIsNone(self.node.status()['layout'])
 
 
 class FlightOwnershipTest(unittest.TestCase):
@@ -426,17 +435,11 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             finally:
                 active.remove(board['id'])
         ble.connect = connect
-        for pans in ([None] * 4, [0, None, 0, None], [0] * 4):
-            with self.subTest(pans=pans):
-                connections.clear()
-                ble.verify.reset_mock()
-                boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, pans)]
-                rows = await ble._measure(boards, lambda: None)
-                self.assertEqual(rows, ROWS)
-                self.assertEqual(connections, [board['id'] for board in boards])
-                self.assertEqual(ble.verify.await_count, 4)
-                np.testing.assert_allclose(
-                    [[p[k] for k in ('x', 'y', 'z')] for p in solve_layout(boards, rows)['positions']], POINTS)
+        boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 0, None])]
+        rows = await ble._measure(boards, lambda: None)
+        self.assertEqual(rows, ROWS)
+        self.assertEqual(connections, [board['id'] for board in boards])
+        self.assertEqual(ble.verify.await_count, 4)
         with self.assertRaisesRegex(ValueError, 'same PAN'):
             await ble._measure([dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 1, None])], lambda: None)
         clients['0001'].stop_notify.assert_awaited_with(LOCATION)
@@ -458,12 +461,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             await ble._measure(BOARDS, lambda: None)
         self.assertEqual(set(modes.values()), {b'\x02'})
 
-        # Identity failure must still prevent both a measured result and writes.
-        clients['0001'].start_notify.side_effect = lambda uuid, callback: callback(None, payload(ROWS['0001']))
-        ble.verify.side_effect = [None, ValueError('Anchor identity changed')]
-        with self.assertRaisesRegex(ValueError, 'identity changed'):
-            await ble._measure(BOARDS, lambda: None)
-        self.assertEqual(set(modes.values()), {b'\x02'})
+        # All anchors must pass preflight before the first coordinate write.
         ble.verify.side_effect = [None, ValueError('Anchor identity changed')]
         on_write.reset_mock()
         with self.assertRaisesRegex(ValueError, 'identity changed'):

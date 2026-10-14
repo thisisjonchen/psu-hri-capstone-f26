@@ -220,7 +220,7 @@ class FleetMap {
     } else {
       status = Object.values(drones).some(drone => drone.connected)
         ? 'Waiting for a complete report of four UWB corner anchors'
-        : 'Connect a drone to discover the UWB anchor layout';
+        : '';
       const counts = live.filter(([, report]) => !report.error).map(([id, report]) =>
         'Drone ' + id.slice(-1) + ': ' + report.anchors.length + '/4');
       if (counts.length) status += ' · ' + counts.join(', ');

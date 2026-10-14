@@ -89,7 +89,7 @@ class PansBLE:
         from bleak import BleakScanner, BleakError
         self.scan_warnings = []
         self.devices.clear()
-        self.progress('Discovering Bluetooth anchors (5 seconds)...')
+        self.progress('Discovering Bluetooth anchors...')
         scanner = BleakScanner()
         try:
             await self.io(scanner.start())

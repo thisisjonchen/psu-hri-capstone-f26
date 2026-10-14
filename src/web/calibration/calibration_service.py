@@ -103,9 +103,12 @@ class AnchorCalibration:
         with self.lock:
             self.state['message'] = message
 
-    def check(self, owned=True):
+    def check_cancelled(self):
         if self.cancel.is_set() or self.stopping.is_set():
             raise ValueError('Calibration cancelled')
+
+    def check(self, owned=True):
+        self.check_cancelled()
         self.guard.check(owned=owned)
 
     def request(self, request):
@@ -150,18 +153,19 @@ class AnchorCalibration:
                 self.update('idle', 'Calibration cancelled. The saved layout is unverified.' if self.dirty
                             else 'Calibration cancelled. No new coordinates saved.')
                 return
-            if action == 'measure' or (action == 'scan' and self.dirty):
+            if action == 'measure':
                 self.guard.prepare()
                 self.persist()
-            self.check(owned=False)
+            if action != 'scan':
+                self.check(owned=False)
             ble = self.ble
             if action == 'scan':
-                if self.reserved and not self.dirty:
+                if self.preview is not None:
                     raise ValueError('Cancel the current preview before scanning again')
-                if self.dirty:
-                    self.guard.reserve(True)
                 self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
-                self.boards = ble.call('scan', lambda: self.check(self.dirty))
+                # Discovery only reads board metadata. Retain recovery ownership,
+                # but do not require drone telemetry or claim drones just to scan.
+                self.boards = ble.call('scan', self.check_cancelled)
                 message = 'Found %d anchors. Select an anchor for each corner.' % len(self.boards)
                 if not self.boards:
                     message = ('No anchors found. Check power and laptop Bluetooth, close other apps '
