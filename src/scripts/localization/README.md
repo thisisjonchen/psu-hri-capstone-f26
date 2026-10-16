@@ -264,10 +264,11 @@ requested velocities, not guarantees of actual speed. Tune
 `/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`
 against the physical drone; both are read when the controller classes start.
 
-The XY velocity controller uses proportional feedback plus a slow trim integrator.
+The XY velocity controller uses proportional feedback (1 RC unit per cm/s of
+velocity error) plus a slow trim integrator limited to +/-10 RC units.
 There is no separate fast XY integral: accumulated correction must not delay braking
 when measured velocity exceeds the request. Roll/pitch commands are limited to
-1400–1600 after adding trim, and trim stops accumulating further into saturation.
+1470–1530 after adding trim, and trim stops accumulating further into saturation.
 The velocity request limit is not a measured-speed governor; incorrect or delayed
 velocity and heading feedback can still cause overshoot.
 

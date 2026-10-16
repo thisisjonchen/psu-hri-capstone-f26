@@ -310,7 +310,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.desired_twist_callback(twist())
         command = controller.step()
         self.assertAlmostEqual(controller.current_velocity.y, .2, delta=.03)
-        self.assertLess(command[1], 1470)
+        self.assertLess(command[1], 1490)
         self.assertEqual(self.node.generation, generation)
         # Returning camera flow must not double the UWB-derived velocity.
         learned_velocity = self.node.filter.velocity.copy()
@@ -465,8 +465,8 @@ class FusionNodeTest(unittest.TestCase):
         command = controller.step()
         np.testing.assert_allclose((controller.current_velocity.x, controller.current_velocity.y),
                                    (.2, .1), atol=.03)
-        self.assertLess(command[0], 1470)
-        self.assertLess(command[1], 1485)
+        self.assertLess(command[0], 1490)
+        self.assertLess(command[1], 1495)
         self.assertEqual(controller.current_position.z, .5)
         covariance = self.messages['pidrone/state'][-1].twist_with_covariance.covariance
         self.assertGreater(covariance[0], self.node.filter.velocity_variance)
@@ -544,7 +544,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.current_state_callback(current)
         command = controller.step()
         self.assertLess(controller.pid_error.y, -20)
-        self.assertLess(command[1], 1440)
+        self.assertLess(command[1], 1480)
         self.assertAlmostEqual(controller.pid_error.z, -15)
 
     def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
@@ -584,25 +584,27 @@ class FusionNodeTest(unittest.TestCase):
         output = controller.step()
         self.assertLess(output[0], 1500, 'brake when rightward velocity exceeds target')
         self.assertGreater(output[1], 1500, 'brake when backward velocity exceeds target')
+        self.assertGreater(output[0], 1480, 'a 0.10 m/s error needs a modest correction')
+        self.assertLess(output[1], 1520, 'a 0.10 m/s error needs a modest correction')
 
     def test_xy_trim_cannot_exceed_output_limits_or_wind_up_at_saturation(self):
         pid = self.controller().pid
-        pid.roll_low._i, pid.pitch_low._i = 40., -40.
+        pid.roll_low._i, pid.pitch_low._i = 5., -5.
         error = NS(x=100., y=-100., z=0.)
         for _ in range(61):
             output = pid.step(error)
-            self.assertLessEqual(output[0], pid.roll.control_range[1])
-            self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
+            self.assertLessEqual(output[0], 1530)
+            self.assertGreaterEqual(output[1], 1470)
             self.ros_now += 1 / 60.0
-        self.assertEqual(pid.roll_low._i, 40.)
-        self.assertEqual(pid.pitch_low._i, -40.)
-        # Existing trim can unwind even while the combined output is saturated.
-        pid.roll_low._i, pid.pitch_low._i = 150., -150.
+        self.assertEqual(pid.roll_low._i, 5.)
+        self.assertEqual(pid.pitch_low._i, -5.)
+        # Existing trim unwinds when the velocity error reverses.
+        pid.roll_low._i, pid.pitch_low._i = 10., -10.
         output = pid.step(NS(x=-1., y=1., z=0.))
         self.assertLessEqual(output[0], pid.roll.control_range[1])
         self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
-        self.assertLess(pid.roll_low._i, 150.)
-        self.assertGreater(pid.pitch_low._i, -150.)
+        self.assertLess(pid.roll_low._i, 10.)
+        self.assertGreater(pid.pitch_low._i, -10.)
 
 
 if __name__ == '__main__':

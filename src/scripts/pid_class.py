@@ -83,11 +83,11 @@ class PID:
     def __init__(self,
 
                  # Velocity feedback provides braking; only the slow trim integrates.
-                 roll=PIDaxis(3.0, 0.0, 0.0, control_range=(1400, 1600), midpoint=1500, i_range=(0, 0)),
-                 roll_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1400, 1600), midpoint=1500, i_range=(-150, 150)),
+                 roll=PIDaxis(1.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
+                 roll_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-10, 10)),
 
-                 pitch=PIDaxis(3.0, 0.0, 0.0, control_range=(1400, 1600), midpoint=1500, i_range=(0, 0)),
-                 pitch_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1400, 1600), midpoint=1500, i_range=(-150, 150)),
+                 pitch=PIDaxis(1.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
+                 pitch_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-10, 10)),
 
                  yaw=PIDaxis(0.0, 0.0, 0.0),
 
