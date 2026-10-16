@@ -332,11 +332,19 @@ class PIDController(object):
             else:
                 self.position_control_pub.publish(False)
 
+        requested_xy = (self.desired_velocity.x, self.desired_velocity.y)
         if self.room_target is None and (self.desired_velocity.magnitude() > 0 or abs(self.desired_yaw_velocity) > 0):
             self.adjust_desired_velocity()
 
-        return self.pid.step(self.pid_error, self.desired_yaw_velocity,
-                             self.altitude_sample)
+        command = self.pid.step(self.pid_error, self.desired_yaw_velocity,
+                                self.altitude_sample)
+        if self.current_mode == 'FLYING':
+            rospy.loginfo_throttle(1,
+                'XY PID: local_ready=%s position_control=%s desired=(%.3f, %.3f) '
+                'measured=(%.3f, %.3f) m/s roll=%.1f pitch=%.1f' % (
+                    self.local_ready(), self.position_control, requested_xy[0], requested_xy[1],
+                    self.current_velocity.x, self.current_velocity.y, command[0], command[1]))
+        return command
 
     # HELPER METHODS
     ################

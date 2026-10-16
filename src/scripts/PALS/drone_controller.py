@@ -304,6 +304,7 @@ class Drone(object):
             if not self.xy_local_hold:
                 self.position_mode_pub.publish(Bool(True))
                 self.xy_local_hold = True
+            rospy.loginfo_throttle(1, 'XY hold: fusion missing/stale; using local position hold')
             return command
         msg = self._hold_pose()
         if msg.header.frame_id != self.xy_frame:
@@ -317,6 +318,10 @@ class Drone(object):
         yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
         command.linear.x, command.linear.y = target_velocity(
             self.xy_anchor, (p.x, p.y), yaw, 0.5, 0.10)
+        rospy.loginfo_throttle(1,
+            'XY hold: room_error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
+                self.xy_anchor[0] - p.x, self.xy_anchor[1] - p.y,
+                command.linear.x, command.linear.y))
         return command
 
     def hover(self, seconds=1.0):
