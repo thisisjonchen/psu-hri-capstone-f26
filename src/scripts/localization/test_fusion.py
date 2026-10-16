@@ -95,10 +95,10 @@ class FusionMathTest(unittest.TestCase):
 
 class FusionNodeTest(unittest.TestCase):
     def test_legacy_calibration_lock_does_not_disable_fused_room_position(self):
-        del self.params['~room_yaw_offset']
         self.params['/pidrone/localization/calibration_lock'] = True
         self.node = type(self.node)()
-        self.assertAlmostEqual(self.node.filter.yaw_offset, math.pi/2)
+        self.assertIsNone(self.node.filter.yaw_offset)
+        self.node.mode_callback(NS(mode='DISARMED'))
         self.refresh()
         self.report_anchors()
         self.flow()
@@ -111,22 +111,11 @@ class FusionNodeTest(unittest.TestCase):
     def setUp(self):
         # Reuse the existing transport doubles; execute the real node/controller.
         ros_doubles.NodeTest.setUp(self)
-        self.params['~room_yaw_offset'] = '0'
         self.ros.get_time = lambda: self.ros_now
         self.ros.loginfo = self.ros.logwarn = mock.Mock()
         self.ros.loginfo_throttle = mock.Mock()
         self.ros.init_node = mock.Mock()
         self.ros.set_param = self.params.__setitem__
-        self.services = {}
-        self.ros.Service = lambda name, kind, callback: self.services.setdefault('/' + name, callback)
-        self.ros.ServiceProxy = lambda name, kind: lambda: self.services[name](None)
-        self.ros.wait_for_service = mock.Mock()
-        srv = ModuleType('std_srvs.srv')
-        srv.Trigger, srv.TriggerResponse = object, NS
-        service_modules = mock.patch.dict(sys.modules, {
-            'std_srvs': ModuleType('std_srvs'), 'std_srvs.srv': srv})
-        service_modules.start()
-        self.addCleanup(service_modules.stop)
         tf = ModuleType('tf')
         tf.transformations = NS(euler_from_quaternion=euler, quaternion_from_euler=quaternion,
                                 quaternion_multiply=multiply)
@@ -148,6 +137,7 @@ class FusionNodeTest(unittest.TestCase):
         script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'fusion_localization_node')
         self.node = runpy.run_path(script)['FusionLocalizationNode']()
         self.node.step.__globals__['monotonic'] = lambda: self.now
+        self.node.mode_callback(NS(mode='DISARMED'))
         self.refresh()
         self.report_anchors()
         self.flow()
@@ -160,9 +150,9 @@ class FusionNodeTest(unittest.TestCase):
         self.node.imu_callback(NS(orientation=NS(x=q[0], y=q[1], z=q[2], w=q[3]), angular_velocity=vector(),
             orientation_covariance=[0]*9, header=NS(stamp=Stamp(self.ros_now))))
 
-    def test_heading_calibration_rejects_armed_or_stale_inputs_without_changes(self):
-        offset, generation = self.node.filter.yaw_offset, self.node.generation
-        room = self.node.filter.room.copy()
+    def test_startup_heading_waits_for_disarmed_mode_and_fresh_imu(self):
+        self.node.filter.yaw_offset = None
+        self.node.invalidate_room()
         for mode, mode_at, imu in [
                 (None, None, self.node.imu),
                 ('ARMED', self.ros_now, self.node.imu),
@@ -172,10 +162,38 @@ class FusionNodeTest(unittest.TestCase):
                 ('DISARMED', self.ros_now, (self.ros_now - 1,) + self.node.imu[1:])]:
             with self.subTest(mode=mode, mode_at=mode_at, imu=imu):
                 self.node.mode, self.node.mode_at, self.node.imu = mode, mode_at, imu
-                self.assertFalse(self.node.calibrate_heading(None).success)
-                self.assertEqual(self.node.filter.yaw_offset, offset)
-                self.assertEqual(self.node.generation, generation)
-                np.testing.assert_array_equal(self.node.filter.room, room)
+                self.node.step()
+                self.assertIsNone(self.node.filter.yaw_offset)
+                self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+
+    def test_startup_heading_aligns_once_and_preserves_position_height_and_turns(self):
+        self.node = type(self.node)()
+        self.assertIsNone(self.node.filter.yaw_offset)
+        self.refresh(yaw=math.radians(64))
+        self.node.mode_callback(NS(mode='DISARMED'))
+        self.report_anchors()
+        self.flow()
+        self.uwb()
+        self.node.step()
+        self.assertAlmostEqual(self.node.filter.yaw_offset, math.radians(26))
+        self.assertEqual(self.params['~room_yaw_offset'], self.node.filter.yaw_offset)
+        pose = self.messages['pidrone/localization/fused'][-1].pose.pose
+        self.assertEqual((pose.position.x, pose.position.y, pose.position.z), (1, 2, .5))
+        self.assertAlmostEqual(pose.orientation.z, 0)
+        self.assertAlmostEqual(pose.orientation.w, 1)
+        np.testing.assert_array_equal(self.node.filter.odom, (0, 0))
+        # Turning, disarming and losing UWB must not recapture heading.
+        for mode in ('FLYING', 'DISARMED'):
+            self.ros_now += .05
+            self.refresh(yaw=math.radians(74))
+            self.node.mode_callback(NS(mode=mode))
+            self.node.invalidate_room()
+            self.flow()
+            self.uwb()
+            self.node.step()
+            self.assertAlmostEqual(self.node.filter.yaw_offset, math.radians(26))
+            q = self.messages['pidrone/localization/fused'][-1].pose.pose.orientation
+            self.assertAlmostEqual(q.z, math.sin(math.radians(5)))
 
     def flow(self, x=0, y=0, frame='pidrone_body'):
         msg = NS(header=NS(stamp=Stamp(self.ros_now), frame_id=frame), twist=twist())
@@ -214,6 +232,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(self.node.broadcaster.sendTransform.call_args[0][0][2], .7)
 
     def test_missing_heading_or_live_anchors_prevents_room_output(self):
+        self.node.mode_callback(NS(mode='FLYING'))
         self.node.filter.yaw_offset = None
         self.node.invalidate_room()
         self.node.step()
@@ -287,8 +306,8 @@ class FusionNodeTest(unittest.TestCase):
                     pose=NS(position=NS(x=2, y=2, z=999)))
         controller.room_target_callback(target)
         controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.x, 0, places=10)
-        self.assertAlmostEqual(controller.desired_velocity.y, .2)
+        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        self.assertAlmostEqual(controller.desired_velocity.y, 0, places=10)
         self.assertEqual(controller.desired_position.z, .25)
         controller.room_ready_callback(NS(data=False))
         controller.calc_error()

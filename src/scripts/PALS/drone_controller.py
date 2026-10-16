@@ -14,7 +14,6 @@ from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist, TwistStamp
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty
-from std_srvs.srv import Trigger
 from localization.fusion import target_velocity
 
 
@@ -226,8 +225,7 @@ class Drone(object):
             ('/optical_flow_node', [sys.executable, '-u', 'optical_flow_node.py']),
             ('/uwb_localization', ['roslaunch', os.path.join(launch, 'uwb_localization.launch'),
                                    'port:=' + os.environ.get('PALS_UWB_PORT', '/dev/ttyACM1')]),
-            ('/fusion_localization', ['roslaunch', os.path.join(launch, 'fusion_localization.launch'),
-                                      'room_yaw_offset:=' + os.environ.get('PALS_ROOM_YAW_OFFSET', '1.5707963267948966')]),
+            ('/fusion_localization', ['roslaunch', os.path.join(launch, 'fusion_localization.launch')]),
             ('/pid_controller', [sys.executable, '-u', 'pid_controller.py']),
             ('/flight_controller_node', [sys.executable, '-u', 'flight_controller_node.py']),
             ('/apriltag_detection', ['roslaunch', os.path.join(launch, 'apriltag_detection.launch')]),
@@ -269,16 +267,6 @@ class Drone(object):
                 return
             rospy.sleep(0.1)
         raise RuntimeError('Mode {} was not confirmed'.format(name))
-
-    def calibrate_heading(self):
-        """Align heading while disarmed, stationary and facing map +Y."""
-        service = '/pidrone/localization/calibrate_heading'
-        rospy.wait_for_service(service, timeout=5.0)
-        result = rospy.ServiceProxy(service, Trigger)()
-        if not result.success:
-            raise RuntimeError(result.message)
-        self.fused_pose = None
-        rospy.loginfo('%s', result.message)
 
     def lock_xy(self):
         """Hold the current fused room position through the velocity PID."""

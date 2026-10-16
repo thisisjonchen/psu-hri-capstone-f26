@@ -1,13 +1,11 @@
 <launch>
   <arg name="namespace" default="/"/>
-  <arg name="room_yaw_offset" default="1.5707963267948966"/>
   <arg name="frame_id" default="map"/>
   <arg name="floor_z" default="0.0"/>
   <arg name="tof_offset_z" default="0.0"/>
   <group ns="$(arg namespace)">
     <node pkg="pidrone_pkg" type="fusion_localization_node" name="fusion_localization" output="screen">
       <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
-      <param name="room_yaw_offset" value="$(arg room_yaw_offset)" type="str"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="tof_offset_z" value="$(arg tof_offset_z)"/>

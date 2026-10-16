@@ -92,35 +92,17 @@ fused position, and the existing camera/ToF checks remain in effect.
 
 ### Room heading
 
-While disarmed, stationary and facing map **+Y**, call `drone.calibrate_heading()`
-after `drone.ready()` and before takeoff. It calls the
-`/pidrone/localization/calibrate_heading` (`std_srvs/Trigger`) service to set
-`room_yaw_offset = pi/2 - current_IMU_yaw`. Fusion rejects armed or stale inputs
-and reacquires room position from UWB; calibration returns without waiting for
-that fix. Existing routines do not call it automatically. This aligns heading
-for the session; it does not correct ongoing drift or change launch defaults.
+Keep the drone **disarmed, stationary and facing map +Y** when starting the fusion
+ROS node. Once fresh disarmed-mode and IMU data arrive, the node automatically sets
+`room_yaw_offset = pi/2 - IMU_yaw`. It logs the captured offset and exposes it as
+`/fusion_localization/room_yaw_offset` for inspection. Room position is unavailable
+until this startup alignment completes and UWB localization is ready.
 
-Without session calibration, the default offset `pi/2` assumes that IMU yaw zero
-means the nose faces map **+Y** (toward the top of the map): forward is +Y,
-back is -Y, left is -X and right is +X. The IMU tracks subsequent turns.
-Anchor calibration keeps this configured heading and requires a new live room fix.
-
-For a different starting orientation, override `room_yaw_offset` at launch or
-export `PALS_ROOM_YAW_OFFSET` before starting Screen. Measure forward heading
-counterclockwise from room +X and read yaw from `/pidrone/imu`:
-
-```text
-room_yaw_offset = surveyed_forward_heading - IMU_yaw   (radians)
-```
-
-For example, forward along room +X with IMU yaw zero gives offset `0`; forward
-along room +Y with IMU yaw zero gives `1.57079632679`. The controller's legacy axes
-are X=right and Y=forward, so the body-to-odom planar rotation is `IMU_yaw - pi/2`.
-The implementation includes this basis conversion; do not add another quarter turn
-to the measured offset. Recheck alignment after a heading reset or a change in
-room axes. A blank offset disables fused room output and room-target commands. Local
-camera hover and ToF altitude do not require a room heading. Heading drift remains
-an accuracy limit; a single UWB position does not correct yaw.
+Alignment happens once per node start. Subsequent turns, disarming, and UWB gaps
+keep that offset. Restart fusion while facing +Y to align again. No routine or
+class calibration call is needed; the old manual launch/environment offset is
+removed. ToF still supplies height, and UWB still corrects room X/Y. This startup
+alignment does not correct ongoing IMU yaw drift.
 
 ## ROS outputs and dashboard
 

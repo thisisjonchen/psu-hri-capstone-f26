@@ -65,41 +65,6 @@ class RoutineControlTest(unittest.TestCase):
         self.assertIsNone(drone.xy_anchor)
         self.assertEqual(drone._xy_hold_command().linear.x, 0)
 
-    def test_heading_calibration_reacquires_room_position_and_preserves_height_and_turns(self):
-        fusion, drone = self.fusion, self.drone
-        fusion.ros_now += .05
-        fusion.now += .05
-        fusion.refresh(yaw=math.radians(64))
-        fusion.node.mode_callback(NS(mode='DISARMED'))
-        old_odom = fusion.node.filter.odom.copy()
-        generation = fusion.node.generation
-        fusion.uwb()  # Calibration must discard fixes queued before alignment.
-
-        drone.calibrate_heading()
-        self.assertIsNone(drone.fused_pose)
-        self.assertIsNone(fusion.node.filter.room)
-        self.assertEqual(fusion.node.pending, [])
-        self.assertFalse(fusion.messages['pidrone/localization/ready'][-1].data)
-        self.assertAlmostEqual(fusion.node.filter.yaw_offset, math.radians(26))
-        self.assertEqual(fusion.params['~room_yaw_offset'], fusion.node.filter.yaw_offset)
-        self.assertEqual(fusion.node.generation, generation + 1)
-        self.assertEqual(tuple(fusion.node.filter.odom), tuple(old_odom))
-        fusion.flow()
-        fusion.uwb()
-        fusion.node.step()
-        pose = fusion.messages['pidrone/localization/fused'][-1].pose.pose
-        p, q = pose.position, pose.orientation
-        self.assertEqual((p.x, p.y, p.z), (1, 2, .5))
-        self.assertAlmostEqual(q.z, 0)
-        self.assertAlmostEqual(q.w, 1)
-        # A later physical turn still changes heading; calibration does not freeze yaw.
-        fusion.ros_now += .05
-        fusion.refresh(yaw=math.radians(74))
-        fusion.flow()
-        fusion.node.step()
-        q = fusion.messages['pidrone/localization/fused'][-1].pose.pose.orientation
-        self.assertAlmostEqual(q.z, math.sin(math.radians(5)))
-
     def test_altitude_update_keeps_fused_anchor_and_existing_pid_feedback(self):
         drone = self.drone
         drone.lock_xy()
@@ -119,7 +84,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(controller.desired_position.z, .5)
         self.assertEqual(controller.current_position.z, .5)
         self.assertEqual(controller.pid_error.z, 0)
-        self.assertAlmostEqual(controller.desired_velocity.y, -.1)
+        self.assertAlmostEqual(controller.desired_velocity.x, -.1)
         self.assertFalse(controller.position_control)
 
     def test_hold_rejects_invalid_or_different_frame_pose(self):
@@ -145,7 +110,7 @@ class RoutineControlTest(unittest.TestCase):
         pose = copy.deepcopy(drone.fused_pose)
         pose.pose.pose.position.x += .2
         drone._fused_received(pose)
-        self.assertAlmostEqual(drone._xy_hold_command().linear.y, -.1)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.1)
         self.fusion.ros_now += 1
         controller.local_ready_callback(NS(data=True))
         command = drone._xy_hold_command()
@@ -180,7 +145,7 @@ class RoutineControlTest(unittest.TestCase):
         command = drone._xy_hold_command()
         controller.position_control_callback(modes[-1])
         controller.desired_twist_callback(command)
-        self.assertAlmostEqual(command.linear.y, -.1)
+        self.assertAlmostEqual(command.linear.x, -.1)
         self.assertFalse(controller.position_control)
         self.assertEqual(drone.xy_anchor, (1, 2))
 
@@ -233,12 +198,11 @@ class RoutineControlTest(unittest.TestCase):
         log.__enter__.return_value = NS(name='mock-routine.log')
         with mock.patch.object(self.globals['subprocess'], 'Popen', side_effect=launch), \
                 mock.patch.object(self.globals['tempfile'], 'NamedTemporaryFile', return_value=log), \
-                mock.patch.dict(os.environ, {'PALS_UWB_PORT': '/dev/test-tag', 'PALS_ROOM_YAW_OFFSET': '0.5'}):
+                mock.patch.dict(os.environ, {'PALS_UWB_PORT': '/dev/test-tag'}):
             self.drone._start_missing_nodes()
             self.drone._start_missing_nodes()
         self.assertEqual(len(commands), 2)
         self.assertIn('port:=/dev/test-tag', commands[0])
-        self.assertIn('room_yaw_offset:=0.5', commands[1])
         self.assertFalse(any('state_estimator' in part for command in commands for part in command))
 
     def test_startup_rejects_a_competing_legacy_state_publisher(self):
