@@ -79,6 +79,13 @@ The **SE** Screen window now starts fusion instead of EMA. Do not run
 by Screen. Optical flow, ToF, the flight controller's IMU, UWB and rosbridge remain
 separate processes. Existing manual movement controls keep their body-axis meaning.
 
+The altitude and hover routines also start UWB and fusion, reusing running nodes.
+They refuse to start alongside the legacy `/state_estimator`. Their X/Y hold point
+comes from `/pidrone/localization/fused`, the same room position shown on the
+dashboard. Hold errors are rotated into body-axis velocity commands, capped at
+0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
+ToF height control. Relative `move_forward`/`move_back` still use optical flow.
+
 ### Room heading
 
 Start each drone facing map **+Y** (toward the top of the map) before starting the

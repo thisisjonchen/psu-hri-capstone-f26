@@ -24,6 +24,9 @@ class FleetMap {
     this.calibratedRoom = null;
     this.calibrationRevision = null;
     this.targets = {};
+    this.selectedTarget = null;
+    this.drag = null;
+    this.targetFeedback = '';
     this.zoom = 1;
     this.anchorReports = {};
     this.anchorStamps = {};
@@ -44,7 +47,7 @@ class FleetMap {
     this.chart = new Chart(document.getElementById('fleet-xyChart').getContext('2d'), {
       type: 'line', data: { datasets }, plugins: [{
         afterLayout: chart => this.equalizeScale(chart),
-        afterDatasetsDraw: chart => this.drawAnchorLabels(chart)
+        afterDatasetsDraw: chart => { this.drawAnchorLabels(chart); this.drawTargetLabels(chart); }
       }], options: {
         responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
         scales: {
@@ -63,35 +66,33 @@ class FleetMap {
               scale.paddingTop = scale.paddingBottom = 8;
             },
             scaleLabel: { display: true, labelString: 'Y position (m)' } }]
-        }, legend: { display: false }, onClick: event => this.previewClick(event)
+        }, legend: { display: false }
       }
     });
     document.getElementById('room-fit').addEventListener('click', () => { this.zoom = 1; this.render(); });
     document.getElementById('room-zoom-in').addEventListener('click', () => this.setZoom(this.zoom * 1.25));
     document.getElementById('room-zoom-out').addEventListener('click', () => this.setZoom(this.zoom / 1.25));
-    document.getElementById('target-preview').addEventListener('submit', event => {
-      event.preventDefault();
-      const x = document.getElementById('target-x').value;
-      const y = document.getElementById('target-y').value;
-      this.previewTarget(document.getElementById('target-drone').value,
-        x.trim() ? Number(x) : NaN, y.trim() ? Number(y) : NaN);
-    });
+    const canvas = document.getElementById('fleet-xyChart');
+    canvas.addEventListener('pointerdown', event => this.startTargetDrag(event));
+    canvas.addEventListener('pointermove', event => this.moveTargetDrag(event));
+    canvas.addEventListener('pointerup', event => this.finishTargetDrag(event));
+    canvas.addEventListener('pointercancel', () => this.cancelTargetDrag());
+    canvas.addEventListener('lostpointercapture', () => this.cancelTargetDrag());
+    canvas.addEventListener('keydown', event => this.adjustTarget(event));
+    canvas.addEventListener('blur', () => this.cancelTargetDrag());
     document.getElementById('target-clear').addEventListener('click', () => {
-      const id = document.getElementById('target-drone').value;
+      const id = this.selectedTarget;
+      if (!id) return;
       drones[id].publish('cancelRoomTarget', {});
       delete this.targets[id];
+      this.targetFeedback = '';
       this.render();
     });
     document.getElementById('target-send').addEventListener('click', () => this.sendTarget());
     document.getElementById('target-stop').addEventListener('click', () => {
-      drones[document.getElementById('target-drone').value].publish('cancelRoomTarget', {});
+      if (!this.selectedTarget) return;
+      drones[this.selectedTarget].publish('cancelRoomTarget', {});
       document.getElementById('target-command-status').textContent = 'Target stopped.';
-    });
-    document.getElementById('target-drone').addEventListener('change', () => {
-      const target = this.targets[document.getElementById('target-drone').value];
-      document.getElementById('target-x').value = target ? target.x.toFixed(2) : '';
-      document.getElementById('target-y').value = target ? target.y.toFixed(2) : '';
-      this.render();
     });
     this.refreshAnchors();
   }
@@ -198,11 +199,11 @@ class FleetMap {
             [0, 1, 2].forEach(i => { drone.series[key + i] = []; });
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
-          document.getElementById('target-x').value = '';
-          document.getElementById('target-y').value = '';
         }
         this.room = candidate;
         this.targets = {};
+        this.selectedTarget = null;
+        this.targetFeedback = '';
         this.zoom = 1;
         this.chart.options.scales.xAxes[0].display = true;
         this.chart.options.scales.yAxes[0].display = true;
@@ -229,8 +230,6 @@ class FleetMap {
     document.getElementById('room-status').textContent = status;
     document.getElementById('room-status').hidden = !status;
     ['room-fit', 'room-zoom-in', 'room-zoom-out'].forEach(id => { document.getElementById(id).disabled = !this.room; });
-    document.getElementById('target-submit').disabled = !this.layoutUsable;
-    document.getElementById('target-clear').disabled = !this.room;
     this.render();
   }
 
@@ -284,35 +283,150 @@ class FleetMap {
     ctx.restore();
   }
 
-  previewClick(event) {
-    if (!this.layoutUsable) return;
+  targetInsideRoom(x, y) {
+    return this.layoutUsable && [x, y].every(Number.isFinite) && this.room.anchors.every((a, i, anchors) => {
+      const b = anchors[(i + 1) % anchors.length];
+      return (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x) >= -1e-9;
+    });
+  }
+
+  markerPosition(id) {
+    // Prefer the fused position, then the other displayed pose sources.
+    const marker = [...this.chart.data.datasets].reverse().find(dataset =>
+      dataset.droneId === id && dataset.key === dataset.source + '0' && dataset.data.length === 2);
+    if (!marker) return null;
+    return { x: (marker.data[0].x + marker.data[1].x) / 2,
+      y: (marker.data[0].y + marker.data[1].y) / 2 };
+  }
+
+  targetPixel(point) {
+    return { x: this.chart.scales['room-x'].getPixelForValue(point.x),
+      y: this.chart.scales['room-y'].getPixelForValue(point.y) };
+  }
+
+  targetPoint(event) {
     const pixel = Chart.helpers.getRelativePosition(event, this.chart);
     const area = this.chart.chartArea;
-    if (pixel.x < area.left || pixel.x > area.right || pixel.y < area.top || pixel.y > area.bottom) return;
-    this.previewTarget(document.getElementById('target-drone').value,
-      this.chart.scales['room-x'].getValueForPixel(pixel.x), this.chart.scales['room-y'].getValueForPixel(pixel.y));
+    return { pixel, x: this.chart.scales['room-x'].getValueForPixel(pixel.x),
+      y: this.chart.scales['room-y'].getValueForPixel(pixel.y),
+      inPlot: pixel.x >= area.left && pixel.x <= area.right && pixel.y >= area.top && pixel.y <= area.bottom };
+  }
+
+  hitTarget(pixel) {
+    // Prefer an existing target over telemetry; break overlapping-marker ties
+    // using the existing drone selection at the top of the dashboard.
+    for (const targetsOnly of [true, false]) {
+      const hits = Object.keys(drones).map(id => {
+        const point = targetsOnly ? this.targets[id] : this.markerPosition(id);
+        const p = point && this.targetPixel(point);
+        return { id, distance: p ? Math.hypot(p.x - pixel.x, p.y - pixel.y) : Infinity };
+      }).filter(hit => hit.distance <= 22).sort((a, b) =>
+        Math.abs(a.distance - b.distance) < 2 ? (a.id === selectedConnection() ? -1 : 1) : a.distance - b.distance);
+      if (hits.length) return hits[0].id;
+    }
+    return null;
+  }
+
+  startTargetDrag(event) {
+    if (!this.layoutUsable || this.drag || event.button !== 0) return;
+    const point = this.targetPoint(event);
+    if (!point.inPlot) return;
+    event.preventDefault();
+    const canvas = document.getElementById('fleet-xyChart');
+    canvas.focus({ preventScroll: true });
+    const hit = this.hitTarget(point.pixel);
+    this.selectedTarget = hit || selectedConnection();
+    this.targetFeedback = '';
+    document.getElementById('target-command-status').textContent = '';
+    this.drag = { id: this.selectedTarget, pointerId: event.pointerId, room: this.room,
+      start: point.pixel, hit: !!hit, point: null };
+    canvas.setPointerCapture(event.pointerId);
+    this.render();
+  }
+
+  moveTargetDrag(event) {
+    if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+    const point = this.targetPoint(event);
+    if (!this.drag.point && Math.hypot(point.pixel.x - this.drag.start.x, point.pixel.y - this.drag.start.y) < 4) return;
+    this.drag.point = point;
+    this.render();
+  }
+
+  finishTargetDrag(event) {
+    if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+    const drag = this.drag, point = this.targetPoint(event);
+    this.drag = null;
+    if (this.room === drag.room && this.layoutUsable) {
+      // A tap on a marker selects it; a drag or tap on empty space sets a target.
+      if (drag.point || !drag.hit) {
+        if (point.inPlot && this.targetInsideRoom(point.x, point.y)) this.previewTarget(drag.id, point.x, point.y);
+        else this.targetFeedback = 'Drop inside the room. Target unchanged.';
+      }
+    }
+    const canvas = document.getElementById('fleet-xyChart');
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    this.render();
+  }
+
+  cancelTargetDrag() {
+    if (!this.drag) return;
+    const pointerId = this.drag.pointerId;
+    this.drag = null;
+    const canvas = document.getElementById('fleet-xyChart');
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    this.render();
+  }
+
+  adjustTarget(event) {
+    if (event.key === 'Escape') { this.cancelTargetDrag(); return; }
+    const step = event.shiftKey ? 0.5 : 0.1;
+    const offset = { ArrowLeft: [-step, 0], ArrowRight: [step, 0],
+      ArrowUp: [0, step], ArrowDown: [0, -step] }[event.key];
+    if (!offset || !this.layoutUsable || this.drag) return;
+    event.preventDefault(); event.stopPropagation();
+    const id = this.selectedTarget || selectedConnection();
+    const point = this.targets[id] || this.markerPosition(id);
+    if (point) this.previewTarget(id, point.x + offset[0], point.y + offset[1]);
   }
 
   previewTarget(id, x, y) {
     if (!this.layoutUsable || !drones[id]) return;
-    const anchors = this.room.anchors;
-    const inside = [x, y].every(Number.isFinite) && anchors.every((a, i) => {
-      const b = anchors[(i + 1) % anchors.length];
-      return (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x) >= -1e-9;
-    });
-    if (!inside) {
-      document.getElementById('target-status').textContent = 'Choose an X/Y position inside the room.';
+    if (!this.targetInsideRoom(x, y)) {
+      this.targetFeedback = 'Choose a destination inside the room.';
+      this.render();
       return;
     }
+    this.selectedTarget = id;
     this.targets[id] = { x, y };
-    document.getElementById('target-x').value = x.toFixed(2);
-    document.getElementById('target-y').value = y.toFixed(2);
+    this.targetFeedback = '';
+    document.getElementById('target-command-status').textContent = '';
     this.render();
+  }
+
+  drawTargetLabels(chart) {
+    if (!this.room) return;
+    const ctx = chart.ctx, area = chart.chartArea;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top); ctx.clip();
+    ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    Object.keys(drones).forEach(id => {
+      const marker = this.markerPosition(id);
+      const dataset = chart.data.datasets.find(d => d.targetDrone === id);
+      [[marker, 'Drone ' + id.slice(-1)], [dataset.data[0], 'D' + id.slice(-1) + ' target']].forEach(([point, label]) => {
+        if (!point) return;
+        const p = this.targetPixel(point);
+        const x = Math.max(area.left + 4, Math.min(p.x + 12, area.right - ctx.measureText(label).width - 4));
+        const y = Math.max(area.top + 14, p.y - 12);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.strokeText(label, x, y);
+        ctx.fillStyle = droneColor(id); ctx.fillText(label, x, y);
+      });
+    });
+    ctx.restore();
   }
 
   canSendTarget(id) {
     const drone = drones[id];
-    return !!(this.layoutUsable && this.hasMatchingReport(id) && this.targets[id] && drone.connected &&
+    return !!(drone && !this.drag && this.layoutUsable && this.hasMatchingReport(id) && this.targets[id] && drone.connected &&
       drone.field('flightMode').textContent === 'FLYING' && drone.fusedPose &&
       drone.fusionReadyAt !== null && Date.now() - drone.fusionReadyAt <= 500 &&
       drone.fusedReceivedAt !== null && Date.now() - drone.fusedReceivedAt <= 500 &&
@@ -320,7 +434,7 @@ class FleetMap {
   }
 
   sendTarget() {
-    const id = document.getElementById('target-drone').value;
+    const id = this.selectedTarget;
     if (!this.canSendTarget(id)) return;
     const drone = drones[id], target = this.targets[id];
     drone.publish('roomTarget', { header: drone.fusedPose.header,
@@ -338,14 +452,29 @@ class FleetMap {
     document.getElementById('map-placeholder').hidden = visible;
     document.getElementById('fleet-xyChart').setAttribute('aria-hidden', String(!visible));
     ['map-legend', 'map-sources'].forEach(id => { document.getElementById(id).hidden = !visible; });
-    const selected = document.getElementById('target-drone').value;
+    if (this.drag && (!this.layoutUsable || this.drag.room !== this.room)) {
+      this.cancelTargetDrag();
+      return;
+    }
+    const selected = this.selectedTarget;
+    document.getElementById('fleet-xyChart').classList.toggle('target-dragging', !!this.drag);
+    document.getElementById('fleet-xyChart').setAttribute('aria-disabled', String(!this.layoutUsable));
+    document.getElementById('target-clear').disabled = !selected || !this.targets[selected] || !!this.drag;
+    document.getElementById('target-selection').textContent = selected
+      ? 'Drone ' + selected.slice(-1) + (this.drag ? ' · Choosing destination…' : this.targets[selected] ? ' · Target preview' : ' · Tap or drag to choose a destination')
+      : 'No target selected.';
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
-    document.getElementById('target-stop').disabled = !drones[selected].connected;
+    document.getElementById('target-stop').disabled = !selected || !drones[selected].connected;
     this.chart.data.datasets.forEach(dataset => {
       if (dataset.key === 'anchors') {
         dataset.data = this.room ? [...this.room.anchors, this.room.anchors[0]] : [];
       } else if (dataset.key === 'target') {
-        dataset.data = this.layoutUsable && this.targets[dataset.targetDrone] ? [this.targets[dataset.targetDrone]] : [];
+        const dragging = this.drag && this.drag.id === dataset.targetDrone && this.drag.point;
+        const point = dragging || this.targets[dataset.targetDrone];
+        dataset.data = this.layoutUsable && point ? [point] : [];
+        dataset.pointRadius = dataset.targetDrone === selected ? 10 : 7;
+        dataset.pointBorderColor = dragging && (!dragging.inPlot || !this.targetInsideRoom(dragging.x, dragging.y))
+          ? '#b84339' : droneColor(dataset.targetDrone);
       } else {
         const drone = drones[dataset.droneId];
         const aligned = this.room && drone.connected && roomFrame(drone.xyFrames[dataset.source]) === this.room.frame;
@@ -363,8 +492,7 @@ class FleetMap {
           : droneColor(drone.id);
       }
     });
-    document.getElementById('target-status').textContent = Object.entries(this.targets).map(([id, p]) =>
-      'Drone ' + id.slice(-1) + ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ' m').join(' · ');
+    document.getElementById('target-status').textContent = this.targetFeedback;
     const omitted = this.room ? Object.values(drones).flatMap(drone => xySources.filter(([key]) =>
       drone.series[key + '0'].length && roomFrame(drone.xyFrames[key]) !== this.room.frame).map(([key, label]) =>
       'Drone ' + drone.id.slice(-1) + ' ' + label + ' (' + (drone.xyFrames[key] || 'frame unknown') + ')')) : [];

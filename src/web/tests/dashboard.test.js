@@ -27,6 +27,8 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
         remove(...names) { names.forEach(name => classes.delete(name)); },
         contains(name) { return classes.has(name); }
       },
+      focus() {}, setPointerCapture(id) { this.captured = id; },
+      hasPointerCapture(id) { return this.captured === id; }, releasePointerCapture() { this.captured = null; },
       addEventListener(name, callback) { this.listeners[name] = callback; }, getContext() { return {}; },
       getAttribute(name) { return this[name]; }, setAttribute(name, value) { this[name] = value; }, closest() { return null; }
     };
@@ -44,8 +46,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   }
   for (const id of ['commandFeedback', 'fleetGrid', 'fleet-xyChart', 'controlsHeading', 'drone1-connectionStatus', 'drone2-connectionStatus', 'droneSelection',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend', 'map-sources',
-    'target-preview', 'target-drone', 'target-x', 'target-y', 'target-submit', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
-  elements.get('target-drone').value = 'drone1';
+    'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
   for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview', 'selection']) elements.set('calibration-' + name, element());
   for (let i = 0; i < 4; i++) {
     elements.set('calibration-anchor-' + i, element());
@@ -88,13 +89,20 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
       [...this.options.scales.xAxes, ...this.options.scales.yAxes].forEach(axis => {
         this.scales[axis.id] = { options: axis,
           buildTicks() { this.min = axis.ticks.min; this.max = axis.ticks.max; this.ticks = [this.min, this.max]; },
-          convertTicksToLabels() {} };
+          convertTicksToLabels() {},
+          getPixelForValue(value) { return axis.id === 'room-x'
+            ? 55 + (value - this.min) / (this.max - this.min) * 400
+            : 410 - (value - this.min) / (this.max - this.min) * 400; },
+          getValueForPixel(value) { return axis.id === 'room-x'
+            ? this.min + (value - 55) / 400 * (this.max - this.min)
+            : this.min + (410 - value) / 400 * (this.max - this.min); } };
       });
     }
     update() { (this.plugins || []).forEach(plugin => { if (plugin.afterLayout) plugin.afterLayout(this); }); }
     resize() {}
   }
   Chart.defaults = { global: {} };
+  Chart.helpers = { getRelativePosition: event => ({ x: event.clientX, y: event.clientY }) };
   const context = vm.createContext({
     AbortSignal,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
@@ -604,17 +612,12 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
   const app = dashboard(), map = app.fleetMap;
   const a = app.connect('drone1'), b = app.connect('drone2');
   const sent = [a, b].map(drone => Object.values(drone.publishers).map(topic => topic.messages.length));
-  const submit = (id, x, y) => {
-    app.elements.get('target-drone').value = id;
-    app.elements.get('target-x').value = x;
-    app.elements.get('target-y').value = y;
-    app.elements.get('target-preview').listeners.submit({ preventDefault() {} });
-  };
+  const submit = (id, x, y) => map.previewTarget(id, x.trim() ? Number(x) : NaN, y.trim() ? Number(y) : NaN);
   submit('drone1', '1', '2');
   submit('drone2', '2', '4');
   for (const invalid of [['', '2'], ['Infinity', '2'], ['9', '2'], ['1', '-1']]) submit('drone1', ...invalid);
   assert.equal(map.targets.drone1.x, 1);
-  assert.equal(map.targets.drone2.y, 4);
+  assert.ok(Math.abs(map.targets.drone2.y - 4) < 1e-9);
   const target = id => map.chart.data.datasets.find(d => d.targetDrone === id).data;
   assert.equal(target('drone1')[0].x, 1);
   assert.deepEqual([a, b].map(drone => Object.values(drone.publishers).map(topic => topic.messages.length)), sent);
@@ -628,6 +631,7 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
   a.disconnect();
   assert.equal(app.elements.get('map-stream-status').textContent, '');
   assert.equal(target('drone1').length, 1);
+  map.previewTarget('drone1', 1, 2);
   app.elements.get('target-clear').listeners.click();
   assert.equal(target('drone1').length, 0);
   assert.equal(target('drone2').length, 1);
@@ -637,7 +641,7 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
   assert.equal(app.elements.get('room-status').textContent,
     'Drone 2: Check the four anchor positions. Map updates and target editing are paused. · Last observed layout retained');
   assert.equal(target('drone2').length, 0);
-  assert.equal(map.targets.drone2.y, 4);
+  assert.ok(Math.abs(map.targets.drone2.y - 4) < 1e-9);
   app.receive(b, '/pidrone/localization/anchors', anchorsAt(102, [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25], [0, 6, 2.25]]));
   assert.equal(map.room.xMax, 4);
   assert.equal(target('drone2').length, 0);
@@ -647,7 +651,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   const app = dashboard({ discover: false }), map = app.fleetMap;
   assert.equal(map.room, null);
   assert.equal(app.elements.get('map-placeholder').hidden, false);
-  assert.equal(app.elements.get('target-submit').disabled, true);
+  assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   const a = app.connect('drone1'), b = app.connect('drone2');
   const send = (drone, message) => app.receive(drone, '/pidrone/localization/anchors', message);
   send(a, anchorsAt(100, [[0, 0, 2.25], [3, 0, 2.25], [3, 6, 2.25]]));
@@ -675,7 +679,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
   assert.match(app.elements.get('room-status').textContent, /disagree/);
-  assert.equal(app.elements.get('target-submit').disabled, true);
+  assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   send(a, changed);
   assert.equal(map.layoutUsable, true);
   assert.equal(map.room.xMax, 4);
@@ -703,7 +707,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').data[0].x, 1.92);
   assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
   assert.equal(app.elements.get('target-send').disabled, true);
-  assert.equal(app.elements.get('target-submit').disabled, true);
+  assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   assert.equal(app.elements.get('room-fit').disabled, false);
   send(a, { ...changed, header: { ...changed.header, stamp: { secs: 105, nsecs: 0 } } });
   assert.equal(map.layoutUsable, true);
@@ -744,7 +748,6 @@ test('verified calibration displays the room before a complete tag report and us
   assert.equal(map.chart.data.datasets.find(d => d.key === 'anchors').data.length, 5);
   assert.equal(app.elements.get('room-status').textContent, 'Waiting for drone positions.');
   map.previewTarget('drone2', 1, 2);
-  app.elements.get('target-drone').value = 'drone2';
   app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
   const pose = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
     pose: { pose: { position: { x: 1, y: 2, z: .4 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } };
@@ -906,4 +909,110 @@ test('late status and request timeouts cannot unlock calibration or trigger dupl
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.elements.get('calibration-status').textContent, 'Checking Bluetooth anchor 0001...');
   assert.equal(app.elements.get('calibration-cancel').disabled, false);
+});
+
+function mapPointer(map, x, y, pointerId = 1) {
+  const pixel = map.targetPixel({ x, y });
+  return { button: 0, pointerId, clientX: pixel.x, clientY: pixel.y, preventDefault() {} };
+}
+
+test('dragging a drone previews its own target and sends only after explicit confirmation', () => {
+  const app = dashboard(), map = app.fleetMap;
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const pose = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
+    pose: { pose: { position: { x: 1, y: 2, z: .7 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } };
+  app.receive(b, '/pidrone/mode', { mode: 'FLYING' });
+  app.receive(b, '/pidrone/localization/fused', pose);
+  app.receive(b, '/pidrone/localization/ready', { data: true });
+  const telemetry = JSON.stringify(b.series.fused0);
+  const canvas = app.elements.get('fleet-xyChart');
+  canvas.listeners.pointerdown(mapPointer(map, 1, 2));
+  assert.equal(map.selectedTarget, 'drone2', 'the marker determines the drone, not the connection selector');
+  canvas.listeners.pointermove(mapPointer(map, 2, 4));
+  assert.equal(map.targets.drone2, undefined, 'moving is a draft, not a committed target');
+  const target = map.chart.data.datasets.find(d => d.targetDrone === 'drone2');
+  assert.ok(Math.abs(target.data[0].x - 2) < 1e-9);
+  assert.ok(Math.abs(target.data[0].y - 4) < 1e-9);
+  map.sendTarget();
+  assert.equal(b.publishers.roomTarget.messages.length, 0);
+  assert.equal(app.elements.get('target-send').disabled, true);
+  canvas.listeners.pointerup(mapPointer(map, 2, 4));
+  assert.ok(Math.abs(map.targets.drone2.x - 2) < 1e-9);
+  assert.ok(Math.abs(map.targets.drone2.y - 4) < 1e-9);
+  assert.equal(b.publishers.roomTarget.messages.length, 0, 'dropping never publishes');
+  assert.equal(JSON.stringify(b.series.fused0), telemetry, 'telemetry stays at the measured position');
+  assert.equal(app.elements.get('target-send').disabled, false);
+  app.elements.get('target-send').listeners.click();
+  assert.equal(b.publishers.roomTarget.messages.length, 1);
+  assert.equal(a.publishers.roomTarget.messages.length, 0);
+  assert.deepEqual(last(b, 'roomTarget').pose.position, { ...map.targets.drone2, z: .7 });
+  app.advanceTime(600);
+  map.render();
+  app.elements.get('target-send').listeners.click();
+  assert.equal(b.publishers.roomTarget.messages.length, 1, 'stale localization still blocks sends');
+});
+
+test('invalid drops and canceled pointer gestures preserve the previous destination', () => {
+  const app = dashboard(), map = app.fleetMap, a = app.connect('drone1');
+  map.previewTarget('drone1', 1, 2);
+  const canvas = app.elements.get('fleet-xyChart');
+  for (const end of ['outside', 'pointercancel', 'lostpointercapture', 'blur', 'Escape']) {
+    canvas.listeners.pointerdown(mapPointer(map, 1, 2));
+    canvas.listeners.pointermove(mapPointer(map, 2, 4));
+    if (end === 'outside') canvas.listeners.pointerup(mapPointer(map, 9, 9));
+    else if (end === 'Escape') canvas.listeners.keydown({ key: 'Escape' });
+    else canvas.listeners[end]();
+    assert.equal(map.drag, null);
+    assert.equal(canvas.captured, null);
+    assert.equal(map.targets.drone1.x, 1);
+    assert.equal(map.targets.drone1.y, 2);
+  }
+  canvas.listeners.pointerdown(mapPointer(map, 1, 2));
+  canvas.listeners.pointermove(mapPointer(map, 2, 4, 2));
+  canvas.listeners.pointerup(mapPointer(map, 2, 4, 2));
+  assert.equal(map.drag.point, null, 'a second pointer cannot move or release the active drag');
+  canvas.listeners.pointercancel();
+  assert.equal(a.publishers.roomTarget.messages.length, 0);
+});
+
+test('layout loss or replacement cancels an in-progress drag without restoring old targets', () => {
+  const app = dashboard(), map = app.fleetMap, a = app.connect('drone1');
+  map.previewTarget('drone1', 1, 2);
+  map.startTargetDrag(mapPointer(map, 1, 2));
+  map.moveTargetDrag(mapPointer(map, 2, 4));
+  app.advanceTime(1600);
+  map.refreshAnchors();
+  assert.equal(map.drag, null);
+  map.finishTargetDrag(mapPointer(map, 2, 4));
+  assert.equal(map.targets.drone1.x, 1);
+  app.receive(a, '/pidrone/localization/anchors', anchorsAt(101));
+  map.startTargetDrag(mapPointer(map, 1, 2));
+  map.moveTargetDrag(mapPointer(map, 2, 4));
+  app.receive(a, '/pidrone/localization/anchors', anchorsAt(102, [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25], [0, 6, 2.25]]));
+  assert.equal(map.drag, null);
+  assert.equal(Object.keys(map.targets).length, 0);
+  map.finishTargetDrag(mapPointer(map, 2, 4));
+  assert.equal(Object.keys(map.targets).length, 0);
+});
+
+test('tap selection, overlapping targets, and keyboard adjustment work without coordinate fields', () => {
+  const app = dashboard(), map = app.fleetMap;
+  app.connect('drone1'); app.connect('drone2');
+  app.elements.get('droneSelection').value = 'drone2';
+  map.startTargetDrag(mapPointer(map, 1, 2));
+  map.finishTargetDrag(mapPointer(map, 1, 2));
+  assert.equal(map.selectedTarget, 'drone2');
+  assert.equal(map.targets.drone2.y, 2);
+  map.previewTarget('drone1', 1, 2);
+  map.startTargetDrag(mapPointer(map, 1, 2));
+  map.finishTargetDrag(mapPointer(map, 1, 2));
+  assert.equal(map.selectedTarget, 'drone2', 'overlapping markers follow the existing selection');
+  let prevented = false, stopped = false;
+  map.adjustTarget({ key: 'ArrowRight', shiftKey: true,
+    preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.ok(prevented && stopped);
+  assert.equal(map.targets.drone2.x, 1.5);
+  assert.equal(map.targets.drone1.x, 1);
+  const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+  assert.doesNotMatch(html, /id="target-(drone|x|y|submit)"/);
 });

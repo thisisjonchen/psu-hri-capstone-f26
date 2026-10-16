@@ -46,12 +46,16 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .map-note:empty { display: none; }
 .map-feedback { margin-top: var(--space-3); overflow-wrap: anywhere; }
 .target-preview { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: end; margin-top: var(--space-4); }
-.target-preview label, .calibration-grid label { display: grid; gap: var(--space-1); min-width: 0; margin: 0; font-size: var(--type-label); font-weight: 600; color: var(--muted); }
-.target-preview label { flex: 1 1 72px; }
-.target-preview label:first-child { flex-basis: 112px; }
-.target-preview input, .target-preview select, .calibration-grid select { width: 100%; min-width: 0; min-height: var(--control-compact); border: 1px solid #dce3ed; border-radius: var(--radius-control); padding: 6px var(--space-2); color: var(--ink); background: var(--surface); font: 400 var(--type-label)/20px var(--font-ui); }
+.calibration-grid label { display: grid; gap: var(--space-1); min-width: 0; margin: 0; font-size: var(--type-label); font-weight: 600; color: var(--muted); }
+.target-preview .map-note { width: 100%; margin: 0; }
+#target-selection { font-weight: 600; color: var(--ink); }
+#fleet-xyChart { touch-action: none; }
+#fleet-xyChart:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
+.map-ready #fleet-xyChart { cursor: crosshair; }
+.map-ready #fleet-xyChart.target-dragging { cursor: grabbing; }
+.calibration-grid select { width: 100%; min-width: 0; min-height: var(--control-compact); border: 1px solid #dce3ed; border-radius: var(--radius-control); padding: 6px var(--space-2); color: var(--ink); background: var(--surface); font: 400 var(--type-label)/20px var(--font-ui); }
 .target-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); width: 100%; }
-.target-preview :is(input, select):focus-visible, .calibration-grid select:focus-visible, .anchor-calibration summary:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
+.calibration-grid select:focus-visible, .anchor-calibration summary:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
 .target-status { font-variant-numeric: tabular-nums; }
 .canvas-wrap.flight-map-wrap { position: relative; width: 100%; height: clamp(320px, 35vw, 480px); margin-bottom: var(--space-3); }
 .map-unavailable canvas { visibility: hidden; }

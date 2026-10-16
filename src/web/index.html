@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PALS Flight Dashboard</title>
   <link rel="stylesheet" href="css/bootstrap.css">
-  <link rel="stylesheet" href="css/main.css?v=20261014-consistent-scale">
+  <link rel="stylesheet" href="css/main.css?v=20261016-drag-targets">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261015-independent-calibration" defer></script>
-  <script src="js/main.js?v=20261014-room-setup" defer></script>
+  <script src="js/main.js?v=20261016-drag-targets" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
@@ -66,7 +66,7 @@
           <button class="btn btn-outline-secondary" id="room-zoom-out" aria-label="Zoom out of room" disabled>−</button>
         </div></div>
         <div class="canvas-wrap flight-map-wrap map-unavailable" id="map-frame">
-          <canvas id="fleet-xyChart" aria-label="Both drones XY map" aria-hidden="true"></canvas>
+          <canvas id="fleet-xyChart" aria-label="Both drones XY map" aria-describedby="target-help" aria-hidden="true" tabindex="0"></canvas>
           <div class="map-placeholder" id="map-placeholder" role="img" aria-label="XY map unavailable">
             <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
               <path d="m5 12 10-4 10 4 10-4v23l-10 4-10-4-10 4V12Zm10-4v23m10-19v23"/>
@@ -79,17 +79,15 @@
         <div class="map-details">
         <div class="map-legend" id="map-legend" hidden><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span></div>
         <div class="map-sources" id="map-sources" hidden><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span><span class="map-source-uwb">Raw UWB + ToF</span><span>Fused position</span></div>
-        <form id="target-preview" class="target-preview">
-          <label>Target drone<select id="target-drone"><option value="drone1">Drone 1</option><option value="drone2">Drone 2</option></select></label>
-          <label>X (m)<input id="target-x" type="number" step="any" required></label>
-          <label>Y (m)<input id="target-y" type="number" step="any" required></label>
+        <div class="target-preview">
+          <p class="map-note" id="target-help">Drag a drone or target marker to choose a destination, then Send target. Or select a drone above and tap the map. With the map focused, arrow keys adjust the target.</p>
+          <p class="map-note" id="target-selection" role="status" aria-live="polite">No target selected.</p>
           <div class="target-actions">
-          <button class="btn btn-outline-secondary" id="target-submit" type="submit" disabled>Preview</button>
           <button class="btn btn-outline-secondary" id="target-clear" type="button" disabled>Clear</button>
           <button class="btn btn-primary" id="target-send" type="button" disabled>Send target</button>
           <button class="btn btn-outline-secondary" id="target-stop" type="button" disabled>Stop target</button>
           </div>
-        </form>
+        </div>
         <details class="anchor-calibration">
           <summary>Calibrate anchors</summary>
           <div class="calibration-grid">
