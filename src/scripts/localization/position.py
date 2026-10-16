@@ -7,6 +7,7 @@ from .uwb_locator import finite
 RangeSample = namedtuple('RangeSample', 'distance stamp received')
 Attitude = namedtuple('Attitude', 'vertical stamp received')
 Fix = namedtuple('Fix', 'x y z quality stamp')
+Height = namedtuple('Height', 'z stamp')
 
 
 class PositionCombiner(object):
@@ -49,26 +50,37 @@ class PositionCombiner(object):
         return (sample is not None and 0 <= now - sample.received <= self.stale_after
                 and 0 <= ros_now - sample.stamp <= self.stale_after)
 
-    def combine(self, position, now, ros_now):
-        if position is None or not 0 <= now - position.timestamp <= self.stale_after:
-            return None, 'UWB missing or stale'
-        if not all(finite(v) for v in (position.x, position.y, position.timestamp, ros_now)):
-            return None, 'Invalid UWB position'
+    def height(self, now, ros_now):
+        """Read tilt-compensated ToF height without inventing a UWB sample."""
         if not self._fresh(self.range, now, ros_now):
             return None, 'ToF missing, invalid or stale'
-        # PANS lep has no acquisition stamp. Estimate its host receipt in ROS time.
-        uwb_stamp = ros_now - (now - position.timestamp)
-        stamps = [uwb_stamp, self.range.stamp]
+        stamps = [self.range.stamp]
         vertical = 1.0
         if self.compensate_tilt:
             if not self._fresh(self.attitude, now, ros_now):
                 return None, 'IMU missing, invalid, stale or excessive tilt'
             stamps.append(self.attitude.stamp)
             vertical = self.attitude.vertical
-        if min(stamps) <= 0 or max(stamps) - min(stamps) > self.max_skew:
+        if max(stamps) - min(stamps) > self.max_skew:
             return None, 'Sensor timestamps are not aligned'
-        # Offset is the sensor's body-z coordinate above the published reference.
         z = self.floor_z + (self.range.distance - self.tof_offset_z) * vertical
         if not finite(z):
             return None, 'Invalid ToF height'
-        return Fix(position.x, position.y, z, position.quality, min(stamps)), 'OK'
+        return Height(z, min(stamps)), 'OK'
+
+    def combine(self, position, now, ros_now):
+        if position is None or not 0 <= now - position.timestamp <= self.stale_after:
+            return None, 'UWB missing or stale'
+        if not all(finite(v) for v in (position.x, position.y, position.timestamp, ros_now)):
+            return None, 'Invalid UWB position'
+        height, reason = self.height(now, ros_now)
+        if height is None:
+            return None, reason
+        # PANS has no acquisition stamp; estimate receipt time in ROS coordinates.
+        uwb_stamp = ros_now - (now - position.timestamp)
+        stamps = [uwb_stamp, self.range.stamp]
+        if self.compensate_tilt:
+            stamps.append(self.attitude.stamp)
+        if min(stamps) <= 0 or max(stamps) - min(stamps) > self.max_skew:
+            return None, 'Sensor timestamps are not aligned'
+        return Fix(position.x, position.y, height.z, position.quality, min(stamps)), 'OK'

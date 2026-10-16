@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 
-import copy
 import pid_class as pid_class
 import tf
 import sys
 import os
 import rospy
 import signal
-import traceback
 import argparse
 import functools
 import threading
@@ -16,7 +14,7 @@ import command_values as cmds
 from pid_class import PID, PIDaxis
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import Mode, RC, State
-from std_msgs.msg import Float32, Empty, Bool, UInt32
+from std_msgs.msg import Empty, Bool, UInt32
 from localization.fusion import rotate, target_velocity
 from pidrone_pkg.msg import AnchorLayout
 from three_dim_vec import Position, Velocity, Error, RPY
@@ -49,13 +47,11 @@ class PIDController(object):
 
         # Initialize in velocity control
         self.position_control = False
-        self.last_position_control = False
 
         # Initialize the current and desired positions
         self.current_position = Position()
         self.altitude_sample = (0.0, 0.0)
         self.desired_position = Position(z=self.takeoff_height)
-        self.last_desired_position = Position(z=self.takeoff_height)
 
         # Initialize the position error
         self.position_error = Error()
@@ -69,15 +65,7 @@ class PIDController(object):
 
         # Set the distance that a velocity command will move the drone (m)
         self.desired_velocity_travel_distance = 0.1
-        # Set a static duration that a velocity command will be held
-        self.desired_velocity_travel_time = 0.1
-
-        # Set a static duration that a yaw velocity command will be held
-        self.desired_yaw_velocity_travel_time = 0.25
-
-        # Store the start time of the desired velocities
-        self.desired_velocity_start_time = None
-        self.desired_yaw_velocity_start_time = None
+        self.velocity_deadline = self.yaw_deadline = None
 
         # Initialize the primary PID
         self.pid = PID()
@@ -100,24 +88,16 @@ class PIDController(object):
         # Initialize the desired yaw velocity
         self.desired_yaw_velocity = 0
 
-        # Initialize the current and  previous roll, pitch, yaw values
+        # Current body orientation
         self.current_rpy = RPY()
-        self.previous_rpy = RPY()
 
-        # initialize the current and previous states
+        # Latest controller estimate
         self.current_state = State()
-        self.previous_state = State()
 
         # Store the command publisher
         self.cmdpub = None
 
-        # a variable used to determine if the drone is moving between disired
-        # positions
-        self.moving = False
-
-        # a variable that determines the maximum magnitude of the position error
-        # Any greater position error will overide the drone into velocity
-        # control
+        # Fall back to velocity control beyond this local-position error (m).
         self.safety_threshold = 1.5
 
         # determines if the position of the drone is known
@@ -126,11 +106,8 @@ class PIDController(object):
         # determines if the desired poses are aboslute or relative to the drone
         self.absolute_desired_position = False
 
-        # determines whether to use open loop velocity path planning which is
-        # accomplished by calculate_travel_time
-        self.path_planning = True
         self.use_fusion = bool(rospy.get_param('/pidrone/localization/use_fusion', True))
-        self.local_ready_at = self.room_ready_at = None
+        self.local_estimate_ready = self.room_estimate_ready = False
         self.room_pose = self.room_target = self.room_anchors = None
         self.room_generation = None
         self.room_target_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.5))
@@ -139,22 +116,23 @@ class PIDController(object):
             raise ValueError('Room target gain and speed must be positive')
 
     def local_ready(self):
-        return (not self.use_fusion or self.local_ready_at is not None
-                and 0 <= rospy.get_time() - self.local_ready_at <= 0.3)
+        # Fusion owns sensor validity. Only watchdog its published estimate here.
+        stamp = self.current_state.header.stamp.to_sec()
+        return (not self.use_fusion or self.local_estimate_ready and stamp > 0
+                and 0 <= rospy.get_time() - stamp <= self.measurement_timeout)
 
     def room_ready(self):
-        return (self.use_fusion and self.local_ready() and self.room_ready_at is not None
-                and 0 <= rospy.get_time() - self.room_ready_at <= 0.3
+        return (self.use_fusion and self.local_ready() and self.room_estimate_ready
                 and self.room_pose is not None
-                and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= 0.5)
+                and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= self.measurement_timeout)
 
     @synchronized
     def local_ready_callback(self, msg):
-        self.local_ready_at = rospy.get_time() if msg.data else None
+        self.local_estimate_ready = msg.data
 
     @synchronized
     def room_ready_callback(self, msg):
-        self.room_ready_at = rospy.get_time() if msg.data else None
+        self.room_estimate_ready = msg.data
 
     @synchronized
     def room_pose_callback(self, msg):
@@ -217,7 +195,6 @@ class PIDController(object):
     @synchronized
     def current_state_callback(self, state):
         """ Store the drone's current state for calculations """
-        self.previous_state = self.current_state
         self.current_state = state
         self.state_to_three_dim_vec_structs()
         self.altitude_sample = (state.pose_with_covariance.pose.position.z * 100,
@@ -233,8 +210,6 @@ class PIDController(object):
             rospy.logwarn('Ignoring invalid altitude target: %s', desired_z)
             return
         self.takeoff_ramp = None
-        # store the previous desired position
-        self.last_desired_position = copy.copy(self.desired_position)
         # set the desired positions equal to the desired pose message
         if self.absolute_desired_position:
             self.desired_position.x = msg.position.x
@@ -248,11 +223,6 @@ class PIDController(object):
             self.desired_position.y = self.current_position.y + offset[1]
         self.desired_position.z = desired_z
 
-        if self.desired_position != self.last_desired_position:
-            # the drone is moving between desired positions
-            self.moving = True
-            print('moving')
-
     @synchronized
     def desired_twist_callback(self, msg):
         """ Update the desired twist """
@@ -261,10 +231,10 @@ class PIDController(object):
         self.desired_velocity.y = msg.linear.y
         self.desired_velocity.z = msg.linear.z
         self.desired_yaw_velocity = msg.angular.z
-        self.desired_velocity_start_time = None
-        self.desired_yaw_velocity_start_time = None
-        if self.path_planning:
-            self.calculate_travel_time()
+        now = rospy.get_time()
+        speed = self.desired_velocity.planar_magnitude()
+        self.velocity_deadline = now + self.desired_velocity_travel_distance / speed if speed else None
+        self.yaw_deadline = now + 0.25 if self.desired_yaw_velocity else None
 
     @synchronized
     def current_mode_callback(self, msg):
@@ -292,12 +262,9 @@ class PIDController(object):
         """ Set whether or not position control is enabled """
         if not msg.data:
             self.cancel_room_target()
-        self.position_control = msg.data
-        if self.position_control and not self.last_position_control:
+        if msg.data and not self.position_control:
             self.desired_position = Position(self.current_position.x, self.current_position.y, self.desired_position.z)
-        if (self.position_control != self.last_position_control):
-            print("Position Control", self.position_control)
-            self.last_position_control = self.position_control
+        self.position_control = msg.data
 
     @synchronized
     def reset_callback(self, empty):
@@ -320,21 +287,10 @@ class PIDController(object):
     @synchronized
     def step(self):
         """ Returns the commands generated by the pid """
-        self.calc_error()
-        if self.position_control and self.room_target is None:
-            if self.position_error.planar_magnitude() < self.safety_threshold and not self.lost:
-                if self.moving:
-                    if self.position_error.magnitude() > 0.05:
-                        self.pid_error -= self.velocity_error * 100
-                    else:
-                        self.moving = False
-                        print('not moving')
-            else:
-                self.position_control_pub.publish(False)
-
+        if self.room_target is None:
+            self.expire_velocity_command()
+        xy_ready = self.calc_error()
         requested_xy = (self.desired_velocity.x, self.desired_velocity.y)
-        if self.room_target is None and (self.desired_velocity.magnitude() > 0 or abs(self.desired_yaw_velocity) > 0):
-            self.adjust_desired_velocity()
 
         command = self.pid.step(self.pid_error, self.desired_yaw_velocity,
                                 self.altitude_sample)
@@ -342,7 +298,7 @@ class PIDController(object):
             rospy.loginfo_throttle(1,
                 'XY PID: local_ready=%s position_control=%s desired=(%.3f, %.3f) '
                 'measured=(%.3f, %.3f) m/s roll=%.1f pitch=%.1f' % (
-                    self.local_ready(), self.position_control, requested_xy[0], requested_xy[1],
+                    xy_ready, self.position_control, requested_xy[0], requested_xy[1],
                     self.current_velocity.x, self.current_velocity.y, command[0], command[1]))
         return command
 
@@ -366,41 +322,19 @@ class PIDController(object):
         self.current_velocity.z = twist.linear.z
 
         # store the orientations
-        self.previous_rpy = self.current_rpy
         quaternion = (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
         r,p,y = tf.transformations.euler_from_quaternion(quaternion)
         self.current_rpy = RPY(r,p,y)
 
-    def adjust_desired_velocity(self):
-        """ Set the desired velocity back to 0 once the drone has traveled the
-        amount of time that causes it to move the specified desired velocity
-        travel distance if path_planning otherwise just set the velocities back
-        to 0 after the . This is an open loop method meaning that the specified
-        travel distance cannot be guarenteed. If path planning_planning is false,
-        just set the velocities back to zero, this allows the user to move the
-        drone for as long as they are holding down a key
-        """
-        curr_time = rospy.get_time()
-        # set the desired planar velocities to zero if the duration is up
-        if self.desired_velocity_start_time is not None:
-            # the amount of time the set point velocity is not zero
-            duration = curr_time - self.desired_velocity_start_time
-            if duration > self.desired_velocity_travel_time:
-                self.desired_velocity.x = 0
-                self.desired_velocity.y = 0
-                self.desired_velocity_start_time = None
-        else:
-            self.desired_velocity_start_time = curr_time
-
-        # set the desired yaw velocity to zero if the duration is up
-        if self.desired_yaw_velocity_start_time != None:
-            # the amount of time the set point velocity is not zero
-            duration = curr_time - self.desired_yaw_velocity_start_time
-            if duration > self.desired_yaw_velocity_travel_time:
-                self.desired_yaw_velocity = 0
-                self.desired_yaw_velocity_start_time = None
-        else:
-            self.desired_yaw_velocity_start_time = curr_time
+    def expire_velocity_command(self):
+        """Expire manual commands before computing the current PID output."""
+        now = rospy.get_time()
+        if self.velocity_deadline is not None and now >= self.velocity_deadline:
+            self.desired_velocity.x = self.desired_velocity.y = 0
+            self.velocity_deadline = None
+        if self.yaw_deadline is not None and now >= self.yaw_deadline:
+            self.desired_yaw_velocity = 0
+            self.yaw_deadline = None
 
     @synchronized
     def calc_error(self):
@@ -408,24 +342,20 @@ class PIDController(object):
         error from lr_pid and fb_pid to the velocity error to control the
         position of the drone
         """
-        # store the time difference
-        pose_dt = 0
-        if self.last_pose_time != None:
-            pose_dt = rospy.get_time() - self.last_pose_time
-        self.last_pose_time = rospy.get_time()
-        if self.room_target is not None and not self.room_ready():
-            self.cancel_room_target()
-        if not self.local_ready():
-            self.cancel_room_target()
+        now = rospy.get_time()
+        pose_dt = max(0.0, now - self.last_pose_time) if self.last_pose_time is not None else 0.0
+        self.last_pose_time = now
+        xy_ready = self.local_ready()
+        if not xy_ready:
             self.desired_velocity.x = self.desired_velocity.y = 0
-            if self.position_control:
-                self.position_control = False
-                self.position_control_pub.publish(False)
             self.pid.roll.reset()
             self.pid.pitch.reset()
             self.pid.roll_low.reset()
             self.pid.pitch_low.reset()
-        if self.room_target is not None:
+        if self.room_target is not None and not self.room_ready():
+            # Pause correction without replacing the target or switching modes.
+            self.desired_velocity.x = self.desired_velocity.y = 0
+        elif self.room_target is not None:
             p, q = self.room_pose.pose.pose.position, self.room_pose.pose.pose.orientation
             angle = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
             command = target_velocity(self.room_target, (p.x, p.y), angle,
@@ -437,7 +367,7 @@ class PIDController(object):
         self.altitude_target = self.desired_position.z
         if self.takeoff_ramp is not None:
             started, initial_height = self.takeoff_ramp
-            ramp_height = initial_height + 0.10 * max(0.0, rospy.get_time() - started)
+            ramp_height = initial_height + 0.10 * max(0.0, now - started)
             self.altitude_target = min(self.desired_position.z, ramp_height)
             if ramp_height >= self.desired_position.z:
                 self.takeoff_ramp = None
@@ -457,41 +387,25 @@ class PIDController(object):
         self.pid_error.z = dz
         # multiply by 100 to account for the fact that code was originally written using cm
         self.pid_error = self.pid_error * 100
-        if not self.local_ready():
+        if not xy_ready:
             self.pid_error.x = self.pid_error.y = 0
-        if self.position_control and self.room_target is None:
+        if self.position_control and self.room_target is None and xy_ready:
             # calculate the position error
             self.position_error = self.desired_position - self.current_position
             if self.use_fusion:
                 error = rotate((self.position_error.x, self.position_error.y), -self.current_rpy.y)
                 self.position_error.x, self.position_error.y = error
-            # calculate a value to add to the velocity error based based on the
-            # position error in the x (roll) direction
-            lr_step = self.lr_pid.step(self.position_error.x, pose_dt)
-            # calculate a value to add to the velocity error based based on the
-            # position error in the y (pitch) direction
-            fb_step = self.fb_pid.step(self.position_error.y, pose_dt)
-            self.pid_error.x += lr_step
-            self.pid_error.y += fb_step
-
-    def calculate_travel_time(self):
-        ''' return the amount of time that desired velocity should be used to
-        calculate the error in order to move the drone the specified travel
-        distance for a desired velocity
-        '''
-        if self.desired_velocity.magnitude() > 0:
-            # tiime = distance / velocity
-            travel_time = self.desired_velocity_travel_distance / self.desired_velocity.planar_magnitude()
-        else:
-            travel_time = 0.0
-        self.desired_velocity_travel_time = travel_time
-
+            if self.position_error.planar_magnitude() >= self.safety_threshold or self.lost:
+                self.position_control = False
+                self.position_control_pub.publish(False)
+            else:
+                # Position correction supplements, rather than removes, velocity damping.
+                self.pid_error.x += self.lr_pid.step(self.position_error.x, pose_dt)
+                self.pid_error.y += self.fb_pid.step(self.position_error.y, pose_dt)
+        return xy_ready
 
     def reset(self):
-        ''' Set desired_position to be current position, set
-        filtered_desired_velocity to be zero, and reset both the PositionPID
-        and VelocityPID
-        '''
+        """Reset targets, command deadlines and PID state for a flight mode change."""
         # reset position control variables
         self.position_error = Error(0,0,0)
         self.desired_position = Position(self.current_position.x, self.current_position.y, self.takeoff_height)
@@ -499,6 +413,9 @@ class PIDController(object):
         # reset velocity control_variables
         self.velocity_error = Error(0,0,0)
         self.desired_velocity = Velocity(0,0,0)
+        self.desired_yaw_velocity = 0
+        self.velocity_deadline = self.yaw_deadline = None
+        self.last_pose_time = None
         # reset the pids
         self.pid.reset()
         self.pid.throttle.midpoint = self.hover_throttle_midpoint

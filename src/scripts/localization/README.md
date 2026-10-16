@@ -85,10 +85,13 @@ comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.20 m/s, for the existing PID; altitude changes keep that X/Y point and retain
 ToF height control. Relative `move_forward`/`move_back` still use optical flow.
-During a fused-position update gap, an active hold keeps its room target and uses
-the PID's existing local position hold at the gap location. Fresh fusion resumes
-correction toward the original room target. The initial hold still needs a fresh
-fused position, and the existing camera/ToF checks remain in effect.
+During brief sensor gaps, fusion continues predicting the estimate. If that
+estimate expires, an active hold keeps its room target and requests zero XY
+velocity until fusion resumes. It does not switch into a different position-hold
+mode or capture a new target. Initial hold needs a fresh fused pose; camera flow
+is required only for the relative horizontal moves that explicitly use it.
+Local position hold retains velocity damping while moving or changing altitude.
+Manual velocity commands expire from their receipt time, before PID calculation.
 
 ### Room heading
 
@@ -260,11 +263,11 @@ speed limit, not a guarantee of actual speed. Tune `/pidrone/localization/target
 and `/pidrone/localization/target_speed_limit` against the physical drone.
 
 **Stop target** sends `/pidrone/desired/cancel_room_target` (`std_msgs/Empty`) and
-returns to local hold when camera/IMU/ToF remain available. Manual motion, altitude,
-reset or mode commands override room navigation. Room reference changes, stale
-UWB, stale/partial anchors or camera loss cancel active targets without automatic
-resumption. Dashboard layout conflicts cancel both drones' room targets. Camera
-loss additionally disables local XY control and clears horizontal commands;
+returns to local hold when local feedback remains available. Manual motion,
+altitude, reset or mode commands override room navigation. Room reference changes
+and dashboard layout conflicts cancel active targets. A sensor timeout pauses
+correction while retaining the target; fresh fusion resumes correction. Camera
+loss alone does not disable XY control when UWB and IMU remain valid.
 ToF altitude control remains available with fresh IMU/ToF. The outline check is
 not obstacle avoidance, collision avoidance, or formation planning.
 
@@ -281,16 +284,23 @@ room-position corrections adjust the `map → odom` offset.
 Delayed UWB observations are advanced using interpolated camera displacement from
 their own timestamp, and additional uncertainty covers that interval. Repeated or
 out-of-order observations cannot renew a fix. Innovation gates reject inconsistent
-UWB observations. Camera gaps are not integrated as measured motion.
+UWB observations. Prediction runs independently of camera callbacks. With no
+camera, the same filter estimates motion from UWB; camera recovery preserves the
+learned velocity rather than adding it twice.
 
-Room output requires a recent accepted UWB fix and a fresh complete convex four-
-anchor report; it stops instead of publishing camera-only room positions during
-an outage. Reacquisition requires a new accepted UWB fix and an explicit new target.
-Stale UWB or an invalid room reference clears the learned velocity correction.
-Local odometry then continues using camera velocity; holding position on a uniform
-floor during UWB loss is therefore not assured. Fresh camera, IMU and ToF streams
-are still required for local XY control. Parameters in
-`params/fusion_localization.yaml` are initial tuning
+Fusion owns sensor validity, with a single `sensor_timeout` (0.5 s by default).
+XY feedback requires fresh IMU and either accepted UWB fixes or camera velocity.
+Brief missing/invalid camera samples do not clear the UWB estimate. After UWB
+expires, local feedback can continue from camera velocity; if both expire, XY
+commands become neutral. ToF validity governs altitude output and does not reset
+the XY filter. Height is validated directly from ToF and IMU timestamps; it does
+not depend on a synthetic UWB sample or the current prediction time. Controllers watchdog the published estimate, rather than timing
+out separate readiness heartbeats. Fused pose stamps retain the UWB fix age.
+
+Room output requires a recent accepted UWB fix and a validated convex four-anchor
+layout. Surveyed anchors remain valid across missing/partial reports; a changed
+complete layout resets the room reference. Sensor gaps do not change the room
+generation. Parameters in `params/fusion_localization.yaml` are initial tuning
 values. Camera velocity scale, noise assumptions and heading accuracy require
 measurement. The optical-flow scale can be set with
 `/pidrone/localization/flow_scale` before starting the flow node.

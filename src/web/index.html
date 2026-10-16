@@ -78,7 +78,7 @@
         </div>
         <div class="map-details">
         <div class="map-legend" id="map-legend" hidden><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span></div>
-        <div class="map-sources" id="map-sources" hidden><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span><span class="map-source-uwb">Raw UWB + ToF</span><span>Fused position</span></div>
+        <div class="map-sources" id="map-sources" hidden><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span><span>Fused position</span></div>
         <div class="target-preview">
           <p class="map-note" id="target-help">Drag a drone or target marker to choose a destination, then Send target. Or select a drone above and tap the map. With the map focused, arrow keys adjust the target.</p>
           <p class="map-note" id="target-selection" role="status" aria-live="polite">No target selected.</p>
@@ -121,8 +121,7 @@
             <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
           </div>
           <div class="status-grid" aria-label="Drone 1 status">
-            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div><small data-field="fusionStatus" role="status">Waiting for fusion</small></div>
-            <div class="status-card localization-card"><p>Raw position · UWB + ToF</p><div data-field="localizationPosition">—</div><small data-field="localizationStatus" role="status">Waiting for localization</small></div>
+            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
@@ -149,8 +148,7 @@
             <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
           </div>
           <div class="status-grid" aria-label="Drone 2 status">
-            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div><small data-field="fusionStatus" role="status">Waiting for fusion</small></div>
-            <div class="status-card localization-card"><p>Raw position · UWB + ToF</p><div data-field="localizationPosition">—</div><small data-field="localizationStatus" role="status">Waiting for localization</small></div>
+            <div class="status-card localization-card"><p>Position · Camera + UWB + ToF</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">

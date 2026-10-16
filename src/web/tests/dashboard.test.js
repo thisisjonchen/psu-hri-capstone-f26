@@ -188,24 +188,21 @@ test('fusion gaps and resets retain display markers without live control data an
   const pose = secs => ({ header: { stamp: { secs, nsecs: 0 }, frame_id: 'map' },
     pose: { pose: { position: { x: .5, y: 1, z: .4 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } });
   app.receive(a, '/pidrone/localization/generation', { data: 0 });
-  app.receive(a, '/pidrone/localization/pose', localizationAt(100, .5, 1, .4));
   app.receive(a, '/pidrone/localization/fused', pose(100));
   app.receive(a, '/pidrone/localization/fusion_status', { status: [{ level: 1, message: 'UWB innovation rejected' }] });
   assert.equal(a.fusedPose, null);
   assert.equal(a.series.fused0.length, 0);
+  assert.equal(a.field('fusedPosition').textContent, 'X 0.50 · Y 1.00 · Z 0.40 m');
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').borderColor, '#0072b2');
   assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
   assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
-  assert.match(app.elements.get('map-stream-status').textContent, /Last known position: Drone 1 · Fused position/);
+  assert.equal(app.elements.get('map-stream-status').textContent, '');
   app.receive(a, '/pidrone/localization/fused', pose(100));
   assert.equal(a.fusedPose, null);
   app.receive(a, '/pidrone/localization/generation', { data: 1 });
   assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
   assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
   assert.equal(a.fusedPose, null);
-  assert.equal(a.localizationReceivedAt, null);
-  assert.match(a.field('localizationPosition').textContent, /X 0.50/);
   assert.equal(app.elements.get('target-send').disabled, true);
   app.receive(a, '/pidrone/localization/anchors', anchorsAt(50));
   assert.equal(app.fleetMap.layoutUsable, true);
@@ -494,69 +491,6 @@ const localizationAt = (seconds, x, y, z) => ({
   pose: { pose: { position: { x, y, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } }, covariance: Array(36).fill(0) }
 });
 
-test('UWB and ToF telemetry stays per drone and room coordinates remain visible', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  app.receive(a, '/pidrone/localization/pose', localizationAt(100, 2.8, 5.5, 0.4));
-  app.receive(b, '/pidrone/localization/pose', localizationAt(100, 1, 2, 0.6));
-  assert.match(a.field('localizationPosition').textContent, /X 2.80 · Y 5.50 · Z 0.40 m/);
-  assert.match(b.field('localizationPosition').textContent, /Z 0.60 m/);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb1').data[0].x, 2.8);
-  assert.equal(sharedMarker(app, 'drone2', 'uwb1').data[0].x, 1);
-  assert.ok(app.fleetMap.chart.options.scales.yAxes[0].ticks.max >= 5.5);
-  a.disconnect();
-  assert.equal(sharedMarker(app, 'drone1', 'uwb1').data.length, 0);
-  assert.equal(sharedMarker(app, 'drone2', 'uwb1').data[0].x, 1);
-});
-
-test('localization gaps retain labeled last readings and map markers until fresh data returns', () => {
-  const app = dashboard();
-  const a = app.connect('drone1');
-  const send = (seconds, z = 0.4) => app.receive(a, '/pidrone/localization/pose', localizationAt(seconds, 1, 2, z));
-  send(100);
-  app.advanceTime(400);
-  send(100);
-  app.advanceTime(200);
-  app.maintenanceTimers.forEach(callback => callback());
-  const reading = 'X 1.00 · Y 2.00 · Z 0.40 m';
-  assert.equal(a.field('localizationPosition').textContent, reading);
-  assert.equal(a.field('localizationPosition').dataset.state, 'stale');
-  assert.match(a.field('localizationStatus').textContent, /^Last reading · Localization stale$/);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
-  assert.match(app.elements.get('map-stream-status').textContent, /Last known position/);
-  send(101);
-  for (const message of ['Sensor timestamps are not aligned', 'UWB missing or stale', 'ToF missing, invalid or stale']) {
-    app.receive(a, '/pidrone/localization/status', { status: [{ level: 1, message }] });
-    assert.equal(a.field('localizationStatus').textContent, 'Last reading · ' + message);
-    assert.equal(a.field('localizationPosition').textContent, reading);
-    assert.equal(a.field('localizationPosition').dataset.state, 'stale');
-    assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
-    assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
-    assert.equal(a.localizationReceivedAt, null);
-  }
-  send(102, NaN);
-  assert.equal(a.field('localizationPosition').textContent, reading);
-  assert.match(a.field('localizationStatus').textContent, /^Last reading · Invalid position$/);
-  const unstamped = localizationAt(102, 9, 9, 9);
-  delete unstamped.header.stamp;
-  app.receive(a, '/pidrone/localization/pose', unstamped);
-  assert.equal(a.field('localizationPosition').textContent, reading);
-  assert.equal(a.localizationStamp, 101);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data[0].x, 0.92);
-  send(102);
-  assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
-  assert.equal(a.field('localizationPosition').dataset.state, 'ready');
-  assert.match(a.field('localizationStatus').textContent, /^Ready/);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, false);
-  a.disconnect();
-  assert.equal(a.field('localizationPosition').textContent, '—');
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
-  app.connect('drone1');
-  send(1);
-  assert.match(a.field('localizationPosition').textContent, /Z 0.40/);
-});
-
 test('shared map isolates pose streams and clears only the disconnected drone', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
@@ -591,10 +525,10 @@ test('room bounds stay stable through movement, faults and resize with equal met
   const a = app.connect('drone1');
   const limits = () => JSON.stringify(map.chart.options.scales);
   const initial = limits();
-  app.receive(a, '/pidrone/localization/pose', localizationAt(100, 100, -100, 0.4));
+  app.receive(a, '/pidrone/localization/fused', localizationAt(100, 100, -100, 0.4));
   assert.equal(limits(), initial);
   assert.match(app.elements.get('map-stream-status').textContent, /Outside current view/);
-  app.receive(a, '/pidrone/localization/status', { status: [{ level: 1, message: 'No fix' }] });
+  app.receive(a, '/pidrone/localization/fusion_status', { status: [{ level: 1, message: 'No fix' }] });
   a.disconnect();
   assert.equal(limits(), initial);
   map.chart.chartArea.right = 855;
@@ -661,7 +595,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(app.elements.get('room-status').textContent, '');
   assert.equal(app.elements.get('room-status').hidden, true);
   const original = map.room;
-  app.receive(a, '/pidrone/localization/pose', localizationAt(100, 1, 2, 0.5));
+  app.receive(a, '/pidrone/localization/fused', localizationAt(100, 1, 2, 0.5));
   map.previewTarget('drone1', 1, 2);
   map.setZoom(1.25);
   const reordered = anchorsAt(102);
@@ -676,8 +610,8 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.room, original);
   assert.equal(map.layoutUsable, false);
   assert.equal(app.elements.get('map-placeholder').hidden, true);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
   assert.match(app.elements.get('room-status').textContent, /disagree/);
   assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   send(a, changed);
@@ -685,8 +619,8 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.room.xMax, 4);
   assert.equal(map.zoom, 1);
   assert.equal(Object.keys(map.targets).length, 0);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data.length, 0);
-  app.receive(a, '/pidrone/localization/pose', localizationAt(101, 2, 3, 0.5));
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 0);
+  app.receive(a, '/pidrone/localization/fused', localizationAt(101, 2, 3, 0.5));
   const agreed = map.room;
   app.advanceTime(1000);
   const partial = anchorsAt(104, [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25]]);
@@ -704,8 +638,8 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('map-frame').classList.contains('map-unavailable'), false);
   assert.equal(app.elements.get('fleet-xyChart').getAttribute('aria-hidden'), 'false');
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').data[0].x, 1.92);
-  assert.equal(sharedMarker(app, 'drone1', 'uwb0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').data[0].x, 1.91);
+  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
   assert.equal(app.elements.get('target-send').disabled, true);
   assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   assert.equal(app.elements.get('room-fit').disabled, false);
@@ -746,7 +680,7 @@ test('verified calibration displays the room before a complete tag report and us
   assert.equal(map.room.xMax, 3);
   assert.equal(map.room.yMax, 6);
   assert.equal(map.chart.data.datasets.find(d => d.key === 'anchors').data.length, 5);
-  assert.equal(app.elements.get('room-status').textContent, 'Waiting for drone positions.');
+  assert.equal(app.elements.get('room-status').hidden, true);
   map.previewTarget('drone2', 1, 2);
   app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
   const pose = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
@@ -757,8 +691,8 @@ test('verified calibration displays the room before a complete tag report and us
   assert.equal(drone.publishers.roomTarget.messages.length, 0);
   app.receive(drone, '/pidrone/localization/anchors', {
     ...report, anchor_ids: report.anchor_ids.slice(0, 3), positions: report.positions.slice(0, 3) });
-  app.receive(drone, '/pidrone/localization/pose', localizationAt(100, 1, 2, .4));
-  assert.equal(sharedMarker(app, 'drone2', 'uwb0').data.length, 2);
+  app.receive(drone, '/pidrone/localization/fused', localizationAt(100, 1, 2, .4));
+  assert.equal(sharedMarker(app, 'drone2', 'fused0').data.length, 2);
   map.sendTarget();
   assert.equal(drone.publishers.roomTarget.messages.length, 1);
   app.anchorCalibration.update(state);
@@ -767,7 +701,7 @@ test('verified calibration displays the room before a complete tag report and us
   app.maintenanceTimers.forEach(callback => callback());
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('target-send').disabled, true);
-  assert.equal(sharedMarker(app, 'drone2', 'uwb0').stale, true);
+  assert.equal(sharedMarker(app, 'drone2', 'fused0').stale, true);
   const changed = anchorsAt(101, [[0, 0, 0], [4, 0, 0], [4, 6, 0], [0, 6, 0]]);
   app.receive(drone, '/pidrone/localization/anchors', changed);
   assert.equal(map.room.xMax, 3);
@@ -777,7 +711,7 @@ test('verified calibration displays the room before a complete tag report and us
   assert.equal(map.room.xMax, 4);
   assert.equal(map.layoutUsable, true);
   assert.equal(Object.keys(map.targets).length, 0);
-  assert.equal(sharedMarker(app, 'drone2', 'uwb0').data.length, 0);
+  assert.equal(sharedMarker(app, 'drone2', 'fused0').data.length, 0);
 });
 
 test('ROS tag results stay isolated and include tag zero and multiple tags', () => {

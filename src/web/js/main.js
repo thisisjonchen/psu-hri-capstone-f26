@@ -4,7 +4,6 @@ const xySources = [
   ['groundTruth', 'Ground truth', []],
   ['ukf', 'UKF', [6, 3]],
   ['camera', 'Camera pose', [2, 3]],
-  ['uwb', 'UWB + ToF', [8, 2, 2, 2]],
   ['fused', 'Fused position', []]
 ];
 
@@ -216,8 +215,7 @@ class FleetMap {
     } else if (awaitingVerification) {
       status = 'Saved room · Awaiting verification. Measure and save, or connect a drone for a live anchor report.';
     } else if (candidate) {
-      status = this.calibratedRoom && !live.some(([, report]) => report.anchors.length)
-        ? 'Waiting for drone positions.' : '';
+      status = '';
     } else {
       status = Object.values(drones).some(drone => drone.connected)
         ? 'Waiting for a complete report of four UWB corner anchors'
@@ -487,9 +485,7 @@ class FleetMap {
         else if (live) dataset.lastData = points.map(point => ({ ...point }));
         dataset.data = dataset.lastData || [];
         dataset.stale = dataset.data.length > 0 && !live;
-        dataset.borderColor = dataset.stale
-          ? (drone.id === 'drone1' ? 'rgba(0, 114, 178, 0.45)' : 'rgba(213, 94, 0, 0.45)')
-          : droneColor(drone.id);
+        dataset.borderColor = droneColor(drone.id);
       }
     });
     document.getElementById('target-status').textContent = this.targetFeedback;
@@ -505,10 +501,7 @@ class FleetMap {
         const y = (dataset.data[0].y + dataset.data[1].y) / 2;
         return x < xTicks.min || x > xTicks.max || y < yTicks.min || y > yTicks.max;
       }).map(dataset => dataset.label);
-    const held = this.chart.data.datasets.filter(dataset => dataset.stale && dataset.key === dataset.source + '0')
-      .map(dataset => dataset.label);
     document.getElementById('map-stream-status').textContent = [
-      held.length ? 'Last known position: ' + held.join(', ') : '',
       omitted.length ? 'Hidden until aligned to ' + this.room.frame + ': ' + omitted.join(', ') : '',
       outside.length ? 'Outside current view: ' + outside.join(', ') : ''
     ].filter(Boolean).join('. ');
@@ -530,10 +523,6 @@ class DroneSession {
     this.id = id;
     this.host = id + '.local';
     this.detectionReceivedAt = null;
-    this.localizationReceivedAt = null;
-    this.localizationStatusAt = null;
-    this.localizationStamp = null;
-    this.lastLocalizationText = null;
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
@@ -614,62 +603,15 @@ class DroneSession {
     }
   }
 
-  clearLocalization(text = 'Localization unavailable', retainReading = true) {
-    this.localizationReceivedAt = null;
-    if (!retainReading) this.lastLocalizationText = null;
-    this.field('localizationPosition').textContent = this.lastLocalizationText || '—';
-    this.field('localizationPosition').dataset.state = 'stale';
-    this.field('localizationStatus').textContent = (this.lastLocalizationText ? 'Last reading · ' : '') + text;
-    this.field('localizationStatus').dataset.state = 'stale';
-    [0, 1, 2].forEach(i => { this.series['uwb' + i] = []; });
-    if (fleetMap) fleetMap.render();
-  }
-
-  updateLocalization(message) {
-    const p = message.pose && message.pose.pose && message.pose.pose.position;
-    const stamp = message.header && message.header.stamp;
-    const time = stamp && stamp.secs + stamp.nsecs / 1e9;
-    if (!p || ![p.x, p.y, p.z, time].every(Number.isFinite) || time <= 0 ||
-        !message.header.frame_id) return this.clearLocalization('Invalid position');
-    // Repeated or older sensor stamps must not keep a stopped stream alive.
-    if (this.localizationStamp !== null && time <= this.localizationStamp) return;
-    this.localizationStamp = time;
-    this.xyFrames.uwb = message.header.frame_id;
-    this.localizationReceivedAt = Date.now();
-    this.xyReceivedAt.uwb = this.localizationReceivedAt;
-    this.lastLocalizationText = 'X ' + p.x.toFixed(2) + ' · Y ' + p.y.toFixed(2) + ' · Z ' + p.z.toFixed(2) + ' m';
-    this.field('localizationPosition').textContent = this.lastLocalizationText;
-    this.field('localizationPosition').dataset.state = 'ready';
-    this.field('localizationStatus').textContent = 'Ready · ' + message.header.frame_id;
-    this.field('localizationStatus').dataset.state = 'ready';
-    // Draw a cross, since UWB provides no heading measurement.
-    this.series.uwb0 = [{ x: p.x - 0.08, y: p.y }, { x: p.x + 0.08, y: p.y }];
-    this.series.uwb1 = [{ x: p.x, y: p.y - 0.08 }, { x: p.x, y: p.y + 0.08 }];
-    this.series.uwb2 = [];
-    if (fleetMap) fleetMap.render();
-  }
-
-  updateLocalizationStatus(message) {
-    const status = message.status && message.status[0];
-    if (!status || !Number.isInteger(status.level) || typeof status.message !== 'string') return;
-    this.localizationStatusAt = Date.now();
-    if (status.level !== 0) this.clearLocalization(status.message || 'Localization unavailable');
-  }
-
   refreshLocalization() {
-    if ((this.localizationReceivedAt !== null && Date.now() - this.localizationReceivedAt > 500) ||
-        (this.localizationStatusAt !== null && Date.now() - this.localizationStatusAt > 1500)) {
-      this.clearLocalization('Localization stale');
-    }
     if ((this.fusedReceivedAt !== null && Date.now() - this.fusedReceivedAt > 500) ||
-        (this.fusionReadyAt !== null && Date.now() - this.fusionReadyAt > 500)) this.clearFusion('Fused position stale');
+        (this.fusionReadyAt !== null && Date.now() - this.fusionReadyAt > 500)) this.clearFusion();
   }
 
-  clearFusion(text) {
+  clearFusion() {
     this.fusedPose = null;
     this.fusedReceivedAt = this.fusionReadyAt = null;
-    this.field('fusedPosition').textContent = '—';
-    this.field('fusionStatus').textContent = text;
+    // Retain the displayed coordinates through gaps; control must use fresh data.
     [0, 1, 2].forEach(i => { this.series['fused' + i] = []; });
     if (fleetMap) fleetMap.render();
   }
@@ -681,7 +623,7 @@ class DroneSession {
     const time = stamp && stamp.secs + stamp.nsecs / 1e9;
     if (!p || !q || ![p.x, p.y, p.z, q.x, q.y, q.z, q.w, time].every(Number.isFinite) ||
         q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w < 1e-12 || time <= 0 || !message.header.frame_id)
-      return this.clearFusion('Invalid fused position');
+      return this.clearFusion();
     if (this.fusedStamp !== null && time <= this.fusedStamp) return;
     this.fusedPose = message;
     this.fusedStamp = time;
@@ -755,13 +697,10 @@ class DroneSession {
     this.verticalSampleAt = null;
     this.detectionReceivedAt = null;
     this.setDetection('Drone Offline', 'offline');
-    this.localizationStamp = null;
-    this.localizationStatusAt = null;
     this.fusedStamp = null;
     this.fusionGeneration = null;
-    this.clearFusion(this.connected ? 'Waiting for fusion' : 'Drone offline');
-    this.clearLocalization(this.connected ? 'Waiting for localization' : 'Drone offline', false);
-    ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed'].forEach(name => {
+    this.clearFusion();
+    ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedPosition'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
     });
@@ -841,18 +780,15 @@ class DroneSession {
       this.subscribers.push(topic);
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
-    subscribe('/pidrone/localization/pose', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateLocalization(message));
-    subscribe('/pidrone/localization/status', 'diagnostic_msgs/DiagnosticArray', message => this.updateLocalizationStatus(message));
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message));
     subscribe('/pidrone/localization/generation', 'std_msgs/UInt32', message => {
       if (!Number.isInteger(message.data)) return;
       if (this.fusionGeneration !== null && this.fusionGeneration !== message.data) {
-        this.fusedStamp = this.localizationStamp = null;
+        this.fusedStamp = null;
         this.xyReceivedAt = {};
-        this.clearFusion('Waiting for fresh position');
-        this.clearLocalization('Waiting for fresh position');
-        // Fusion also resets on brief sensor gaps. Retain display-only markers;
-        // a confirmed anchor-layout change clears them in refreshAnchors().
+        this.clearFusion();
+        // A generation change invalidates control data. A confirmed anchor-layout
+        // change clears display-only markers in refreshAnchors().
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         fleetMap.refreshAnchors();
@@ -861,14 +797,13 @@ class DroneSession {
     });
     subscribe('/pidrone/localization/ready', 'std_msgs/Bool', message => {
       this.fusionReadyAt = message.data ? Date.now() : null;
-      if (!message.data) this.clearFusion('Room localization unavailable');
+      if (!message.data) this.clearFusion();
       if (fleetMap) fleetMap.render();
     });
     subscribe('/pidrone/localization/fusion_status', 'diagnostic_msgs/DiagnosticArray', message => {
       const status = message.status && message.status[0];
       if (!status || typeof status.message !== 'string') return;
-      if (status.level !== 0) this.clearFusion(status.message);
-      this.field('fusionStatus').textContent = status.message;
+      if (status.level !== 0) this.clearFusion();
     });
     subscribe('/pidrone/localization/anchors', 'pidrone_pkg/AnchorLayout', message => fleetMap.updateAnchors(this.id, message));
     subscribe('/pidrone/battery', 'pidrone_pkg/Battery', message => {

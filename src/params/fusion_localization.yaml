@@ -4,7 +4,7 @@ velocity_stddev: 0.12
 velocity_correction_stddev: 0.3
 drift_stddev: 0.08
 velocity_tau: 0.08
-flow_timeout: 0.25
+# Maximum age of a usable IMU, camera, UWB or height measurement.
 sensor_timeout: 0.5
 max_sensor_skew: 0.15
 max_flow_speed: 2.0

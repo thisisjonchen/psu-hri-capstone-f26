@@ -45,6 +45,14 @@ class PositionTest(unittest.TestCase):
         self.combiner.update_range(0.5, 0.05, 4, 99.7, 10)
         self.assertEqual(self.combine()[1], 'Sensor timestamps are not aligned')
 
+    def test_height_uses_real_sensor_timing_without_a_uwb_sample(self):
+        height, reason = self.combiner.height(10.3, 100.3)
+        self.assertEqual(reason, 'OK')
+        self.assertEqual((height.z, height.stamp), (.5, 100))
+        self.assertIsNone(self.combiner.height(10.6, 100.6)[0])
+        self.combiner.update_range(.5, .05, 4, 99.7, 10)
+        self.assertEqual(self.combiner.height(10, 100)[1], 'Sensor timestamps are not aligned')
+
     def test_invalid_unavailable_or_excessively_tilted_imu_is_rejected(self):
         for quaternion, available in [((0, 0, 0, 0), True), ((0, 0, 0, 1), False),
                                        ((float('nan'), 0, 0, 1), True), ((1, 0, 0, 0), True),

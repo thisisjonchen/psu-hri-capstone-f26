@@ -86,7 +86,7 @@ class FusionMathTest(unittest.TestCase):
         self.assertEqual(f.uwb_stamp, 10)
         self.assertFalse(f.update_flow((0, 0), 0, 10.05))
 
-    def test_camera_gap_requires_new_room_fix_and_does_not_integrate_missing_motion(self):
+    def test_estimator_clock_gap_requires_new_room_fix_without_integrating_missing_motion(self):
         f = PlanarFusion(yaw_offset=0)
         f.update_flow((0, 1), 0, 10)
         f.update_uwb((1, 2), np.eye(2), 10)
@@ -291,18 +291,80 @@ class FusionNodeTest(unittest.TestCase):
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertIn('heading', self.messages['pidrone/localization/fusion_status'][-1].status[0].message)
 
-    def test_stale_camera_cancels_room_but_keeps_valid_altitude_control_state(self):
-        before = len(self.messages['pidrone/localization/fused'])
-        self.now += .3
-        self.ros_now += .3
+    def test_camera_loss_keeps_uwb_control_and_total_xy_loss_expires_once(self):
+        generation = self.node.generation
+        start = self.ros_now
+        # No camera callbacks at all; a single surveyed layout is sufficient.
+        for i in range(1, 181):
+            self.now += 1/60.0
+            self.ros_now = start + i/60.0
+            self.refresh()
+            if i % 6 == 0:
+                self.uwb(x=1, y=2 + .2*i/60.0)
+            self.node.step()
+            self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+            self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+            self.assertEqual(self.messages['pidrone/localization/fused'][-1].header.stamp.to_sec(),
+                             self.node.filter.uwb_stamp)
+        controller = self.controller()
+        controller.desired_twist_callback(twist())
+        command = controller.step()
+        self.assertAlmostEqual(controller.current_velocity.y, .2, delta=.03)
+        self.assertLess(command[1], 1470)
+        self.assertEqual(self.node.generation, generation)
+        # Returning camera flow must not double the UWB-derived velocity.
+        learned_velocity = self.node.filter.velocity.copy()
+        self.flow(y=.2)
+        np.testing.assert_allclose(self.node.filter.velocity, learned_velocity, atol=1e-12)
+        correction = self.node.filter.velocity_correction.copy()
+        # Bad flow packets and short gaps must not discard learned UWB motion.
+        self.flow(frame='wrong_frame')
+        self.node.step()
+        np.testing.assert_array_equal(self.node.filter.velocity_correction, correction)
+        for i in range(36):
+            self.now += 1/60.0
+            self.ros_now += 1/60.0
+            self.refresh()
+            self.node.step()
+        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertEqual(self.node.generation, generation)
+        state_msg = self.messages['pidrone/state'][-1]
+        self.assertEqual(state_msg.pose_with_covariance.pose.position.z, .5)
+        self.assertEqual(state_msg.twist_with_covariance.twist.linear.y, 0)
+        controller.current_state_callback(state_msg)
+        controller.local_ready_callback(self.messages['pidrone/localization/local_ready'][-1])
+        controller.desired_velocity.y = .2
+        self.assertEqual(controller.step()[:2], [1500, 1500])
+        # New UWB restores the same frame without a mode or generation change.
+        self.uwb(x=1, y=2.6)
+        self.node.step()
+        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertEqual(self.node.generation, generation)
+
+    def test_uwb_initializes_without_camera_and_height_loss_does_not_reset_xy(self):
+        self.node = type(self.node)()
+        self.node.mode_callback(NS(mode='DISARMED'))
+        self.refresh()
+        self.report_anchors()
+        self.uwb()
+        self.node.step()
+        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertIsNone(self.node.filter.flow_stamp)
+        generation = self.node.generation
+        count = len(self.messages['pidrone/state'])
+        self.node.height.range = None
+        self.node.step()
+        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertEqual(len(self.messages['pidrone/state']), count)
+        self.assertIsNotNone(self.node.filter.room)
+        self.assertEqual(self.node.generation, generation)
         self.refresh()
         self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertEqual(len(self.messages['pidrone/localization/fused']), before)
-        self.assertEqual(self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.z, .5)
-        self.assertIsNone(self.node.filter.room)
+        self.assertEqual(len(self.messages['pidrone/state']), count + 1)
 
-    def test_layout_change_clock_reset_and_wrong_flow_frame_invalidate_room(self):
+    def test_layout_change_and_clock_reset_invalidate_but_bad_flow_does_not(self):
         generation = self.node.generation
         self.ros_now += .1
         self.report_anchors(shift=.1)
@@ -311,13 +373,13 @@ class FusionNodeTest(unittest.TestCase):
         self.refresh()
         self.flow(frame='camera')
         self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.ros_now = 50
         self.node.step()
         self.assertIsNone(self.node.filter.stamp)
         self.assertIsNone(self.node.height.range)
 
-    def test_uwb_expiry_and_partial_anchors_never_fall_back_to_camera_room_position(self):
+    def test_uwb_expiry_stops_room_output_but_partial_reports_keep_surveyed_geometry(self):
         for _ in range(6):
             self.now += .1
             self.ros_now += .1
@@ -336,8 +398,8 @@ class FusionNodeTest(unittest.TestCase):
         report.positions.pop()
         self.node.anchors_callback(report)
         self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertIsNone(self.node.filter.room)
+        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertIsNotNone(self.node.filter.room)
 
     def controller(self):
         script = os.path.join(os.path.dirname(__file__), '..', 'pid_controller.py')
@@ -384,7 +446,7 @@ class FusionNodeTest(unittest.TestCase):
         velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
         np.testing.assert_allclose((velocity.x, velocity.y), (0, 0), atol=1e-12)
 
-    def test_room_navigation_rotates_and_limits_speed_and_cancels_on_manual_or_sensor_loss(self):
+    def test_room_navigation_pauses_on_sensor_loss_and_cancels_on_manual_input(self):
         controller = self.controller()
         target = NS(header=NS(frame_id='map', stamp=Stamp(self.ros_now)),
                     pose=NS(position=NS(x=2, y=2, z=999)))
@@ -395,16 +457,25 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(controller.desired_position.z, .25)
         controller.room_ready_callback(NS(data=False))
         controller.calc_error()
-        self.assertIsNone(controller.room_target)
+        np.testing.assert_array_equal(controller.room_target, (2, 2))
         self.assertEqual(controller.desired_velocity.planar_magnitude(), 0)
         self.assertTrue(controller.position_control)
         controller.room_ready_callback(NS(data=True))
-        controller.room_target_callback(target)
+        controller.calc_error()
+        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        # Missing readiness heartbeats do not defeat a still-current estimate.
+        self.ros_now += .35
+        controller.calc_error()
+        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        self.ros_now += .2
+        controller.calc_error()
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
+        np.testing.assert_array_equal(controller.room_target, (2, 2))
         controller.desired_twist_callback(twist())
         self.assertIsNone(controller.room_target)
         controller.local_ready_callback(NS(data=False))
         controller.calc_error()
-        self.assertFalse(controller.position_control)
+        self.assertTrue(controller.position_control)
         self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
 
     def test_room_commands_reject_wrong_frame_outside_outline_and_disarmed_mode(self):
@@ -420,6 +491,41 @@ class FusionNodeTest(unittest.TestCase):
         controller.current_mode = 'DISARMED'
         controller.room_target_callback(target)
         self.assertIsNone(controller.room_target)
+
+    def test_local_hold_keeps_velocity_damping_when_altitude_changes(self):
+        controller = self.controller()
+        current = state()
+        current.header.stamp = Stamp(self.ros_now)
+        current.pose_with_covariance.pose.orientation.w = 1
+        current.pose_with_covariance.pose.position.z = .5
+        controller.current_state_callback(current)
+        controller.position_control_callback(NS(data=True))
+        altitude = NS(position=NS(x=0, y=0, z=.1))
+        controller.desired_pose_callback(altitude)
+        current.pose_with_covariance.pose.position.y = .1
+        current.twist_with_covariance.twist.linear.y = .2
+        current.twist_with_covariance.twist.linear.z = .03
+        controller.current_state_callback(current)
+        command = controller.step()
+        self.assertLess(controller.pid_error.y, -20)
+        self.assertLess(command[1], 1440)
+        self.assertAlmostEqual(controller.pid_error.z, -15)
+
+    def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
+        controller = self.controller()
+        command = twist()
+        command.linear.x, command.angular.z = .5, 20
+        controller.desired_twist_callback(command)
+        # No earlier PID cycle: expiry must start at command receipt.
+        self.ros_now += .3
+        output = controller.step()
+        self.assertEqual(output[:3], [1500, 1500, 1500])
+        command.linear.x, command.linear.z = 0, .1
+        controller.desired_twist_callback(command)  # No division by zero for vertical-only input.
+        controller.reset()
+        self.assertEqual(controller.desired_yaw_velocity, 0)
+        self.assertIsNone(controller.velocity_deadline)
+        self.assertIsNone(controller.yaw_deadline)
 
 
 if __name__ == '__main__':

@@ -109,9 +109,6 @@ class PID:
 
         self.yaw = copy.deepcopy(yaw)
 
-        self.trim_controller_cap_throttle = 5.0
-        self.trim_controller_thresh_throttle = 5.0
-
         self.throttle = copy.deepcopy(throttle)
 
         self._t = None
@@ -137,6 +134,15 @@ class PID:
         self.roll_low._i = self.roll_low.init_i
         self.pitch_low._i = self.pitch_low.init_i
 
+    def _planar_step(self, error, axis, trim, dt):
+        if abs(error) < self.trim_controller_thresh_plane:
+            trim._i += axis._i
+            axis._i = 0
+            return trim.step(error, dt)
+        cap = self.trim_controller_cap_plane
+        trim.step(max(-cap, min(cap, error)), dt)
+        return trim._i + axis.step(error, dt)
+
     def step(self, error, cmd_yaw_velocity=0, altitude_sample=None):
         """ Compute the control variables from the error using the step methods
         of each axis pid.
@@ -145,40 +151,8 @@ class PID:
         time_elapsed = 0.0 if self._t is None else max(0.0, now - self._t)
         self._t = now
 
-        # Compute roll command
-        ######################
-        # if the x velocity error is within the threshold
-        if abs(error.x) < self.trim_controller_thresh_plane:
-            # pass the high rate i term off to the low rate pid
-            self.roll_low._i += self.roll._i
-            self.roll._i = 0
-            # set the roll value to just the output of the low rate pid
-            cmd_r = self.roll_low.step(error.x, time_elapsed)
-        else:
-            if error.x > self.trim_controller_cap_plane:
-                self.roll_low.step(self.trim_controller_cap_plane, time_elapsed)
-            elif error.x < -self.trim_controller_cap_plane:
-                self.roll_low.step(-self.trim_controller_cap_plane, time_elapsed)
-            else:
-                self.roll_low.step(error.x, time_elapsed)
-
-            cmd_r = self.roll_low._i + self.roll.step(error.x, time_elapsed)
-
-        # Compute pitch command
-        #######################
-        if abs(error.y) < self.trim_controller_thresh_plane:
-            self.pitch_low._i += self.pitch._i
-            self.pitch._i = 0
-            cmd_p = self.pitch_low.step(error.y, time_elapsed)
-        else:
-            if error.y > self.trim_controller_cap_plane:
-                self.pitch_low.step(self.trim_controller_cap_plane, time_elapsed)
-            elif error.y < -self.trim_controller_cap_plane:
-                self.pitch_low.step(-self.trim_controller_cap_plane, time_elapsed)
-            else:
-                self.pitch_low.step(error.y, time_elapsed)
-
-            cmd_p = self.pitch_low._i + self.pitch.step(error.y, time_elapsed)
+        cmd_r = self._planar_step(error.x, self.roll, self.roll_low, time_elapsed)
+        cmd_p = self._planar_step(error.y, self.pitch, self.pitch_low, time_elapsed)
 
         # Compute yaw command
         cmd_y = 1500 + cmd_yaw_velocity
@@ -188,13 +162,7 @@ class PID:
         else:
             height_cm, sample_time = altitude_sample
             cmd_t = self.throttle.step(error.z, time_elapsed, height_cm, sample_time)
-        
-        #cmd_t = 1250
+
 
         rospy.loginfo_throttle(1, "Throttle output=%.3f error_cm=%.3f P=%.3f I=%.3f D=%.3f" % (cmd_t, error.z, self.throttle._p, self.throttle._i, self.throttle._d))
-        # Print statements for the low and high i components
-        # print "Roll  low, hi:", self.roll_low._i, self.roll._i
-        # print "Pitch low, hi:", self.pitch_low._i, self.pitch._i
-        # print "Throttle low, hi:", self.throttle_low._i, self.throttle._i
-        #print cmd_t
         return [cmd_r, cmd_p, cmd_y, cmd_t]

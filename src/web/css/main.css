@@ -70,13 +70,8 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .map-sources span::before { content: ""; display: inline-block; width: 20px; border-top: 2px solid currentColor; margin-right: var(--space-2); vertical-align: middle; }
 .map-sources .map-source-ukf::before { border-top-style: dashed; }
 .map-sources .map-source-camera::before { border-top-style: dotted; }
-.map-sources .map-source-uwb::before { border-top-style: double; border-top-width: 4px; }
 .localization-card { grid-column: 1 / -1; }
-.localization-card [data-field="localizationPosition"], .localization-card [data-field="fusedPosition"] { font-size: var(--type-value); line-height: 1.25; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; font-weight: 600; }
-.localization-card [data-field="localizationPosition"][data-state="stale"] { color: var(--muted); }
-.localization-card small { display: block; font-size: var(--type-label); margin-top: var(--space-1); color: var(--muted); }
-.localization-card small[data-state="ready"] { color: var(--success); }
-.localization-card small[data-state="stale"] { color: var(--error); }
+.localization-card [data-field="fusedPosition"] { font-size: var(--type-value); line-height: 1.25; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; font-weight: 600; }
 .connection-panel { display: flex; align-items: end; flex-wrap: wrap; gap: var(--space-4); width: fit-content; max-width: 100%; padding: var(--space-4); }
 .drone-select { border: 0; padding: 0; margin: 0; min-width: 0; }
 .drone-select legend { font-size: var(--type-label); font-weight: 600; margin-bottom: var(--space-2); }

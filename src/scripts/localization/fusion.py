@@ -54,6 +54,7 @@ class PlanarFusion(object):
         self.room = None
         self.covariance = np.eye(4)
         self.stamp = None
+        self.flow_stamp = None
         self.uwb_stamp = None
         self.history = deque()
 
@@ -68,28 +69,21 @@ class PlanarFusion(object):
         if self.yaw_offset is not None:
             self.velocity += rotate(self.velocity_correction, -self.yaw_offset)
 
-    def update_flow(self, velocity, imu_yaw, stamp):
-        if not all(np.isfinite(v) for v in tuple(velocity) + (imu_yaw, stamp)) or stamp <= 0:
+    def predict(self, stamp):
+        """Advance on the estimator clock, even when the camera is unavailable."""
+        if not np.isfinite(stamp) or stamp <= 0:
             return False
         if self.stamp is not None and stamp <= self.stamp:
             return False
         dt = stamp - self.stamp if self.stamp is not None else 0.0
-        measured = rotate(velocity, body_angle(imu_yaw))
-        if not dt or dt > self.max_gap:
-            # Do not integrate across a camera outage. Require a new UWB fix.
+        if dt > self.max_gap:
+            # A stopped estimator cannot reconstruct unobserved motion.
             self.reset_room()
             self.history.clear()
-            self.flow_velocity = measured
-            self._correct_velocity()
-        else:
-            previous = self.velocity.copy()
-            previous_flow = self.flow_velocity.copy()
-            alpha = 1.0 - math.exp(-dt / self.velocity_tau)
-            self.flow_velocity += alpha * (measured - self.flow_velocity)
-            self._correct_velocity()
-            displacement = 0.5 * (previous + self.velocity) * dt
+        elif dt:
+            displacement = self.velocity * dt
             self.odom += displacement
-            self.flow_odom += 0.5 * (previous_flow + self.flow_velocity) * dt
+            self.flow_odom += self.flow_velocity * dt
             if self.room is not None:
                 self.room += rotate(displacement, self.yaw_offset)
                 transition = np.eye(4)
@@ -105,6 +99,29 @@ class PlanarFusion(object):
             self.history.popleft()
         return True
 
+    def update_flow(self, velocity, imu_yaw, stamp):
+        if not all(np.isfinite(v) for v in tuple(velocity) + (imu_yaw, stamp)) or stamp <= 0:
+            return False
+        if self.flow_stamp is not None and stamp <= self.flow_stamp:
+            return False
+        # Sensor delivery may lag the prediction clock; never rewind it.
+        self.predict(stamp)
+        measured = rotate(velocity, body_angle(imu_yaw))
+        dt = stamp - self.flow_stamp if self.flow_stamp is not None else 0.0
+        previous = self.flow_velocity.copy()
+        if not dt or dt > self.max_gap:
+            self.flow_velocity = measured
+            if self.room is not None:
+                # Rebase after camera recovery without double-counting the motion
+                # that UWB has already learned while the camera was unavailable.
+                self.velocity_correction += rotate(previous - measured, self.yaw_offset)
+        else:
+            alpha = 1.0 - math.exp(-dt / self.velocity_tau)
+            self.flow_velocity += alpha * (measured - self.flow_velocity)
+        self.flow_stamp = stamp
+        self._correct_velocity()
+        return True
+
     def flow_odom_at(self, stamp):
         if not self.history or stamp < self.history[0][0] or stamp > self.history[-1][0]:
             return None
@@ -118,7 +135,7 @@ class PlanarFusion(object):
 
     def update_uwb(self, position, covariance, stamp):
         if self.yaw_offset is None or self.stamp is None:
-            return False, 'Room heading is not calibrated or camera is missing'
+            return False, 'Room heading or prediction is not initialized'
         if self.uwb_stamp is not None and stamp <= self.uwb_stamp:
             return False, 'Repeated or out-of-order UWB fix'
         position, covariance = np.asarray(position, dtype=float), np.asarray(covariance, dtype=float)
@@ -130,7 +147,7 @@ class PlanarFusion(object):
             return False, 'Invalid UWB position/covariance'
         acquisition = self.flow_odom_at(stamp)
         if acquisition is None:
-            return False, 'UWB timestamp is outside camera history'
+            return False, 'UWB timestamp is outside prediction history'
         # Advance delayed fixes using camera displacement. The observation matrix
         # accounts for the estimated velocity correction over the same delay.
         observation = position + rotate(self.flow_odom - acquisition, self.yaw_offset)
