@@ -188,22 +188,24 @@ class FusionLocalizationNode(object):
             height, height_reason = self.height.height(monotonic(), now)
             imu_ready = self.imu is not None and self.fresh(self.imu[0], now)
             flow_ready = self.fresh(self.filter.flow_stamp, now)
-            # Expiry is handled once here. Bad individual packets do not erase a
-            # good estimate, and camera silence does not invalidate fresh UWB.
-            if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
-                self.filter.reset_room()
-            if not flow_ready and self.filter.room is None:
-                self.filter.flow_velocity[:] = 0
-                self.filter.velocity[:] = 0
+            # Consume queued fixes before expiry so a boundary-time arrival does
+            # not discard the velocity correction needed for braking.
             if imu_ready:
                 for stamp, position, covariance in self.pending:
                     if not self.fresh(stamp, now) or self.layout is None:
                         continue
                     self.filter.predict(stamp)
                     _, self.reason = self.filter.update_uwb(position, covariance, stamp)
+            self.pending = []
+            # Only an accepted fix renews the estimate; rejected fixes still expire.
+            if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
+                self.filter.reset_room()
+            if not flow_ready and self.filter.room is None:
+                self.filter.flow_velocity[:] = 0
+                self.filter.velocity[:] = 0
+            if imu_ready:
                 # Prediction is a separate clock; no fabricated camera samples.
                 self.filter.predict(now)
-            self.pending = []
             uwb_ready = (self.filter.room is not None and self.fresh(self.filter.uwb_stamp, now))
             local_ready = bool(imu_ready and (flow_ready or uwb_ready))
             ready = bool(local_ready and self.layout is not None and uwb_ready and height)

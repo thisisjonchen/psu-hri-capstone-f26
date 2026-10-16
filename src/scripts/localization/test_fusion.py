@@ -364,6 +364,42 @@ class FusionNodeTest(unittest.TestCase):
         self.node.step()
         self.assertEqual(len(self.messages['pidrone/state']), count + 1)
 
+    def test_pending_uwb_at_timeout_preserves_learned_velocity(self):
+        start = self.ros_now
+        for i in range(1, 121):
+            self.ros_now = start + i / 60.0
+            self.now += 1 / 60.0
+            self.refresh()
+            self.flow()  # No useful camera motion feedback.
+            if i % 6 == 0:
+                self.uwb(x=1 + .1 * i / 60.0, y=2)
+            self.node.step()
+        previous = self.node.filter.velocity.copy()
+        self.assertGreater(np.linalg.norm(previous), .08)
+        for accepted in (True, False):
+            last_fix = self.ros_now
+            for i in range(1, 30):
+                self.ros_now = last_fix + i / 60.0
+                self.now += 1 / 60.0
+                self.refresh()
+                self.flow()
+                self.node.step()
+            # A measurement is already queued on the first tick past expiry.
+            self.now += .501 - (self.ros_now - last_fix)
+            self.ros_now = last_fix + .501
+            self.refresh()
+            self.flow()
+            x, y = self.node.filter.room
+            self.uwb(x=x if accepted else x + 20, y=y)
+            self.node.step()
+            self.assertEqual(self.messages['pidrone/localization/ready'][-1].data, accepted)
+            if accepted:
+                # Exactly matches prediction: no velocity change needed.
+                np.testing.assert_allclose(self.node.filter.velocity, previous, atol=1e-10)
+            else:
+                self.assertIsNone(self.node.filter.room)
+                np.testing.assert_array_equal(self.node.filter.velocity, (0, 0))
+
     def test_layout_change_and_clock_reset_invalidate_but_bad_flow_does_not(self):
         generation = self.node.generation
         self.ros_now += .1
