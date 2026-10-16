@@ -50,7 +50,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertFalse(self.fusion.messages['/pidrone/position_control'][-1].data)
         # Even wildly different flow-integrated coordinates cannot move the hold anchor.
         drone.right_m, drone.forward_m = 100, -200
-        for yaw, expected in [(0, (-.1, 0)), (math.pi / 2, (0, .1))]:
+        for yaw, expected in [(0, (-.2, 0)), (math.pi / 2, (0, .2))]:
             pose = copy.deepcopy(drone.fused_pose)
             pose.pose.pose.position.x = 2
             q = pose.pose.pose.orientation
@@ -59,7 +59,7 @@ class RoutineControlTest(unittest.TestCase):
             command = drone._xy_hold_command()
             self.assertAlmostEqual(command.linear.x, expected[0])
             self.assertAlmostEqual(command.linear.y, expected[1])
-            self.assertAlmostEqual(math.hypot(command.linear.x, command.linear.y), .1)
+            self.assertAlmostEqual(math.hypot(command.linear.x, command.linear.y), .2)
             self.assertEqual(command.linear.z, 0)
         drone.unlock_xy()
         self.assertIsNone(drone.xy_anchor)

@@ -317,7 +317,7 @@ class Drone(object):
         # axes in the room frame. Use the same conversion as room navigation.
         yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
         command.linear.x, command.linear.y = target_velocity(
-            self.xy_anchor, (p.x, p.y), yaw, 0.5, 0.10)
+            self.xy_anchor, (p.x, p.y), yaw, 0.5, 0.20)
         rospy.loginfo_throttle(1,
             'XY hold: room_error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
                 self.xy_anchor[0] - p.x, self.xy_anchor[1] - p.y,
