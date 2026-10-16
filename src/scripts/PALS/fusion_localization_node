@@ -9,9 +9,10 @@ import tf
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
 from nav_msgs.msg import Odometry
-from pidrone_pkg.msg import AnchorLayout, State
+from pidrone_pkg.msg import AnchorLayout, Mode, State
 from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Bool, UInt32
+from std_srvs.srv import Trigger, TriggerResponse
 
 from localization.fusion import PlanarFusion, body_angle, rotate
 from localization.position import PositionCombiner
@@ -47,6 +48,8 @@ class FusionLocalizationNode(object):
             floor_z=float(rospy.get_param('~floor_z', 0.0)),
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
         self.imu = None
+        self.mode = None
+        self.mode_at = None
         self.flow_valid = False
         self.pending = []
         self.layout = None
@@ -64,11 +67,14 @@ class FusionLocalizationNode(object):
         self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1)
         self.broadcaster = tf.TransformBroadcaster()
         self.subscribers = [
+            rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
             rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
             rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
+        self.heading_service = rospy.Service('pidrone/localization/calibrate_heading',
+                                             Trigger, self.calibrate_heading)
 
     def fresh(self, stamp, now, timeout=None):
         return stamp is not None and 0 <= now - stamp <= (self.timeout if timeout is None else timeout)
@@ -77,6 +83,30 @@ class FusionLocalizationNode(object):
         self.filter.reset_room()
         self.pending = []
         self.generation += 1
+
+    def mode_callback(self, msg):
+        with self.lock:
+            self.mode, self.mode_at = msg.mode, rospy.get_time()
+
+    def calibrate_heading(self, _request):
+        """Explicitly align the current nose direction with map +Y while disarmed."""
+        with self.lock:
+            now = rospy.get_time()
+            if self.mode != 'DISARMED' or not self.fresh(self.mode_at, now):
+                return TriggerResponse(success=False, message='Fresh DISARMED mode is required')
+            if self.imu is None or not self.fresh(self.imu[0], now):
+                return TriggerResponse(success=False, message='Fresh IMU orientation is required')
+            offset = math.pi / 2.0 - self.imu[1][2]
+            rospy.set_param('~room_yaw_offset', offset)
+            self.filter.yaw_offset = offset
+            # Preserve local odometry and ToF height; reacquire room XY from UWB
+            # before allowing room control with the new heading alignment.
+            self.invalidate_room()
+            self.reason = 'Heading calibrated; waiting for a new UWB fix'
+            self.ready_pub.publish(Bool(data=False))
+            self.generation_pub.publish(UInt32(data=self.generation))
+            return TriggerResponse(success=True, message=
+                'Heading aligned with map +Y; room_yaw_offset={:.9f} rad'.format(offset))
 
     def imu_callback(self, msg):
         with self.lock:

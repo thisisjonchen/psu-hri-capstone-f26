@@ -14,6 +14,7 @@ from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist, TwistStamp
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty
+from std_srvs.srv import Trigger
 from localization.fusion import target_velocity
 
 
@@ -268,6 +269,16 @@ class Drone(object):
                 return
             rospy.sleep(0.1)
         raise RuntimeError('Mode {} was not confirmed'.format(name))
+
+    def calibrate_heading(self):
+        """Align heading while disarmed, stationary and facing map +Y."""
+        service = '/pidrone/localization/calibrate_heading'
+        rospy.wait_for_service(service, timeout=5.0)
+        result = rospy.ServiceProxy(service, Trigger)()
+        if not result.success:
+            raise RuntimeError(result.message)
+        self.fused_pose = None
+        rospy.loginfo('%s', result.message)
 
     def lock_xy(self):
         """Hold the current fused room position through the velocity PID."""

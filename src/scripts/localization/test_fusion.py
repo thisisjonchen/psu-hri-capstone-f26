@@ -116,6 +116,17 @@ class FusionNodeTest(unittest.TestCase):
         self.ros.loginfo = self.ros.logwarn = mock.Mock()
         self.ros.loginfo_throttle = mock.Mock()
         self.ros.init_node = mock.Mock()
+        self.ros.set_param = self.params.__setitem__
+        self.services = {}
+        self.ros.Service = lambda name, kind, callback: self.services.setdefault('/' + name, callback)
+        self.ros.ServiceProxy = lambda name, kind: lambda: self.services[name](None)
+        self.ros.wait_for_service = mock.Mock()
+        srv = ModuleType('std_srvs.srv')
+        srv.Trigger, srv.TriggerResponse = object, NS
+        service_modules = mock.patch.dict(sys.modules, {
+            'std_srvs': ModuleType('std_srvs'), 'std_srvs.srv': srv})
+        service_modules.start()
+        self.addCleanup(service_modules.stop)
         tf = ModuleType('tf')
         tf.transformations = NS(euler_from_quaternion=euler, quaternion_from_euler=quaternion,
                                 quaternion_multiply=multiply)
@@ -143,10 +154,28 @@ class FusionNodeTest(unittest.TestCase):
         self.uwb()
         self.node.step()
 
-    def refresh(self):
+    def refresh(self, yaw=0):
         self.node.range_callback(NS(range=.5, min_range=.05, max_range=4, header=NS(stamp=Stamp(self.ros_now))))
-        self.node.imu_callback(NS(orientation=NS(x=0, y=0, z=0, w=1), angular_velocity=vector(),
+        q = quaternion(yaw=yaw)
+        self.node.imu_callback(NS(orientation=NS(x=q[0], y=q[1], z=q[2], w=q[3]), angular_velocity=vector(),
             orientation_covariance=[0]*9, header=NS(stamp=Stamp(self.ros_now))))
+
+    def test_heading_calibration_rejects_armed_or_stale_inputs_without_changes(self):
+        offset, generation = self.node.filter.yaw_offset, self.node.generation
+        room = self.node.filter.room.copy()
+        for mode, mode_at, imu in [
+                (None, None, self.node.imu),
+                ('ARMED', self.ros_now, self.node.imu),
+                ('FLYING', self.ros_now, self.node.imu),
+                ('DISARMED', self.ros_now - 1, self.node.imu),
+                ('DISARMED', self.ros_now, None),
+                ('DISARMED', self.ros_now, (self.ros_now - 1,) + self.node.imu[1:])]:
+            with self.subTest(mode=mode, mode_at=mode_at, imu=imu):
+                self.node.mode, self.node.mode_at, self.node.imu = mode, mode_at, imu
+                self.assertFalse(self.node.calibrate_heading(None).success)
+                self.assertEqual(self.node.filter.yaw_offset, offset)
+                self.assertEqual(self.node.generation, generation)
+                np.testing.assert_array_equal(self.node.filter.room, room)
 
     def flow(self, x=0, y=0, frame='pidrone_body'):
         msg = NS(header=NS(stamp=Stamp(self.ros_now), frame_id=frame), twist=twist())

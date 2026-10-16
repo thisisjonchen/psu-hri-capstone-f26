@@ -51,6 +51,7 @@
   <run_depend>rospy</run_depend>
   <run_depend>rosnode</run_depend>
   <run_depend>std_msgs</run_depend>
+  <run_depend>std_srvs</run_depend>
   <run_depend>sensor_msgs</run_depend>
   <run_depend>geometry_msgs</run_depend>
   <run_depend>nav_msgs</run_depend>

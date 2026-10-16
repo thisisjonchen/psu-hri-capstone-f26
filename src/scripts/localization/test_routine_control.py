@@ -65,6 +65,41 @@ class RoutineControlTest(unittest.TestCase):
         self.assertIsNone(drone.xy_anchor)
         self.assertEqual(drone._xy_hold_command().linear.x, 0)
 
+    def test_heading_calibration_reacquires_room_position_and_preserves_height_and_turns(self):
+        fusion, drone = self.fusion, self.drone
+        fusion.ros_now += .05
+        fusion.now += .05
+        fusion.refresh(yaw=math.radians(64))
+        fusion.node.mode_callback(NS(mode='DISARMED'))
+        old_odom = fusion.node.filter.odom.copy()
+        generation = fusion.node.generation
+        fusion.uwb()  # Calibration must discard fixes queued before alignment.
+
+        drone.calibrate_heading()
+        self.assertIsNone(drone.fused_pose)
+        self.assertIsNone(fusion.node.filter.room)
+        self.assertEqual(fusion.node.pending, [])
+        self.assertFalse(fusion.messages['pidrone/localization/ready'][-1].data)
+        self.assertAlmostEqual(fusion.node.filter.yaw_offset, math.radians(26))
+        self.assertEqual(fusion.params['~room_yaw_offset'], fusion.node.filter.yaw_offset)
+        self.assertEqual(fusion.node.generation, generation + 1)
+        self.assertEqual(tuple(fusion.node.filter.odom), tuple(old_odom))
+        fusion.flow()
+        fusion.uwb()
+        fusion.node.step()
+        pose = fusion.messages['pidrone/localization/fused'][-1].pose.pose
+        p, q = pose.position, pose.orientation
+        self.assertEqual((p.x, p.y, p.z), (1, 2, .5))
+        self.assertAlmostEqual(q.z, 0)
+        self.assertAlmostEqual(q.w, 1)
+        # A later physical turn still changes heading; calibration does not freeze yaw.
+        fusion.ros_now += .05
+        fusion.refresh(yaw=math.radians(74))
+        fusion.flow()
+        fusion.node.step()
+        q = fusion.messages['pidrone/localization/fused'][-1].pose.pose.orientation
+        self.assertAlmostEqual(q.z, math.sin(math.radians(5)))
+
     def test_altitude_update_keeps_fused_anchor_and_existing_pid_feedback(self):
         drone = self.drone
         drone.lock_xy()

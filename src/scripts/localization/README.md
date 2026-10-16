@@ -92,8 +92,16 @@ fused position, and the existing camera/ToF checks remain in effect.
 
 ### Room heading
 
-Start each drone facing map **+Y** (toward the top of the map) before starting the
-flight controller. The default offset is `pi/2`: at IMU yaw zero, forward is +Y,
+While disarmed, stationary and facing map **+Y**, call `drone.calibrate_heading()`
+after `drone.ready()` and before takeoff. It calls the
+`/pidrone/localization/calibrate_heading` (`std_srvs/Trigger`) service to set
+`room_yaw_offset = pi/2 - current_IMU_yaw`. Fusion rejects armed or stale inputs
+and reacquires room position from UWB; calibration returns without waiting for
+that fix. Existing routines do not call it automatically. This aligns heading
+for the session; it does not correct ongoing drift or change launch defaults.
+
+Without session calibration, the default offset `pi/2` assumes that IMU yaw zero
+means the nose faces map **+Y** (toward the top of the map): forward is +Y,
 back is -Y, left is -X and right is +X. The IMU tracks subsequent turns.
 Anchor calibration keeps this configured heading and requires a new live room fix.
 
