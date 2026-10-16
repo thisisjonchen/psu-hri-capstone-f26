@@ -88,9 +88,12 @@ class PlanarFusion(object):
                 self.room += rotate(displacement, self.yaw_offset)
                 transition = np.eye(4)
                 transition[:2, 2:] = np.eye(2) * dt
-                noise = self.velocity_correction_variance * np.block([
-                    [np.eye(2) * dt**3 / 3, np.eye(2) * dt**2 / 2],
-                    [np.eye(2) * dt**2 / 2, np.eye(2) * dt]])
+                # ROS Kinetic's NumPy predates np.block.
+                noise = np.zeros((4, 4))
+                noise[:2, :2] = np.eye(2) * dt**3 / 3
+                noise[:2, 2:] = noise[2:, :2] = np.eye(2) * dt**2 / 2
+                noise[2:, 2:] = np.eye(2) * dt
+                noise *= self.velocity_correction_variance
                 noise[:2, :2] += np.eye(2) * (self.velocity_variance * dt**2 + self.drift_variance * dt)
                 self.covariance = transition.dot(self.covariance).dot(transition.T) + noise
         self.stamp = stamp
