@@ -270,10 +270,14 @@ not obstacle avoidance, collision avoidance, or formation planning.
 
 ### Fusion behavior
 
-The small planar Kalman filter integrates camera velocity, with the existing
-rotational-flow compensation, and applies covariance-weighted UWB XY corrections.
-It does not fuse the legacy camera position estimate. Local odometry never jumps
-when UWB corrects the room estimate: corrections adjust the `map → odom` offset.
+The planar Kalman filter uses camera velocity, with the existing rotational-flow
+compensation, to predict motion. UWB XY fixes correct both room position and an
+estimated camera velocity error. This filtered velocity correction persists between
+UWB fixes, including when a uniform floor produces fresh camera readings near zero.
+The corrected body-frame XY velocity is published in `/pidrone/state` for the PID's
+motion feedback. Z still comes from ToF. The legacy camera position is not fused.
+Local odometry integrates corrected velocity without jumping at a UWB fix; direct
+room-position corrections adjust the `map → odom` offset.
 Delayed UWB observations are advanced using interpolated camera displacement from
 their own timestamp, and additional uncertainty covers that interval. Repeated or
 out-of-order observations cannot renew a fix. Innovation gates reject inconsistent
@@ -282,8 +286,11 @@ UWB observations. Camera gaps are not integrated as measured motion.
 Room output requires a recent accepted UWB fix and a fresh complete convex four-
 anchor report; it stops instead of publishing camera-only room positions during
 an outage. Reacquisition requires a new accepted UWB fix and an explicit new target.
-Local odometry can continue for hover during UWB loss; it is not presented as a valid
-room position. Parameters in `params/fusion_localization.yaml` are initial tuning
+Stale UWB or an invalid room reference clears the learned velocity correction.
+Local odometry then continues using camera velocity; holding position on a uniform
+floor during UWB loss is therefore not assured. Fresh camera, IMU and ToF streams
+are still required for local XY control. Parameters in
+`params/fusion_localization.yaml` are initial tuning
 values. Camera velocity scale, noise assumptions and heading accuracy require
 measurement. The optical-flow scale can be set with
 `/pidrone/localization/flow_scale` before starting the flow node.

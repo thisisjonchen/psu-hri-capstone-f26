@@ -1,5 +1,7 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
 velocity_stddev: 0.12
+# Process uncertainty for UWB's correction to camera velocity (m/s per sqrt(s)).
+velocity_correction_stddev: 0.3
 drift_stddev: 0.08
 velocity_tau: 0.08
 flow_timeout: 0.25

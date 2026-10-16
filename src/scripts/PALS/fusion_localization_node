@@ -24,6 +24,7 @@ class FusionLocalizationNode(object):
         self.filter = PlanarFusion(
             yaw_offset=None,
             velocity_stddev=float(rospy.get_param('~velocity_stddev', 0.12)),
+            velocity_correction_stddev=float(rospy.get_param('~velocity_correction_stddev', 0.3)),
             drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
             velocity_tau=float(rospy.get_param('~velocity_tau', 0.08)),
             max_gap=float(rospy.get_param('~flow_timeout', 0.25)),
@@ -175,7 +176,7 @@ class FusionLocalizationNode(object):
                 old = self.filter
                 old.stamp = None
                 old.history.clear()
-                old.velocity[:] = 0
+                old.flow_velocity[:] = 0
                 self.invalidate_room()
                 self.height.range = self.height.attitude = self.imu = None
                 self.flow_valid = self.layout_active = False
@@ -255,7 +256,15 @@ class FusionLocalizationNode(object):
         state.twist_with_covariance.twist.linear.x, state.twist_with_covariance.twist.linear.y = velocity
         omega = state.twist_with_covariance.twist.angular
         omega.x, omega.y, omega.z = -self.imu[2][1], self.imu[2][0], self.imu[2][2]
-        state.twist_with_covariance.covariance[0] = state.twist_with_covariance.covariance[7] = self.filter.velocity_variance
+        velocity_covariance = np.eye(2) * self.filter.velocity_variance
+        if ready:
+            rotation = np.column_stack((rotate((1, 0), -angle - self.filter.yaw_offset),
+                                        rotate((0, 1), -angle - self.filter.yaw_offset)))
+            velocity_covariance += rotation.dot(self.filter.covariance[2:, 2:]).dot(rotation.T)
+        state.twist_with_covariance.covariance[0] = velocity_covariance[0, 0]
+        state.twist_with_covariance.covariance[1] = velocity_covariance[0, 1]
+        state.twist_with_covariance.covariance[6] = velocity_covariance[1, 0]
+        state.twist_with_covariance.covariance[7] = velocity_covariance[1, 1]
         for index in (14, 21, 28, 35):
             state.twist_with_covariance.covariance[index] = 1e6
         self.state_pub.publish(state)
@@ -277,7 +286,7 @@ class FusionLocalizationNode(object):
         q = pose.pose.pose.orientation
         q.x, q.y, q.z, q.w = tf.transformations.quaternion_multiply(
             tf.transformations.quaternion_from_euler(0, 0, self.filter.yaw_offset), quaternion)
-        covariance = self.filter.covariance
+        covariance = self.filter.covariance[:2, :2]
         pose.pose.covariance[0], pose.pose.covariance[1] = covariance[0]
         pose.pose.covariance[6], pose.pose.covariance[7] = covariance[1]
         pose.pose.covariance[14] = 0.03 ** 2

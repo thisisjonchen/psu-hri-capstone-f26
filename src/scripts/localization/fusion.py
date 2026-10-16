@@ -2,7 +2,8 @@
 
 The existing controller uses x=right, y=forward. The FC's IMU yaw describes
 forward in a conventional x/y world, so the controller basis is yaw - pi/2.
-Camera velocity drives continuous odometry; UWB corrects only the room offset.
+Camera velocity drives prediction; UWB corrects room position and velocity.
+Local odometry integrates the corrected velocity without position jumps.
 """
 import math
 from collections import deque
@@ -29,8 +30,10 @@ def target_velocity(target, position, angle, gain, limit):
 class PlanarFusion(object):
     def __init__(self, yaw_offset=None, velocity_stddev=0.12,
                  drift_stddev=0.08, velocity_tau=0.08,
-                 max_gap=0.25, gate=9.21, max_innovation=1.0):
-        values = (velocity_stddev, drift_stddev, velocity_tau, max_gap, gate, max_innovation)
+                 max_gap=0.25, gate=9.21, max_innovation=1.0,
+                 velocity_correction_stddev=0.3):
+        values = (velocity_stddev, drift_stddev, velocity_tau, max_gap, gate,
+                  max_innovation, velocity_correction_stddev)
         if not all(np.isfinite(v) and v > 0 for v in values):
             raise ValueError('Fusion noise, timeouts and gates must be positive')
         if yaw_offset is not None and not np.isfinite(yaw_offset):
@@ -38,12 +41,18 @@ class PlanarFusion(object):
         self.yaw_offset = yaw_offset
         self.velocity_variance = velocity_stddev ** 2
         self.drift_variance = drift_stddev ** 2
+        self.velocity_correction_variance = velocity_correction_stddev ** 2
         self.velocity_tau, self.max_gap = velocity_tau, max_gap
         self.gate, self.max_innovation = gate, max_innovation
         self.odom = np.zeros(2)
+        self.flow_odom = np.zeros(2)
+        self.flow_velocity = np.zeros(2)
         self.velocity = np.zeros(2)
+        # Kalman state: room X/Y and additive room-frame camera velocity error.
+        # Keeping this correction separate prevents fresh zero flow from erasing it.
+        self.velocity_correction = np.zeros(2)
         self.room = None
-        self.covariance = np.eye(2)
+        self.covariance = np.eye(4)
         self.stamp = None
         self.uwb_stamp = None
         self.history = deque()
@@ -51,6 +60,13 @@ class PlanarFusion(object):
     def reset_room(self):
         self.room = None
         self.uwb_stamp = None
+        self.velocity_correction[:] = 0
+        self.velocity = self.flow_velocity.copy()
+
+    def _correct_velocity(self):
+        self.velocity = self.flow_velocity.copy()
+        if self.yaw_offset is not None:
+            self.velocity += rotate(self.velocity_correction, -self.yaw_offset)
 
     def update_flow(self, velocity, imu_yaw, stamp):
         if not all(np.isfinite(v) for v in tuple(velocity) + (imu_yaw, stamp)) or stamp <= 0:
@@ -63,23 +79,33 @@ class PlanarFusion(object):
             # Do not integrate across a camera outage. Require a new UWB fix.
             self.reset_room()
             self.history.clear()
-            self.velocity = measured
+            self.flow_velocity = measured
+            self._correct_velocity()
         else:
             previous = self.velocity.copy()
+            previous_flow = self.flow_velocity.copy()
             alpha = 1.0 - math.exp(-dt / self.velocity_tau)
-            self.velocity += alpha * (measured - self.velocity)
+            self.flow_velocity += alpha * (measured - self.flow_velocity)
+            self._correct_velocity()
             displacement = 0.5 * (previous + self.velocity) * dt
             self.odom += displacement
+            self.flow_odom += 0.5 * (previous_flow + self.flow_velocity) * dt
             if self.room is not None:
                 self.room += rotate(displacement, self.yaw_offset)
-                self.covariance += np.eye(2) * (self.velocity_variance * dt ** 2 + self.drift_variance * dt)
+                transition = np.eye(4)
+                transition[:2, 2:] = np.eye(2) * dt
+                noise = self.velocity_correction_variance * np.block([
+                    [np.eye(2) * dt**3 / 3, np.eye(2) * dt**2 / 2],
+                    [np.eye(2) * dt**2 / 2, np.eye(2) * dt]])
+                noise[:2, :2] += np.eye(2) * (self.velocity_variance * dt**2 + self.drift_variance * dt)
+                self.covariance = transition.dot(self.covariance).dot(transition.T) + noise
         self.stamp = stamp
-        self.history.append((stamp, self.odom.copy()))
+        self.history.append((stamp, self.flow_odom.copy()))
         while self.history and stamp - self.history[0][0] > 2.0:
             self.history.popleft()
         return True
 
-    def odom_at(self, stamp):
+    def flow_odom_at(self, stamp):
         if not self.history or stamp < self.history[0][0] or stamp > self.history[-1][0]:
             return None
         for i, (time, position) in enumerate(self.history):
@@ -102,25 +128,34 @@ class PlanarFusion(object):
                 or not np.allclose(covariance, covariance.T)
                 or np.min(np.linalg.eigvalsh(covariance)) <= 0):
             return False, 'Invalid UWB position/covariance'
-        acquisition = self.odom_at(stamp)
+        acquisition = self.flow_odom_at(stamp)
         if acquisition is None:
             return False, 'UWB timestamp is outside camera history'
-        # Bring delayed UWB to the latest camera time using measured displacement.
-        observation = position + rotate(self.odom - acquisition, self.yaw_offset)
+        # Advance delayed fixes using camera displacement. The observation matrix
+        # accounts for the estimated velocity correction over the same delay.
+        observation = position + rotate(self.flow_odom - acquisition, self.yaw_offset)
         age = self.stamp - stamp
         noise = covariance + np.eye(2) * (self.velocity_variance * age ** 2 + self.drift_variance * age)
         if self.room is None:
             self.room = observation
-            self.covariance = noise
+            self.covariance = np.zeros((4, 4))
+            self.covariance[2:, 2:] = np.eye(2) * self.velocity_correction_variance
+            self.covariance[:2, :2] = noise + age**2 * self.covariance[2:, 2:]
+            self.covariance[:2, 2:] = self.covariance[2:, :2] = age * self.covariance[2:, 2:]
         else:
-            innovation = observation - self.room
-            total = self.covariance + noise
+            observation_matrix = np.hstack((np.eye(2), -age * np.eye(2)))
+            innovation = observation - (self.room - age * self.velocity_correction)
+            cross = self.covariance.dot(observation_matrix.T)
+            total = observation_matrix.dot(cross) + noise
             if (np.linalg.norm(innovation) > self.max_innovation
                     or float(innovation.dot(np.linalg.solve(total, innovation))) > self.gate):
                 return False, 'UWB innovation rejected'
-            gain = np.linalg.solve(total.T, self.covariance.T).T
-            self.room += gain.dot(innovation)
-            remainder = np.eye(2) - gain
+            gain = np.linalg.solve(total.T, cross.T).T
+            correction = gain.dot(innovation)
+            self.room += correction[:2]
+            self.velocity_correction += correction[2:]
+            self._correct_velocity()
+            remainder = np.eye(4) - gain.dot(observation_matrix)
             self.covariance = remainder.dot(self.covariance).dot(remainder.T) + gain.dot(noise).dot(gain.T)
         self.uwb_stamp = stamp
         return True, 'OK'
