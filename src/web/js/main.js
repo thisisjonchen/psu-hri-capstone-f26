@@ -603,7 +603,7 @@ class DroneSession {
     }
     this.detectionReceivedAt = Date.now();
     this.setDetection(message.tag_ids.length ? message.tag_ids.map((id, i) =>
-      message.zones[i] + ' · Tag ' + id).join(', ') : 'No tag detected',
+      message.zones[i] + ' · Tag ' + id).join(', ') : 'No AprilTag detected',
       message.tag_ids.length ? 'detected' : 'none');
   }
 

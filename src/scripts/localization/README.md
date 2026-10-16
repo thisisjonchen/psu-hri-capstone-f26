@@ -85,6 +85,10 @@ comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
 ToF height control. Relative `move_forward`/`move_back` still use optical flow.
+During a fused-position update gap, an active hold keeps its room target and uses
+the PID's existing local position hold at the gap location. Fresh fusion resumes
+correction toward the original room target. The initial hold still needs a fresh
+fused position, and the existing camera/ToF checks remain in effect.
 
 ### Room heading
 

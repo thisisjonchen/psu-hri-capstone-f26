@@ -42,6 +42,7 @@ class Drone(object):
         self.xy_anchor = None
         self.xy_frame = None
         self.fused_pose = None
+        self.xy_local_hold = False
         self.voltage = None
         self.battery_at = 0
         self.low_voltage_at = None
@@ -277,6 +278,7 @@ class Drone(object):
         p = msg.pose.pose.position
         self.xy_anchor = (p.x, p.y)
         self.xy_frame = msg.header.frame_id
+        self.xy_local_hold = False
         # This routine supplies the position-to-velocity correction; do not add
         # the PID's separate local-position correction on top of it.
         self.position_mode_pub.publish(Bool(False))
@@ -285,6 +287,9 @@ class Drone(object):
     def unlock_xy(self):
         self.xy_anchor = None
         self.xy_frame = None
+        if self.xy_local_hold:
+            self.position_mode_pub.publish(Bool(False))
+            self.xy_local_hold = False
         self.twist_pub.publish(Twist())
 
     def _xy_hold_command(self):
@@ -292,9 +297,21 @@ class Drone(object):
         if self.xy_anchor is None:
             return command
         self._check_sensors()
+        msg = self.fused_pose
+        if (msg is None or
+                not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= 0.5):
+            # Capture the current local position once, not on every update.
+            # Keep the room target, but do not keep driving an old room error.
+            if not self.xy_local_hold:
+                self.position_mode_pub.publish(Bool(True))
+                self.xy_local_hold = True
+            return command
         msg = self._hold_pose()
         if msg.header.frame_id != self.xy_frame:
             raise RuntimeError('Fused position frame changed during X/Y hold')
+        if self.xy_local_hold:
+            self.position_mode_pub.publish(Bool(False))
+            self.xy_local_hold = False
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         # Fused orientation already expresses the controller's right/forward
         # axes in the room frame. Use the same conversion as room navigation.

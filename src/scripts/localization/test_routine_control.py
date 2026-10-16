@@ -76,9 +76,6 @@ class RoutineControlTest(unittest.TestCase):
         drone._fused_received(pose)
         command = drone._xy_hold_command()
         controller.desired_twist_callback(command)
-        controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.y, -.1)
-        self.assertFalse(controller.position_control)
         drone._set_altitude(.5)
         controller.desired_pose_callback(self.fusion.messages['/pidrone/desired/pose'][-1])
         controller.desired_twist_callback(drone._xy_hold_command())
@@ -88,16 +85,13 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(controller.current_position.z, .5)
         self.assertEqual(controller.pid_error.z, 0)
         self.assertAlmostEqual(controller.desired_velocity.y, -.1)
+        self.assertFalse(controller.position_control)
 
-    def test_hold_rejects_unusable_pose_without_adding_a_fallback(self):
+    def test_hold_rejects_invalid_or_different_frame_pose(self):
         self.drone.lock_xy()
-        for change in ('missing', 'stale', 'invalid', 'frame'):
+        for change in ('invalid', 'frame'):
             pose = copy.deepcopy(self.fusion.messages['pidrone/localization/fused'][-1])
-            if change == 'missing':
-                pose = None
-            elif change == 'stale':
-                pose.header.stamp = Stamp(self.fusion.ros_now - 1)
-            elif change == 'invalid':
+            if change == 'invalid':
                 pose.pose.pose.position.x = float('nan')
             else:
                 pose.header.frame_id = 'different_room'
@@ -105,6 +99,87 @@ class RoutineControlTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.drone._xy_hold_command()
             self.assertEqual(self.drone.xy_anchor, (1, 2))
+
+    def test_fusion_gap_holds_local_position_through_altitude_changes_then_resumes(self):
+        drone = self.drone
+        drone.lock_xy()
+        controller = self.fusion.controller()
+        modes = self.fusion.messages['/pidrone/position_control']
+        controller.position_control_callback(modes[-1])
+        # A nonzero old error must not become an indefinite movement command.
+        pose = copy.deepcopy(drone.fused_pose)
+        pose.pose.pose.position.x += .2
+        drone._fused_received(pose)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.y, -.1)
+        self.fusion.ros_now += 1
+        controller.local_ready_callback(NS(data=True))
+        command = drone._xy_hold_command()
+        self.assertEqual((command.linear.x, command.linear.y), (0, 0))
+        self.assertTrue(modes[-1].data)
+        controller.desired_twist_callback(command)
+        controller.position_control_callback(modes[-1])
+        held_xy = (controller.desired_position.x, controller.desired_position.y)
+        mode_count = len(modes)
+
+        # Local odometry remains live and detects drift during the UWB gap.
+        state = copy.deepcopy(self.fusion.messages['pidrone/state'][-1])
+        state.header.stamp = Stamp(self.fusion.ros_now)
+        state.pose_with_covariance.pose.position.x += .05
+        controller.current_state_callback(state)
+        for sample in (pose, None, pose):
+            drone._fused_received(sample)
+            command = drone._xy_hold_command()
+            controller.desired_twist_callback(command)
+            self.assertEqual(len(modes), mode_count, 'do not recapture the local hold point')
+        drone._set_altitude(.15)
+        controller.desired_pose_callback(self.fusion.messages['/pidrone/desired/pose'][-1])
+        controller.calc_error()
+        self.assertTrue(controller.position_control)
+        self.assertEqual((controller.desired_position.x, controller.desired_position.y), held_xy)
+        self.assertAlmostEqual(controller.desired_position.z, .15)
+        self.assertGreater(controller.position_error.planar_magnitude(), 0)
+        self.assertEqual(drone.xy_anchor, (1, 2))
+
+        pose.header.stamp = Stamp(self.fusion.ros_now)
+        drone._fused_received(pose)
+        command = drone._xy_hold_command()
+        controller.position_control_callback(modes[-1])
+        controller.desired_twist_callback(command)
+        self.assertAlmostEqual(command.linear.y, -.1)
+        self.assertFalse(controller.position_control)
+        self.assertEqual(drone.xy_anchor, (1, 2))
+
+    def test_initial_lock_requires_fresh_fusion(self):
+        drone = self.drone
+        self.fusion.ros_now += 1
+        with self.assertRaisesRegex(RuntimeError, 'missing/stale'):
+            drone.lock_xy()
+        drone._fused_received(None)
+        with self.assertRaisesRegex(RuntimeError, 'missing/stale'):
+            drone.lock_xy()
+
+    def test_landing_with_stale_fusion_keeps_hold_until_disarm(self):
+        drone = self.drone
+        drone.lock_xy()
+        drone.mode = 'FLYING'
+        drone.height, drone.ground_height = .25, .05
+        self.fusion.ros_now += 1
+        self.globals['Mode'] = lambda name: NS(mode=name)
+        drone.mode_pub.publish = drone._mode_received
+
+        def tick(seconds):
+            self.assertEqual(drone.xy_anchor, (1, 2))
+            self.fusion.now += seconds
+            self.fusion.ros_now += seconds
+            drone.mode_at = drone.height_at = drone.flow_at = self.fusion.now
+            drone.height = max(.05, drone.height - .02)
+
+        self.ros.sleep = tick
+        drone.land(hold_xy=True)
+        self.assertEqual(drone.mode, 'DISARMED')
+        self.assertIsNone(drone.xy_anchor)
+        self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
+                         [False, True, False])
 
     def test_startup_reuses_nodes_and_launches_only_missing_uwb_and_fusion(self):
         self.drone.mode = 'DISARMED'

@@ -240,7 +240,9 @@ class PIDController(object):
             self.desired_position.x = msg.position.x
             self.desired_position.y = msg.position.y
         # set the desired positions relative to the current position (except for z to make it more responsive)
-        else:
+        elif msg.position.x or msg.position.y or not self.position_control:
+            # A relative altitude-only command must not move an active X/Y hold
+            # point to the drone's latest (possibly drifting) position.
             offset = rotate((msg.position.x, msg.position.y), self.current_rpy.y) if self.use_fusion else (msg.position.x, msg.position.y)
             self.desired_position.x = self.current_position.x + offset[0]
             self.desired_position.y = self.current_position.y + offset[1]

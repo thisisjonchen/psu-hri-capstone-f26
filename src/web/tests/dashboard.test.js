@@ -789,7 +789,7 @@ test('ROS tag results stay isolated and include tag zero and multiple tags', () 
   assert.equal(a.field('detection').textContent, 'PICKUP · Tag 0, BORDER · Tag 2');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
   app.receive(a, topic, tags([], []));
-  assert.equal(a.field('detection').textContent, 'No tag detected');
+  assert.equal(a.field('detection').textContent, 'No AprilTag detected');
   assert.equal(a.field('detection').dataset.state, 'none');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
