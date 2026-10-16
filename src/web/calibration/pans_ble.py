@@ -205,7 +205,6 @@ class PansBLE:
                 clients.append(client)
             for index, (board, client) in enumerate(zip(positions, clients), 1):
                 self.progress('Saving and verifying %s (anchor %d of 4)...' % (board['id'], index))
-                await self.verify(client, board)
                 guard()
                 on_write()
                 await self.io(client.write_gatt_char(POSITION, encode_position(board), response=True))

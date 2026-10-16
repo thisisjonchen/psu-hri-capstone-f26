@@ -58,7 +58,7 @@ class AnchorCalibration {
       const response = await fetch('/api/calibration', {
         method: 'POST', cache: 'no-store',
         headers: { 'Content-Type': 'application/json', 'X-Calibration-Request': '1' },
-        body: JSON.stringify({ action: 'status', bridges: this.selection() }),
+        body: JSON.stringify({ action: 'status' }),
         signal: AbortSignal.timeout(2000)
       });
       if (!response.ok) throw new Error('Calibration server unavailable');
@@ -88,7 +88,7 @@ class AnchorCalibration {
           this.state.boards.forEach(board => {
             const option = document.createElement('option');
             option.value = board.ble;
-            option.textContent = anchorLabel(board.id) + (board.initiator ? ' · Initiator' : '') +
+            option.textContent = anchorLabel(board.id) +
               (!board.active ? ' · Unavailable' : '');
             option.disabled = !board.active;
             select.appendChild(option);
@@ -101,23 +101,6 @@ class AnchorCalibration {
 
   fresh() {
     return this.receivedAt !== null && Date.now() - this.receivedAt <= 1500;
-  }
-
-  selection() {
-    return Object.values(drones).filter(drone => drone.connected)
-      .map(drone => 'ws://' + drone.host + ':9090');
-  }
-
-  matchesSelection() {
-    return !!(this.state && Array.isArray(this.state.selection) &&
-      JSON.stringify(this.state.selection) === JSON.stringify(this.selection()));
-  }
-
-  grounded() {
-    const connected = Object.values(drones).filter(drone => drone.connected);
-    return this.fresh() && this.matchesSelection() && this.state.grounded === true && connected.every(drone =>
-      drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
-      Date.now() - drone.modeReceivedAt <= (this.state.flight_state_timeout_ms || 500));
   }
 
   busy() {
@@ -152,7 +135,7 @@ class AnchorCalibration {
     this.refresh();
     if (this.pendingAction || !this.fresh()) return;
     if (document.getElementById('calibration-' + action).disabled) return;
-    const request = { action, bridges: this.selection() };
+    const request = { action };
     if (action === 'measure') {
       request.anchors = this.corners().map(ble => ({ ble }));
     }
@@ -186,13 +169,13 @@ class AnchorCalibration {
 
   refresh() {
     this.updateBoards();
-    const fresh = this.fresh(), grounded = this.grounded(), busy = this.busy(), state = this.state;
+    const fresh = this.fresh(), busy = this.busy(), state = this.state;
     document.getElementById('calibration-scan').disabled = !fresh || busy || !!state.preview;
-    document.getElementById('calibration-measure').disabled = !grounded || busy || !!this.selectionIssue();
-    document.getElementById('calibration-apply').disabled = !grounded || busy || state.stage !== 'preview' || !state.token || !this.matchesPreview();
-    document.getElementById('calibration-cancel').disabled = !fresh || !!this.pendingAction || !(busy || state.reserved);
+    document.getElementById('calibration-measure').disabled = !fresh || busy || !!this.selectionIssue();
+    document.getElementById('calibration-apply').disabled = !fresh || busy || state.stage !== 'preview' || !state.token || !this.matchesPreview();
+    document.getElementById('calibration-cancel').disabled = !fresh || !!this.pendingAction || !(busy || state.preview || state.dirty);
     for (let i = 0; i < 4; i++) {
-      document.getElementById('calibration-anchor-' + i).disabled = !grounded || busy;
+      document.getElementById('calibration-anchor-' + i).disabled = !fresh || busy;
     }
     const labels = { scan: 'Scanning…', measure: 'Measuring…', apply: 'Saving…', cancel: 'Cancelling…' };
     const stages = { scanning: 'scan', measuring: 'measure', saving: 'apply' };
@@ -207,12 +190,9 @@ class AnchorCalibration {
       'Four corners assigned. Confirm their physical locations before measuring.';
     document.getElementById('calibration-status').textContent = this.requestError || (!fresh
       ? (this.awaitingStatus ? 'Checking calibration status...'
-        : state && state.reserved ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
+        : state && (state.preview || state.dirty) ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
         : 'Open the dashboard through the laptop server: http://localhost:8000.')
-      : !this.matchesSelection() ? 'Updating connected drones...'
-        : this.pendingAction ? labels[this.pendingAction]
-          : busy || grounded ? state.message
-            : state.message + ' Measurement/save: ' + (state.ground_reason || 'Waiting for drones to be ready.'));
+      : this.pendingAction ? labels[this.pendingAction] : state.message);
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
     const corners = ['Top Left', 'Top Right', 'Bottom Left', 'Bottom Right'];

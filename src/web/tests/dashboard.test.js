@@ -823,59 +823,35 @@ test('disconnect clears tags and old ROS callbacks cannot overwrite a new sessio
   assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
-test('unfinished calibration and server outages never block flight commands', () => {
-  const app = dashboard(), drone = app.connect('drone2');
-  app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
-  app.anchorCalibration.update({ stage: 'preview', message: 'Review', boards: [],
-    selection: ['ws://drone2.local:9090'], reserved: true, dirty: true, grounded: true, preview: { positions: [], rms: 0 }, token: 'reviewed' });
-  assert.equal(app.fleetMap.layoutUsable, true);
-  drone.command('arm');
-  assert.equal(last(drone, 'mode').mode, 'ARMED');
-  app.advanceTime(1600);
-  app.anchorCalibration.refresh();
-  assert.match(app.elements.get('calibration-status').textContent, /Reconnect the laptop/);
-  app.anchorCalibration.request('apply');
-  assert.equal(app.calibrationRequests.length, 0);
-  app.dispatch('arm', 'drone2');
-  assert.equal(last(drone, 'mode').mode, 'ARMED');
-  app.dispatch('takeoff', 'drone2');
-  assert.equal(last(drone, 'mode').mode, 'FLYING');
-  app.dispatch('forward', 'drone2');
-  assert.equal(last(drone, 'twist').linear.y, .1);
-  app.dispatch('disarm', 'drone2');
-  assert.equal(last(drone, 'mode').mode, 'DISARMED');
-});
-
-test('laptop calibration with only Drone 2 requires disarmed state and sends the reviewed layout through HTTP', async () => {
-  const app = dashboard(), service = app.connect('drone2');
+test('scan, assignment, measurement and saving work independently of drones', async () => {
+  const app = dashboard({ discover: false });
   const boards = ['4d12', '980C', '9781', 'CA83'].map((id, i) => ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
-  const bridges = ['ws://drone2.local:9090'];
-  const state = { stage: 'idle', message: 'Select anchors', boards, selection: bridges,
-    reserved: false, grounded: true, preview: null, token: null };
+  const state = { stage: 'idle', message: 'Select anchors', boards: [], busy: false, preview: null, token: null };
   const status = () => app.anchorCalibration.update({ ...state });
   status();
-  for (let i = 0; i < 4; i++) app.elements.get('calibration-anchor-' + i).value = boards[i].ble;
-  await app.anchorCalibration.request('measure');
-  assert.equal(app.calibrationRequests.length, 0);
-  app.receive(service, '/pidrone/mode', { mode: 'ARMED' });
-  await app.anchorCalibration.request('measure');
-  assert.equal(app.calibrationRequests.length, 0);
-  app.receive(service, '/pidrone/mode', { mode: 'DISARMED' });
-  status();
   await app.anchorCalibration.request('scan');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan', bridges });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'scan' });
+  state.boards = boards;
   status();
+  for (let i = 0; i < 4; i++) {
+    const select = app.elements.get('calibration-anchor-' + i);
+    assert.equal(select.disabled, false);
+    select.value = boards[i].ble;
+    select.listeners.input();
+  }
   await app.anchorCalibration.request('measure');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'measure', bridges, anchors: boards.map(b => ({ ble: b.ble })) });
-  Object.assign(state, { stage: 'preview', reserved: true, token: 'reviewed-token',
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'measure', anchors: boards.map(b => ({ ble: b.ble })) });
+  Object.assign(state, { stage: 'preview', token: 'reviewed-token',
     preview: { positions: boards.map((p, i) => ({ ...p, x: i, y: i, z: 0 })), rms: .01 } });
   status();
   app.elements.get('calibration-anchor-0').value = boards[1].ble;
   await app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 2);
   app.elements.get('calibration-anchor-0').value = boards[0].ble;
+  const drone = app.connect('drone2');
+  app.receive(drone, '/pidrone/mode', { mode: 'ARMED' });
   await app.anchorCalibration.request('apply');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', bridges, token: 'reviewed-token' });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'reviewed-token' });
   status();
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
@@ -889,17 +865,16 @@ test('room setup works without drones and reuses saved corners without a scan', 
   const boards = ['4D12', '980C', '9781', 'CA83'].map((id, i) =>
     ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0, pan: null }));
   const positions = boards.map((board, i) => ({ ...board, x: [0, 4, 4, 0][i], y: [0, 0, 3, 3][i], z: 0 }));
-  const state = { stage: 'idle', message: 'Ready', boards, grounded: true, reserved: false,
-    selection: [], layout: { revision: 'saved', frame: 'map', verified: false, positions } };
+  const state = { stage: 'idle', message: 'Ready', boards, busy: false,
+    layout: { revision: 'saved', frame: 'map', verified: false, positions } };
   app.anchorCalibration.update(state);
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('calibration-measure').disabled, false);
   assert.equal(app.fleetMap.layoutUsable, false);
   assert.match(app.elements.get('room-status').textContent, /Awaiting verification/);
   await app.anchorCalibration.request('measure');
-  assert.deepEqual(app.calibrationRequests, [{ action: 'measure', bridges: [], anchors: boards.map(b => ({ ble: b.ble })) }]);
+  assert.deepEqual(app.calibrationRequests, [{ action: 'measure', anchors: boards.map(b => ({ ble: b.ble })) }]);
   const drone = app.connect('drone2');
-  app.anchorCalibration.update({ ...state, selection: ['ws://drone2.local:9090'] });
   app.receive(drone, '/pidrone/localization/anchors', {
     ...anchorsAt(100, positions.map(p => [p.x, p.y, p.z])), anchor_ids: boards.map(b => b.id) });
   assert.equal(app.fleetMap.layoutUsable, true);
@@ -912,7 +887,7 @@ test('late status and request timeouts cannot unlock calibration or trigger dupl
   const app = dashboard({ calibrationFetch: request => request.action === 'status'
     ? new Promise(resolve => polls.push(resolve))
     : new Promise((resolve, reject) => { rejectAction = reject; }) });
-  const idle = { stage: 'idle', message: 'Ready', boards: [], grounded: true, reserved: false, selection: [] };
+  const idle = { stage: 'idle', message: 'Ready', boards: [], busy: false };
   app.anchorCalibration.update(idle);
   const action = app.anchorCalibration.request('scan');
   polls.shift()({ ok: true, json: async () => idle });
@@ -931,15 +906,4 @@ test('late status and request timeouts cannot unlock calibration or trigger dupl
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.elements.get('calibration-status').textContent, 'Checking Bluetooth anchor 0001...');
   assert.equal(app.elements.get('calibration-cancel').disabled, false);
-});
-
-test('scan works with disconnected recovery participants while measurement waits for readiness', async () => {
-  const app = dashboard();
-  app.anchorCalibration.update({ stage: 'idle', message: 'Scan for anchors.', boards: [],
-    reserved: true, dirty: false, grounded: false, selection: [],
-    ground_reason: 'Reconnect Drone 2 to finish calibration.' });
-  assert.equal(app.elements.get('calibration-scan').disabled, false);
-  assert.equal(app.elements.get('calibration-measure').disabled, true);
-  await app.anchorCalibration.request('scan');
-  assert.deepEqual(app.calibrationRequests, [{ action: 'scan', bridges: [] }]);
 });

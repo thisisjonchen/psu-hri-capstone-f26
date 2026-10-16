@@ -60,9 +60,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 raise ValueError('Calibration request must be between 1 and 4096 bytes')
             request = json.loads(self.rfile.read(length))
             if isinstance(request, dict) and request.get('action') == 'status':
-                if not isinstance(request.get('bridges'), list):
-                    raise ValueError('Select connected dashboard drones for calibration')
-                self.respond(200, self.server.calibration.status(request['bridges']))
+                self.respond(200, self.server.calibration.status())
                 return
             self.server.calibration.request(request)
         except (ValueError, TypeError) as error:
@@ -78,13 +76,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8000)
-    parser.add_argument('--bridges', nargs='+', default=['ws://drone1.local:9090', 'ws://drone2.local:9090'])
     parser.add_argument('--state', type=Path, default=ROOT.parents[1] / '.calibration-state.json')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     handler = partial(DashboardHandler, directory=str(ROOT))
     with ThreadingHTTPServer(('127.0.0.1', args.port), handler) as server:
-        server.calibration = AnchorCalibration(args.bridges, args.state)
+        server.calibration = AnchorCalibration(args.state)
         print('Dashboard: http://localhost:%d' % server.server_port, flush=True)
         try:
             server.serve_forever()

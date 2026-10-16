@@ -197,19 +197,9 @@ Bluetooth and allow your terminal Bluetooth access in macOS System Settings when
 prompted. Close other BLE connections to the boards and keep all four within laptop
 Bluetooth range, with UWB line of sight between anchors.
 
-The server connects to `ws://drone1.local:9090` and `ws://drone2.local:9090`.
-For different addresses, pass `--bridges ws://ADDRESS:9090 [ws://SECOND:9090]`.
-Use the same addresses for the dashboard's drone connections. Room setup does not
-require a drone connection: keep drones powered off, or connect and disarm them.
-For connected drones, start rosbridge, flight controller, tag reader and fusion.
-Scanning only reads Bluetooth metadata and does not require drone telemetry, even
-when recovery retains a disconnected participant. Measuring and saving still
-require each participating drone to report a fresh disarmed state.
-Calibration tolerates up to two seconds between flight-state and ownership updates;
-disconnects, armed states or longer gaps stop calibration. Calibration never blocks
-flight commands. Flight/navigation freshness limits are unchanged.
-Participants remain required until calibration finishes or is cancelled; a newly
-connected drone must join through another measurement.
+Scanning, corner assignment, measurement and saving use only the laptop's Bluetooth.
+They do not connect to drones or check flight state or calibration ownership.
+Flight and navigation still use each drone's live telemetry.
 
 1. Open **Calibrate anchors → Scan anchors** for new anchors. The server remembers
    discovered boards and the saved layout; returning to the same setup can go
@@ -222,9 +212,7 @@ connected drone must join through another measurement.
    The dashboard does not configure roles or PAN IDs.
    An empty BLE PAN value stays unknown; calibration still requires valid live
    distances between all six anchor pairs and rejects conflicting reported PAN IDs.
-2. Press **Measure layout** and review the shape and dimensions. Connected flight
-   controllers must acknowledge calibration ownership before ranging begins.
-   No drone acknowledgment is needed when setting up the room offline.
+2. Press **Measure layout** and review the shape and dimensions.
 3. Press **Save layout** within two minutes. Calibration completes after BLE readback
    confirms the saved coordinates on all four anchors. The server keeps four BLE
    connections open through preflight and save, then disconnects them. If the laptop
@@ -232,14 +220,13 @@ connected drone must join through another measurement.
 4. Keep the startup heading aligned with map +Y. A new live room fix is required
    after calibration; ToF remains the Z source.
 
-**Cancel** releases calibration ownership even after a save was interrupted.
+**Cancel** stops the current operation and clears its preview.
 An incomplete save retains a layout warning and recovery information in
 `.calibration-state.json`, without blocking commands. Use **Measure layout → Save
 layout** to verify a new layout. Incomplete saves suppress the stored map fallback.
 
 The HTTP request/status endpoint is `/api/calibration` on the local server.
-Drone ownership still uses `/pidrone/localization/calibration_owner/request` and
-`/status`; ownership prevents competing calibrations and does not restrict flight.
+The recovery file lock prevents two laptop servers from using the same state file.
 Update and restart the flight controller and fusion node on each drone when removing
 the old flight lock. The controller clears the old lock parameter and publishes
 `false` on `/pidrone/localization/calibration_locked` for compatibility.

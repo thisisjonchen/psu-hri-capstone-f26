@@ -1,11 +1,9 @@
-"""Calibration geometry, BLE workflow and grounded-write interlocks (no hardware)."""
-import ast
+"""Calibration geometry, BLE workflow and save recovery (no hardware)."""
 import asyncio
 import copy
 import json
 import math
 import os
-import socket
 import sys
 from pathlib import Path
 import struct
@@ -21,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
-from calibration.calibration_guard import BridgeGuard, OWNER, connect_bridge
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
 from tempfile import TemporaryDirectory
@@ -57,28 +54,6 @@ class CalibrationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'info=.*mode=.*PAN='):
                 decode_info(data, flags, network)
 
-    def test_bridge_retries_resolved_addresses_after_timeout_and_closes_failed_handshake(self):
-        url = 'ws://drone2.local:9090'
-        addresses = [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('fe80::2', 9090, 0, 1)),
-                     (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('192.0.2.2', 9090))]
-        first, second = mock.Mock(), mock.Mock()
-        first.connect.side_effect = TimeoutError('timed out')
-        websocket = mock.Mock()
-        with mock.patch('socket.getaddrinfo', return_value=addresses), \
-                mock.patch('socket.socket', side_effect=[first, second]):
-            bridge = connect_bridge(websocket, url)
-        first.close.assert_called_once()
-        second.connect.assert_called_once_with(addresses[1][4])
-        second.settimeout.assert_called_once_with(5)
-        websocket.create_connection.assert_called_once_with(url, socket=second, timeout=5)
-        bridge.settimeout.assert_called_once_with(1)
-        second.close.assert_not_called()
-        websocket.create_connection.side_effect = RuntimeError('handshake failed')
-        with mock.patch('socket.create_connection', return_value=second):
-            with self.assertRaisesRegex(RuntimeError, 'handshake failed'):
-                connect_bridge(websocket, url)
-        second.close.assert_called_once()
-
     def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}
         layout = solve_layout(BOARDS, rows)
@@ -97,130 +72,12 @@ class CalibrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             solve_layout([BOARDS[i] for i in (0, 1, 3, 2)], ROWS)
 
-    def test_competing_coordinator_cannot_claim_both_or_release_another_owner(self):
-        guard = BridgeGuard.__new__(BridgeGuard)
-        guard.lock, guard.stop_event = threading.RLock(), threading.Event()
-        guard.owner, guard.claimed = 'ours', False
-        guard.participants = None
-        guard.peers = [dict(socket=object(), mode='DISARMED', mode_at=10,
-                            owner='', owner_at=10, request='', url='ws://drone%d:9090' % i) for i in range(2)]
-        guard.select([p['url'] for p in guard.peers])
-        controllers = ['', 'other']
-        def send(peer, message):
-            i = guard.peers.index(peer)
-            request = json.loads(message['msg']['data'])
-            if request['action'] == 'acquire' and not controllers[i]:
-                controllers[i] = request['owner']
-            elif request['action'] == 'release' and controllers[i] == request['owner']:
-                controllers[i] = ''
-            guard.receive(peer, OWNER, {'data': json.dumps(dict(owner=controllers[i], request=request['request']))})
-        guard.send = send
-        with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
-            with self.assertRaisesRegex(ValueError, 'another coordinator'):
-                guard.reserve(True)
-            self.assertEqual(controllers, ['', 'other'])
-            self.assertFalse(guard.claimed)
-            controllers[1] = ''
-            guard.receive(guard.peers[1], OWNER, {'data': json.dumps(dict(owner='', request=''))})
-            guard.reserve(True)
-            guard.check(owned=True)
-            self.assertEqual(controllers, ['ours', 'ours'])
-            def stale(peer, message):
-                guard.receive(peer, OWNER, {'data': json.dumps(dict(owner='ours', request='old-request'))})
-            guard.send = stale
-            with mock.patch.object(guard.stop_event, 'wait', return_value=True):
-                with self.assertRaisesRegex(ValueError, 'not acknowledged'):
-                    guard.reserve(False)
-                # Failed re-acquisition must not release an existing coordinator reservation.
-                with self.assertRaises(ValueError):
-                    guard.reserve(True)
-            self.assertTrue(guard.claimed)
-            self.assertEqual(controllers, ['ours', 'ours'])
-            guard.send = send
-            for peer in guard.peers: peer['owner_at'] = 10
-            guard.reserve(False)
-            self.assertEqual(controllers, ['', ''])
-
-    def test_dashboard_selects_one_or_both_without_dropping_calibration_participants(self):
-        guard = BridgeGuard.__new__(BridgeGuard)
-        guard.lock, guard.stop_event = threading.RLock(), threading.Event()
-        guard.owner, guard.claimed, guard.participants = 'ours', False, None
-        guard.peers = [dict(url='ws://drone1:9090', socket=object(), mode=None, mode_at=0,
-                            owner=None, owner_at=0),
-                       dict(url='ws://drone2:9090', socket=object(), mode='DISARMED', mode_at=10,
-                            owner='', owner_at=10)]
-        active = guard.peers[1]
-        guard.select([active['url']])
-        for invalid in (None, 'ws://drone2:9090', ['ws://other:9090'], [active['url']] * 2, [{}]):
-            with self.assertRaises(ValueError): guard.select(invalid)
-        def send(peer, message):
-            self.assertIs(peer, active)  # An unselected bridge is reachable, but has no flight state.
-            request = json.loads(message['msg']['data'])
-            claimed = request['action'] == 'acquire'
-            guard.receive(peer, OWNER, {'data': json.dumps(dict(owner='ours' if claimed else '', request=request['request']))})
-        guard.send = send
-        with mock.patch('calibration.calibration_guard.monotonic', return_value=10):
-            guard.check()
-            guard.reserve(True)
-            active.update(mode_at=8.5, owner_at=8.5)
-            guard.check(owned=True)  # Tolerate brief gaps; reject genuinely stale controller state.
-            for field in ('mode_at', 'owner_at'):
-                active[field] = 7.9
-                with self.assertRaises(ValueError): guard.check(owned=True)
-                active[field] = 10
-            active['mode'] = 'ARMED'
-            with self.assertRaises(ValueError): guard.check(owned=True)
-            active['mode'] = 'DISARMED'
-            self.assertEqual(guard.participants, [active['url']])
-            guard.select([])
-            guard.check(owned=True)  # Dashboard changes retain the current calibration participant.
-            guard.select([active['url']])
-            active['socket'] = None
-            with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check(True)
-            with self.assertRaises(ValueError): guard.reserve(False)
-            self.assertEqual(guard.participants, [active['url']])
-            active['socket'] = object()
-            newcomer = guard.peers[0]
-            guard.select([p['url'] for p in guard.peers])
-            with self.assertRaisesRegex(ValueError, 'No flight state received'): guard.check(True)
-            newcomer.update(socket=object(), mode='DISARMED', mode_at=10, owner='', owner_at=10)
-            with self.assertRaisesRegex(ValueError, 'Every participating'): guard.check(True)
-            guard.reserve(False)  # Cancel releases the original participant without touching the newcomer.
-            self.assertIsNone(guard.participants)
-            guard.prepare()
-            self.assertEqual(set(guard.participants), {p['url'] for p in guard.peers})
-            guard.select([active['url']])
-            newcomer['socket'] = None
-            guard.prepare()  # A retry also retains the disconnected participant.
-            with self.assertRaisesRegex(ValueError, 'cannot connect'): guard.check()
-            guard.participants = None
-            guard.select([])
-            guard.reserve(True)  # Offline room setup needs no drone acknowledgment.
-            guard.check(owned=True)
-            self.assertFalse(guard.claimed)
-            guard.select([active['url']])
-            with self.assertRaisesRegex(ValueError, 'acknowledge calibration ownership'):
-                guard.check(owned=True)
-
 
 class CoordinatorTest(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.state_path = os.path.join(self.directory.name, 'calibration.json')
-        self.guard = mock.Mock()
-        self.guard.owner = 'laptop'
-        self.guard.claimed = False
-        self.guard.participants = None
-        self.guard.selection = []
-        def prepare():
-            self.guard.participants = ['ws://drone2.local:9090']
-            return list(self.guard.participants)
-        self.guard.prepare.side_effect = prepare
-        def reserve(value):
-            self.guard.claimed = value
-            if not value: self.guard.participants = None
-        self.guard.reserve.side_effect = reserve
         self.ble = mock.Mock()
         self.ble.scan_warnings = []
         def call(action, guard, *args):
@@ -230,7 +87,6 @@ class CoordinatorTest(unittest.TestCase):
         self.ble.call.side_effect = call
         self.ble.scan.return_value, self.ble.measure.return_value = BOARDS, ROWS
         self.patch = mock.patch.multiple('calibration.calibration_service',
-                                         BridgeGuard=mock.Mock(return_value=self.guard),
                                          PansBLE=mock.Mock(return_value=self.ble))
         self.patch.start(); self.addCleanup(self.patch.stop)
         self.node = self.create()
@@ -238,62 +94,40 @@ class CoordinatorTest(unittest.TestCase):
         self.measure = {'action': 'measure', 'anchors': [dict(ble=b['ble']) for b in BOARDS]}
 
     def create(self):
-        node = AnchorCalibration(['ws://drone2.local:9090'], self.state_path)
+        node = AnchorCalibration(self.state_path)
         self.addCleanup(lambda: None if node.stopping.is_set() else node.close())
         return node
 
-    @property
-    def params(self):
-        with open(self.state_path) as stream:
-            return {'~' + key: value for key, value in json.load(stream).items()}
-
     def test_offline_room_setup_saves_without_drone_acknowledgments(self):
-        guard = BridgeGuard.__new__(BridgeGuard)
-        guard.lock, guard.stop_event = threading.RLock(), threading.Event()
-        guard.owner, guard.claimed, guard.participants = 'laptop', False, None
-        guard.peers, guard.selection = [], []
-        self.node.guard = guard
+        self.node.close()
+        with open(self.state_path, 'w') as stream:
+            json.dump({'participants': ['ws://disconnected.local:9090'], 'owner': 'old-owner',
+                       'boards': BOARDS}, stream)
+        self.node = self.create()
         self.node.run(self.measure)
         self.assertEqual(self.node.state['stage'], 'preview')
         self.ble.save.side_effect = lambda positions, check, on_write: (check(), on_write())
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.assertEqual(self.node.state['stage'], 'complete')
         self.assertTrue(self.node.state['layout']['verified'])
-        self.assertFalse(self.node.reserved)
+        layout = self.node.status()['layout']
+        self.node.close()
+        self.node = self.create()
+        self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
+        self.assertEqual(self.node.boards, BOARDS)
 
-    def test_scan_preserves_recovery_without_requiring_drone_telemetry(self):
-        self.node.reserved = self.guard.claimed = True
-        self.guard.participants = ['ws://drone2.local:9090']
-        self.guard.check.side_effect = ValueError('Drone 2 disconnected')
-        self.ble.scan.side_effect = lambda check: (check(), BOARDS)[1]
-        for dirty in (False, True):
-            self.node.dirty = dirty
-            self.node.run({'action': 'scan'})
-            self.assertEqual(self.node.state['stage'], 'idle')
-            self.assertEqual(self.node.boards, BOARDS)
-            self.assertTrue(self.node.reserved)
-            self.assertEqual(self.node.dirty, dirty)
-            self.assertEqual(self.guard.participants, ['ws://drone2.local:9090'])
-        self.guard.reserve.assert_not_called()
-        self.node.run(self.measure)
-        self.assertEqual(self.node.state['stage'], 'error')
-        self.ble.measure.assert_not_called()
-
-    def test_cancel_releases_reservation_but_retains_unverified_save_for_recovery(self):
+    def test_cancel_retains_unverified_save_for_recovery(self):
         self.node.run(self.measure)
         def fail(positions, guard, on_write):
             on_write(); raise ValueError('BLE write outcome unknown')
         self.ble.save.side_effect = fail
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.node.run(dict(action='cancel'))
-        self.assertFalse(self.node.reserved)
         self.assertTrue(self.node.dirty)
         self.assertIsNone(self.node.status()['layout'])
         self.assertIn('unverified', self.node.state['message'])
         with self.assertRaisesRegex(ValueError, 'Another laptop calibration service'):
             CalibrationJournal(self.state_path)
-        self.assertEqual(self.params['~participants'], [])
-        self.assertEqual(self.guard.reserve.call_args_list, [mock.call(True), mock.call(False)])
         self.node.close()
         self.node = self.create()
         self.assertTrue(self.node.dirty)
@@ -303,80 +137,16 @@ class CoordinatorTest(unittest.TestCase):
         self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.assertFalse(self.node.dirty)
-        self.assertEqual(self.params['~participants'], [])
-        self.guard.reserve.assert_called_with(False)
 
-    def test_cancel_during_ranging_releases_only_unwritten_layout(self):
-        def cancel(boards, guard):
-            self.node.cancel.set(); guard()
-        self.ble.measure.side_effect = cancel
-        self.node.run(self.measure)
-        self.assertFalse(self.node.reserved)
-        self.guard.reserve.assert_called_with(False)
-        self.ble.save.assert_not_called()
-        # Recovered ownership without a preview must expose Cancel after a process restart.
-        self.guard.claimed = True
-        self.node.tick()
-        self.assertTrue(self.node.reserved)
-        self.node.run({'action': 'cancel'})
-        self.assertFalse(self.node.reserved)
-
-    def test_expired_preview_cannot_write_and_ble_readback_completes_save(self):
+    def test_expired_preview_cannot_write(self):
         self.node.run(self.measure)
         self.node.preview_at -= 121
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.ble.save.assert_not_called()
-        self.assertFalse(self.node.reserved)
-        self.node.run(self.measure)
-        self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
-        self.guard.reserve.reset_mock()
-        self.node.run(dict(action='apply', token=self.node.state['token']))
-        self.assertFalse(self.node.dirty)
-        self.assertFalse(self.node.reserved)
-        self.assertEqual(self.node.state['stage'], 'complete')
-        self.guard.reserve.assert_called_once_with(False)
-        layout = self.node.status()['layout']
-        self.assertEqual(layout['frame'], 'map')
-        self.assertEqual(layout['positions'], solve_layout(BOARDS, ROWS)['positions'])
-        self.node.close()
-        self.node = self.create()
-        self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
-        self.assertEqual(self.node.boards, BOARDS)
-
-
-class FlightOwnershipTest(unittest.TestCase):
-    def test_calibration_ownership_never_blocks_flight_modes(self):
-        source = str(Path(__file__).resolve().parents[2] / 'scripts' / 'flight_controller_node.py')
-        with open(source) as stream: tree = ast.parse(stream.read())
-        kind = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == 'FlightController')
-        kind.body = [m for m in kind.body if isinstance(m, ast.FunctionDef) and m.name in
-                     ('desired_mode_callback', 'calibration_owner_callback', 'update_command')]
-        namespace = dict(rospy=NS(set_param=mock.Mock()), json=json,
-                         cmds=NS(disarm_cmd=[0], arm_cmd=[1], idle_cmd=[2]))
-        exec(compile(ast.Module(body=[kind], type_ignores=[]), source, 'exec'), namespace)
-        fc = namespace['FlightController']()
-        fc.mode_lock, fc.curr_mode, fc.prev_mode = threading.RLock(), 'DISARMED', 'DISARMED'
-        fc.calibration_owner, fc.calibration_request = '', ''
-        def claim(owner, action):
-            fc.calibration_owner_callback(NS(data=json.dumps(dict(owner=owner, action=action, request=owner + action))))
-        claim('first', 'acquire')
-        claim('second', 'acquire')
-        claim('second', 'release')
-        self.assertEqual(fc.calibration_owner, 'first')
-        for mode in ('ARMED', 'FLYING', 'DISARMED'):
-            fc.desired_mode_callback(NS(mode=mode))
-            self.assertEqual(fc.curr_mode, mode)
-        self.assertEqual(fc.command, [0])
-        fc.desired_mode_callback(NS(mode='ARMED'))
-        claim('first', 'release')  # Cancellation can release ownership even after arming.
-        self.assertEqual(fc.calibration_owner, '')
-        claim('second', 'acquire')  # Starting calibration still requires DISARMED.
-        self.assertEqual(fc.calibration_owner, '')
 
 
 class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
     async def test_scan_accepts_service_data_only_and_skips_tags_and_failed_connections(self):
-        import sys
         from calibration.anchor_calibration import INFO, MODE, PAN
         ble = PansBLE.__new__(PansBLE)
         ble.progress = mock.Mock()
@@ -471,7 +241,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
 
 
 class LaptopCancellationTest(unittest.TestCase):
-    def test_lost_disarmed_state_cancels_inflight_ble_and_waits_for_cleanup(self):
+    def test_cancellation_stops_inflight_ble_and_waits_for_cleanup(self):
         ble = PansBLE()
         self.addCleanup(ble.close)
         started, cleaned = threading.Event(), threading.Event()
@@ -483,7 +253,7 @@ class LaptopCancellationTest(unittest.TestCase):
                 cleaned.set()
         ble._scan = stalled
         def guard():
-            if started.is_set(): raise ValueError('Disarmed state lost')
-        with self.assertRaisesRegex(ValueError, 'Disarmed state lost'):
+            if started.is_set(): raise ValueError('Calibration cancelled')
+        with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
             ble.call('scan', guard)
         self.assertTrue(cleaned.is_set())
