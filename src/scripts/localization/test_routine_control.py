@@ -51,7 +51,7 @@ class RoutineControlTest(unittest.TestCase):
         # Even wildly different flow-integrated coordinates cannot move the hold anchor.
         drone.right_m, drone.forward_m = 100, -200
         drone.flow_at, drone.flow_valid = 0, False
-        for yaw, expected in [(0, (-.2, 0)), (math.pi / 2, (0, .2))]:
+        for yaw, expected in [(0, (-.1, 0)), (math.pi / 2, (0, .1))]:
             pose = copy.deepcopy(drone.fused_pose)
             pose.pose.pose.position.x = 2
             q = pose.pose.pose.orientation
@@ -60,7 +60,7 @@ class RoutineControlTest(unittest.TestCase):
             command = drone._xy_hold_command()
             self.assertAlmostEqual(command.linear.x, expected[0])
             self.assertAlmostEqual(command.linear.y, expected[1])
-            self.assertAlmostEqual(math.hypot(command.linear.x, command.linear.y), .2)
+            self.assertAlmostEqual(math.hypot(command.linear.x, command.linear.y), .1)
             self.assertEqual(command.linear.z, 0)
         drone.unlock_xy()
         self.assertIsNone(drone.xy_anchor)
@@ -85,7 +85,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(controller.desired_position.z, .5)
         self.assertEqual(controller.current_position.z, .5)
         self.assertEqual(controller.pid_error.z, 0)
-        self.assertAlmostEqual(controller.desired_velocity.x, -.1)
+        self.assertAlmostEqual(controller.desired_velocity.x, -.05)
         self.assertFalse(controller.position_control)
 
     def test_hold_rejects_invalid_or_different_frame_pose(self):
@@ -111,7 +111,7 @@ class RoutineControlTest(unittest.TestCase):
         pose = copy.deepcopy(drone.fused_pose)
         pose.pose.pose.position.x += .2
         drone._fused_received(pose)
-        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.1)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.05)
         self.fusion.ros_now += 1
         controller.local_ready_callback(NS(data=True))
         command = drone._xy_hold_command()
@@ -143,7 +143,7 @@ class RoutineControlTest(unittest.TestCase):
         command = drone._xy_hold_command()
         controller.position_control_callback(modes[-1])
         controller.desired_twist_callback(command)
-        self.assertAlmostEqual(command.linear.x, -.1)
+        self.assertAlmostEqual(command.linear.x, -.05)
         self.assertFalse(controller.position_control)
         self.assertEqual(drone.xy_anchor, (1, 2))
 

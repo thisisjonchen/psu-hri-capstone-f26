@@ -452,7 +452,7 @@ class FusionNodeTest(unittest.TestCase):
                     pose=NS(position=NS(x=2, y=2, z=999)))
         controller.room_target_callback(target)
         controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        self.assertAlmostEqual(controller.desired_velocity.x, .1)
         self.assertAlmostEqual(controller.desired_velocity.y, 0, places=10)
         self.assertEqual(controller.desired_position.z, .25)
         controller.room_ready_callback(NS(data=False))
@@ -462,11 +462,11 @@ class FusionNodeTest(unittest.TestCase):
         self.assertTrue(controller.position_control)
         controller.room_ready_callback(NS(data=True))
         controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        self.assertAlmostEqual(controller.desired_velocity.x, .1)
         # Missing readiness heartbeats do not defeat a still-current estimate.
         self.ros_now += .35
         controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.x, .2)
+        self.assertAlmostEqual(controller.desired_velocity.x, .1)
         self.ros_now += .2
         controller.calc_error()
         self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
@@ -526,6 +526,47 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(controller.desired_yaw_velocity, 0)
         self.assertIsNone(controller.velocity_deadline)
         self.assertIsNone(controller.yaw_deadline)
+
+    def test_xy_brakes_after_sustained_velocity_correction(self):
+        controller = self.controller()
+        request = twist()
+        request.linear.x, request.linear.y = .1, -.1
+        current = controller.current_state
+        velocity = current.twist_with_covariance.twist.linear
+        velocity.x = velocity.y = 0
+        # Eight seconds of correction must not overpower subsequent braking.
+        for _ in range(481):
+            current.header.stamp = Stamp(self.ros_now)
+            controller.current_state_callback(current)
+            controller.desired_twist_callback(request)
+            controller.step()
+            self.ros_now += 1 / 60.0
+        velocity.x, velocity.y = .2, -.2
+        current.header.stamp = Stamp(self.ros_now)
+        controller.current_state_callback(current)
+        controller.desired_twist_callback(request)
+        output = controller.step()
+        self.assertLess(output[0], 1500, 'brake when rightward velocity exceeds target')
+        self.assertGreater(output[1], 1500, 'brake when backward velocity exceeds target')
+
+    def test_xy_trim_cannot_exceed_output_limits_or_wind_up_at_saturation(self):
+        pid = self.controller().pid
+        pid.roll_low._i, pid.pitch_low._i = 40., -40.
+        error = NS(x=100., y=-100., z=0.)
+        for _ in range(61):
+            output = pid.step(error)
+            self.assertLessEqual(output[0], pid.roll.control_range[1])
+            self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
+            self.ros_now += 1 / 60.0
+        self.assertEqual(pid.roll_low._i, 40.)
+        self.assertEqual(pid.pitch_low._i, -40.)
+        # Existing trim can unwind even while the combined output is saturated.
+        pid.roll_low._i, pid.pitch_low._i = 150., -150.
+        output = pid.step(NS(x=-1., y=1., z=0.))
+        self.assertLessEqual(output[0], pid.roll.control_range[1])
+        self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
+        self.assertLess(pid.roll_low._i, 150.)
+        self.assertGreater(pid.pitch_low._i, -150.)
 
 
 if __name__ == '__main__':

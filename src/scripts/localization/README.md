@@ -258,9 +258,18 @@ It requires FLYING mode, fresh fused localization and matching live anchors. The
 controller independently checks freshness, frame, flight mode and that XY is inside
 the anchor outline. It retains the current commanded height; the target's Z is not
 an altitude command. The position error is rotated into body axes and converted to
-a proportional velocity command, capped at 0.2 m/s by default. This is a requested
-speed limit, not a guarantee of actual speed. Tune `/pidrone/localization/target_gain`
-and `/pidrone/localization/target_speed_limit` against the physical drone.
+a proportional velocity command with gain 0.25, capped at 0.10 m/s by default.
+The shared Drone class uses the same settings for routine X/Y hold. These are
+requested velocities, not guarantees of actual speed. Tune
+`/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`
+against the physical drone; both are read when the controller classes start.
+
+The XY velocity controller uses proportional feedback plus a slow trim integrator.
+There is no separate fast XY integral: accumulated correction must not delay braking
+when measured velocity exceeds the request. Roll/pitch commands are limited to
+1400–1600 after adding trim, and trim stops accumulating further into saturation.
+The velocity request limit is not a measured-speed governor; incorrect or delayed
+velocity and heading feedback can still cause overshoot.
 
 **Stop target** sends `/pidrone/desired/cancel_room_target` (`std_msgs/Empty`) and
 returns to local hold when local feedback remains available. Manual motion,

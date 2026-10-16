@@ -32,6 +32,11 @@ class Drone(object):
     def __init__(self):
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
+        self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.25))
+        self.xy_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
+        if any(math.isnan(v) or math.isinf(v) or v <= 0
+               for v in (self.xy_hold_gain, self.xy_speed_limit)):
+            raise ValueError('Room target gain and speed must be positive')
         self.mode = None
         self.mode_at = 0
         self.height = None
@@ -304,7 +309,7 @@ class Drone(object):
         # axes in the room frame. Use the same conversion as room navigation.
         yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
         command.linear.x, command.linear.y = target_velocity(
-            self.xy_anchor, (p.x, p.y), yaw, 0.5, 0.20)
+            self.xy_anchor, (p.x, p.y), yaw, self.xy_hold_gain, self.xy_speed_limit)
         rospy.loginfo_throttle(1,
             'XY hold: room_error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
                 self.xy_anchor[0] - p.x, self.xy_anchor[1] - p.y,
