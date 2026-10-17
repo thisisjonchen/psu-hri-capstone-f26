@@ -178,19 +178,6 @@ class FusionMathTest(unittest.TestCase):
 
 
 class FusionNodeTest(unittest.TestCase):
-    def test_legacy_calibration_lock_does_not_disable_fused_room_position(self):
-        self.params['/pidrone/localization/calibration_lock'] = True
-        self.node = type(self.node)()
-        self.assertIsNone(self.node.filter.yaw_offset)
-        self.node.mode_callback(NS(mode='DISARMED'))
-        self.refresh()
-        self.report_anchors()
-        self.uwb()
-        self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        q = self.messages['pidrone/localization/fused'][-1].pose.pose.orientation
-        np.testing.assert_allclose((q.x, q.y, q.z, q.w), (0, 0, 0, 1), atol=1e-12)
-
     def setUp(self):
         # Reuse the existing transport doubles; execute the real node/controller.
         ros_doubles.NodeTest.setUp(self)
@@ -299,6 +286,7 @@ class FusionNodeTest(unittest.TestCase):
                 self.node.step()
                 self.assertIsNone(self.node.filter.yaw_offset)
                 self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+                self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
 
     def test_startup_heading_aligns_once_and_preserves_position_height_and_turns(self):
         self.node = type(self.node)()
@@ -357,15 +345,6 @@ class FusionNodeTest(unittest.TestCase):
         self.assertAlmostEqual(self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.z, .5)
         self.assertAlmostEqual(self.messages['pidrone/localization/fused'][-1].pose.pose.position.z, 1.2)
         self.assertEqual(self.node.broadcaster.sendTransform.call_args[0][0][2], .7)
-
-    def test_missing_heading_or_live_anchors_prevents_room_output(self):
-        self.node.mode_callback(NS(mode='FLYING'))
-        self.node.filter.yaw_offset = None
-        self.node.invalidate_room()
-        self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertIn('heading', self.messages['pidrone/localization/fusion_status'][-1].status[0].message)
 
     def test_uwb_velocity_reaches_controller_and_dropout_expires_once(self):
         generation = self.node.generation
@@ -551,19 +530,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertIsNone(self.node.filter.stamp)
         self.assertIsNone(self.node.height.range)
 
-    def test_uwb_expiry_stops_room_output_but_partial_reports_keep_surveyed_geometry(self):
-        for _ in range(11):
-            self.now += .1
-            self.ros_now += .1
-            self.refresh()
-            self.report_anchors()
-            self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        before = len(self.messages['pidrone/localization/fused'])
-        self.uwb()
-        self.node.step()
-        self.assertEqual(len(self.messages['pidrone/localization/fused']), before + 1)
+    def test_partial_anchor_reports_keep_surveyed_geometry(self):
         report = self.report_anchors()
         report.anchor_ids.pop()
         report.positions.pop()

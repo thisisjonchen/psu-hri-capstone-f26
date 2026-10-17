@@ -101,11 +101,9 @@ def test_sigma_plot():
 def test_scaled_weights():
     for n in range(1, 5):
         for alpha in np.linspace(0.99, 1.01, 100):
-            for beta in range(2):
-                for kappa in range(2):
-                    sp = MerweScaledSigmaPoints(n, alpha, 0, 3-n)
-                    assert abs(sum(sp.Wm) - 1) < 1.e-1
-                    assert abs(sum(sp.Wc) - 1) < 1.e-1
+            sp = MerweScaledSigmaPoints(n, alpha, 0, 3-n)
+            assert abs(sum(sp.Wm) - 1) < 1.e-1
+            assert abs(sum(sp.Wc) - 1) < 1.e-1
 
 
 def test_julier_sigma_points_1D():

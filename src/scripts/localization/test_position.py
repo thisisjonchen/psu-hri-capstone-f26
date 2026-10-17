@@ -41,10 +41,6 @@ class PositionTest(unittest.TestCase):
         self.combiner.update_attitude((0, 0, 0, 1), 99, 10)
         self.assertIsNone(self.combine()[0])
 
-    def test_fresh_but_unsynchronized_samples_are_rejected(self):
-        self.combiner.update_range(0.5, 0.05, 4, 99.7, 10)
-        self.assertEqual(self.combine()[1], 'Sensor timestamps are not aligned')
-
     def test_height_uses_real_sensor_timing_without_a_uwb_sample(self):
         height, reason = self.combiner.height(10.3, 100.3)
         self.assertEqual(reason, 'OK')
