@@ -94,9 +94,9 @@ ToF height control. Relative `move_forward`/`move_back` use the UWB room pose to
 body-axis displacement is converted once into a fixed room target.
 During UWB gaps, fusion continues predicting for up to 1 second since the last
 accepted fix, while IMU and altitude freshness requirements remain unchanged.
-Active holds keep their target and velocity feedback. After the usual 0.5-second
-freshness window, XY trim is retained but stops accumulating until fresh fixes
-resume. The original fix timestamp is preserved throughout prediction. If the
+Active holds keep their target and velocity feedback. If XY trim is enabled,
+it is retained but stops accumulating after the usual 0.5-second freshness window
+until fresh fixes resume. The original fix timestamp is preserved throughout prediction. If the
 1-second window expires, an active hold keeps its room target and requests zero XY
 velocity until fusion resumes. It does not switch into a different position-hold
 mode or capture a new target. Initial hold and relative horizontal moves require
@@ -276,13 +276,11 @@ requested velocities, not guarantees of actual speed. Tune
 against the physical drone; both are read when the controller classes start.
 
 The XY velocity controller uses proportional feedback (0.5 RC units per cm/s of
-velocity error) plus a trim integrator limited to +/-5 RC units. Trim receives
-at most 5 cm/s of error, so it changes by at most 2.5 RC units per second; this
-allows sustained drift compensation to build during a short hover.
-There is no separate fast XY integral. Trim unwinds when the velocity error
-reverses, though it can initially outweigh reverse errors below 0.10 m/s.
-Roll/pitch commands are limited to
-1470–1530 after adding trim, and trim stops accumulating further into saturation.
+velocity error). XY trim integration is temporarily disabled (Ki=0) to isolate
+circling from accumulated correction; there is no fast XY integral either.
+This may leave steady drift that previously required trim compensation.
+The optional trim path retains its +/-5 RC limit, input cap and gap-freezing
+behavior for later tuning. Roll/pitch commands remain limited to 1470–1530.
 The velocity request limit is not a measured-speed governor; incorrect or delayed
 velocity and heading feedback can still cause overshoot.
 

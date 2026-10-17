@@ -82,12 +82,12 @@ class PID:
 
     def __init__(self,
 
-                 # Velocity feedback provides braking; only the slow trim integrates.
+                 # Use proportional XY feedback while diagnosing oscillation; trim is disabled.
                  roll=PIDaxis(0.5, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
-                 roll_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
+                 roll_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
 
                  pitch=PIDaxis(0.5, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
-                 pitch_low=PIDaxis(0.0, 0.5, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
+                 pitch_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
 
                  yaw=PIDaxis(0.0, 0.0, 0.0),
 
@@ -99,8 +99,8 @@ class PID:
                                   d_range=(-40, 40), midpoint=1510, smoothing=False)
                  ):
 
-        # PID errors arrive in cm/s: 5 cm/s is 0.05 m/s. With Ki=0.5 this
-        # permits at most 2.5 RC units/s, bounded by the trim's +/-5 range.
+        # Retain the input cap for trim if re-enabled; its default Ki is zero.
+        # PID errors arrive in cm/s: 5 cm/s is 0.05 m/s.
         self.trim_controller_cap_plane = 5.0
 
         self.roll = copy.deepcopy(roll)

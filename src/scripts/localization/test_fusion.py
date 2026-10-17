@@ -306,6 +306,8 @@ class FusionNodeTest(unittest.TestCase):
         self.assertGreater(covariance[0], self.node.filter.velocity_variance)
         self.assertEqual(self.node.generation, generation)
         previous_velocity = self.node.filter.velocity.copy()
+        # Exercise gap freezing even though trim is disabled in the default tuning.
+        controller.pid.roll_low.ki = controller.pid.pitch_low.ki = .5
         controller.pid.roll_low._i, controller.pid.pitch_low._i = -2., -3.
         for i in range(42):  # A 0.70 s UWB gap still permits braking.
             self.now += 1/60.0
@@ -591,22 +593,23 @@ class FusionNodeTest(unittest.TestCase):
             controller.desired_twist_callback(request)
             controller.step()
             self.ros_now += 1 / 60.0
-        # Sustained error should learn useful trim within a short hover, but the
-        # trim must stay small enough for velocity feedback to reverse the output.
-        self.assertAlmostEqual(controller.pid.roll_low._i, 5)
-        self.assertAlmostEqual(controller.pid.pitch_low._i, -5)
-        velocity.x, velocity.y = .2, -.2
+        # Default tuning must not accumulate trim, even after sustained error.
+        self.assertEqual(controller.pid.roll_low._i, 0)
+        self.assertEqual(controller.pid.pitch_low._i, 0)
+        velocity.x, velocity.y = .12, -.12
         current.header.stamp = Stamp(self.ros_now)
         controller.current_state_callback(current)
         controller.desired_twist_callback(request)
         output = controller.step()
         self.assertLess(output[0], 1500, 'brake when rightward velocity exceeds target')
         self.assertGreater(output[1], 1500, 'brake when backward velocity exceeds target')
-        self.assertGreater(output[0], 1480, 'a 0.10 m/s error needs a modest correction')
-        self.assertLess(output[1], 1520, 'a 0.10 m/s error needs a modest correction')
+        self.assertGreater(output[0], 1495, 'a 0.02 m/s error needs a modest correction')
+        self.assertLess(output[1], 1505, 'a 0.02 m/s error needs a modest correction')
 
     def test_xy_trim_cannot_exceed_output_limits_or_wind_up_at_saturation(self):
         pid = self.controller().pid
+        # Preserve coverage of optional trim behavior if it is re-enabled later.
+        pid.roll_low.ki = pid.pitch_low.ki = .5
         pid.roll_low._i, pid.pitch_low._i = 5., -5.
         error = NS(x=100., y=-100., z=0.)
         for _ in range(61):
