@@ -577,6 +577,12 @@ class FusionNodeTest(unittest.TestCase):
             controller.desired_twist_callback(request)
             controller.step()
             self.ros_now += 1 / 60.0
+        # Sustained error should learn useful trim within a short hover, but the
+        # trim must stay small enough for velocity feedback to reverse the output.
+        self.assertGreater(controller.pid.roll_low._i, 5)
+        self.assertLessEqual(controller.pid.roll_low._i, 10)
+        self.assertLess(controller.pid.pitch_low._i, -5)
+        self.assertGreaterEqual(controller.pid.pitch_low._i, -10)
         velocity.x, velocity.y = .2, -.2
         current.header.stamp = Stamp(self.ros_now)
         controller.current_state_callback(current)

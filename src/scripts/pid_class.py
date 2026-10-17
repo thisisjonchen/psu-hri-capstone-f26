@@ -99,7 +99,9 @@ class PID:
                                   d_range=(-40, 40), midpoint=1510, smoothing=False)
                  ):
 
-        self.trim_controller_cap_plane = 0.05
+        # PID errors arrive in cm/s: 5 cm/s is 0.05 m/s. With Ki=0.5 this
+        # permits at most 2.5 RC units/s, bounded by the trim's +/-10 range.
+        self.trim_controller_cap_plane = 5.0
 
         self.roll = copy.deepcopy(roll)
         self.roll_low = copy.deepcopy(roll_low)
