@@ -1,7 +1,7 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
 # Experimental: sensor replay has not established a flight benefit.
-# Bias is measured at startup; leave prediction off pending validation.
-use_imu_acceleration: false
+# Enabled for a controlled flight trial; startup bias is required before use.
+use_imu_acceleration: true
 # Fraction of bias-corrected horizontal acceleration used when prediction is enabled.
 imu_acceleration_gain: 0.25
 velocity_stddev: 0.12

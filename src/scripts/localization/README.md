@@ -321,8 +321,8 @@ Local odometry integrates velocity without jumping at a UWB fix; direct
 room-position corrections adjust the `map → odom` offset.
 
 The experimental `use_imu_acceleration` option adds bias-corrected acceleration
-prediction while flying. It is disabled in the launch configuration;
-sensor replay has not established a flight benefit.
+prediction while flying. The launch configuration enables it for a controlled
+flight trial; sensor replay has not established a flight benefit.
 When enabled, `imu_acceleration_gain` scales the room-frame XY
 acceleration before integration. Its default is 0.25 and its allowed range is
 greater than zero through one. This scales the acceleration input; it does not
