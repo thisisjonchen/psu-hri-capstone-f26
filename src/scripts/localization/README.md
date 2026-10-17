@@ -68,6 +68,11 @@ rates), the reader closes the port and ROS retries setup automatically. It does 
 toggle `lec` during a pause or terminate other programs holding the port.
 `lec` reports ranging-anchor hardware IDs, configured coordinates and distances,
 plus the tag's position. AN0/AN1 slot numbers are not used as anchor identities.
+New position fixes require all four anchors in the same `lec` record and must
+meet the quality limit. Partial anchor reports remain available for diagnostics,
+but neither they nor standalone `POS` records replace the last accepted fix or
+refresh its timestamp. The existing freshness timeout still applies; position
+updates resume when a qualifying four-anchor fix arrives.
 Serial failures invalidate the last fix immediately and trigger periodic reconnects.
 For a missing/stale fix, inspect `/pidrone/localization/status`. It includes the
 reader startup stage, actual update intervals/readback, serial/parsed-record ages,

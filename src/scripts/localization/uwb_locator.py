@@ -274,6 +274,7 @@ class UWBLocator(object):
                     line, pending = pending.split(b'\n', 1)
                     text = line.decode('ascii', 'ignore')
                     self.last_line = text.strip()[-512:]
+                    complete = False
                     if 'DIST,' in text:
                         record = parse_lec_line(text)
                         if record is None:
@@ -281,6 +282,7 @@ class UWBLocator(object):
                             continue
                         self._latest_anchors, p = record
                         self.last_record_at = self._latest_anchors.timestamp
+                        complete = len(self._latest_anchors.anchors) == 4
                     else:
                         p = parse_lep_line(text)
                         if p is not None:
@@ -289,7 +291,9 @@ class UWBLocator(object):
                             self.rejected_records += 1
                     if p is not None:
                         self.last_quality = p.quality
-                    if p is not None and p.quality >= self.min_quality:
+                    # Require four anchors in this record, not a cached layout.
+                    # Partial records leave the accepted fix and its age unchanged.
+                    if complete and p is not None and p.quality >= self.min_quality:
                         self._latest = p
                 if len(pending) > 2048:
                     pending = b''
