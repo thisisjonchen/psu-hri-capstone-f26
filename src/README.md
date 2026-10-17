@@ -30,7 +30,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    ```
 7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
 8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
-10. To control it, clone this repo on your laptop/base station and start the [dashboard server](#camera--uwb--tof-localization), then open `http://localhost:8000`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
+10. To control it, clone this repo on your laptop/base station and start the [dashboard server](#uwb--tof-localization), then open `http://localhost:8000`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
@@ -99,7 +99,7 @@ source devel/setup.bash
 ```
 2. Done!
 
-## Camera + UWB + ToF Localization
+## UWB + ToF Localization
 
 Start each drone facing the top of the map (+Y) before starting its flight controller.
 

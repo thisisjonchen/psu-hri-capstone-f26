@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Camera/UWB room localization with continuous local controller odometry."""
+"""UWB/ToF room localization with continuous local controller odometry."""
 import math
 import threading
 
@@ -7,7 +7,7 @@ import numpy as np
 import rospy
 import tf
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import AnchorLayout, Mode, State
 from sensor_msgs.msg import Imu, Range
@@ -25,9 +25,8 @@ class FusionLocalizationNode(object):
         self.filter = PlanarFusion(
             yaw_offset=None,
             velocity_stddev=float(rospy.get_param('~velocity_stddev', 0.12)),
-            velocity_correction_stddev=float(rospy.get_param('~velocity_correction_stddev', 0.3)),
+            acceleration_stddev=float(rospy.get_param('~acceleration_stddev', 0.3)),
             drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
-            velocity_tau=float(rospy.get_param('~velocity_tau', 0.08)),
             max_gap=self.timeout,
             gate=float(rospy.get_param('~innovation_gate', 9.21)),
             max_innovation=float(rospy.get_param('~max_innovation', 1.0)))
@@ -35,12 +34,9 @@ class FusionLocalizationNode(object):
         self.frame = rospy.get_param('~frame_id', 'map')
         self.odom_frame = rospy.get_param('~odom_frame', 'odom')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
-        self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
-        self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
         if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
                 or not all((self.frame, self.odom_frame, self.body_frame))
-                or not all(np.isfinite(v) and v > 0 for v in (self.timeout, self.skew, self.flow_limit))
-                or not np.isfinite(self.angular_comp)):
+                or not all(np.isfinite(v) and v > 0 for v in (self.timeout, self.skew))):
             raise ValueError('Invalid fusion frames, limits or timeouts')
         self.height = PositionCombiner(
             stale_after=self.timeout, max_skew=self.skew,
@@ -67,7 +63,6 @@ class FusionLocalizationNode(object):
             rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
             rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
-            rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
         rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
@@ -105,23 +100,6 @@ class FusionLocalizationNode(object):
         with self.lock:
             self.height.update_range(msg.range, msg.min_range, msg.max_range,
                                      msg.header.stamp.to_sec(), monotonic())
-
-    def flow_callback(self, msg):
-        with self.lock:
-            now = rospy.get_time()
-            stamp = msg.header.stamp.to_sec()
-            sample, _ = self.height.height(monotonic(), now)
-            if (sample is None or self.imu is None or not self.fresh(self.imu[0], now)
-                    or not self.fresh(stamp, now)
-                    or max(stamp, self.imu[0], sample.stamp) - min(stamp, self.imu[0], sample.stamp) > self.skew
-                    or msg.header.frame_id != self.body_frame):
-                return
-            velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
-            # Preserve the existing EMA's rotational-flow compensation.
-            velocity -= self.imu[2][:2] * (sample.z - self.height.floor_z) * self.angular_comp
-            if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
-                return
-            self.filter.update_flow(velocity, self.imu[1][2], stamp)
 
     def uwb_callback(self, msg):
         with self.lock:
@@ -169,9 +147,8 @@ class FusionLocalizationNode(object):
             now = rospy.get_time()
             if self.last_time is not None and now < self.last_time:
                 old = self.filter
-                old.stamp = old.flow_stamp = None
+                old.stamp = None
                 old.history.clear()
-                old.flow_velocity[:] = 0
                 self.invalidate_room()
                 self.height.range = self.height.attitude = self.imu = None
                 self.layout = None
@@ -187,9 +164,8 @@ class FusionLocalizationNode(object):
                               self.filter.yaw_offset)
             height, height_reason = self.height.height(monotonic(), now)
             imu_ready = self.imu is not None and self.fresh(self.imu[0], now)
-            flow_ready = self.fresh(self.filter.flow_stamp, now)
             # Consume queued fixes before expiry so a boundary-time arrival does
-            # not discard the velocity correction needed for braking.
+            # not discard the velocity estimate needed for braking.
             if imu_ready:
                 for stamp, position, covariance in self.pending:
                     if not self.fresh(stamp, now) or self.layout is None:
@@ -200,19 +176,15 @@ class FusionLocalizationNode(object):
             # Only an accepted fix renews the estimate; rejected fixes still expire.
             if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
                 self.filter.reset_room()
-            if not flow_ready and self.filter.room is None:
-                self.filter.flow_velocity[:] = 0
-                self.filter.velocity[:] = 0
             if imu_ready:
-                # Prediction is a separate clock; no fabricated camera samples.
+                # Predict between the slower UWB updates.
                 self.filter.predict(now)
             uwb_ready = (self.filter.room is not None and self.fresh(self.filter.uwb_stamp, now))
-            local_ready = bool(imu_ready and (flow_ready or uwb_ready))
-            ready = bool(local_ready and self.layout is not None and uwb_ready and height)
+            local_ready = bool(imu_ready and uwb_ready)
+            ready = bool(local_ready and self.layout is not None and height)
             reason = ('OK' if ready else height_reason if height is None
                       else 'Waiting for disarmed mode and fresh IMU to align heading' if self.filter.yaw_offset is None
                       else 'IMU unavailable' if not imu_ready
-                      else 'Camera and UWB unavailable' if not local_ready
                       else 'Four surveyed anchors required' if self.layout is None
                       else 'UWB missing or stale' if self.reason == 'OK' else self.reason)
             self.local_pub.publish(Bool(data=local_ready))
@@ -221,10 +193,11 @@ class FusionLocalizationNode(object):
             if height and imu_ready:
                 self.publish_estimates(height, local_ready, ready)
             status = DiagnosticStatus()
-            status.name, status.hardware_id = 'fusion_localization', 'camera+uwb+imu+tof'
+            status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof'
             status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
             status.message = reason
-            status.values = [KeyValue(key='height_source', value='ToF'),
+            status.values = [KeyValue(key='xy_source', value='UWB'),
+                             KeyValue(key='height_source', value='ToF'),
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='frame_id', value=self.frame),
                              KeyValue(key='last_uwb_result', value=self.reason)]

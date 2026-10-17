@@ -1,12 +1,12 @@
-# Camera, UWB and ToF localization
+# UWB and ToF localization
 
 This integrates the `localization` branch at `69051388a6bfbbf56eb32280a29e31195ad3121e`
 into the DD24 ROS package. The DWM1001/PANS tag computes horizontal position from
 room anchors. The ROS node publishes UWB x/y and **ToF z**, using the existing
 `/pidrone/range` and `/pidrone/imu` streams. UWB height is never used in the combined pose.
-The fusion node combines camera planar velocity with UWB XY, uses IMU heading to
-align their axes, and publishes a fused room position with ToF Z. It also owns the
-continuous local state used by the PID controller.
+The fusion node estimates XY position and velocity from UWB alone, uses IMU heading
+to convert room velocity into body axes, and supplies ToF Z. It owns the continuous
+local state used by the PID controller. Optical flow does not enter this estimate.
 
 ## Install and launch on each drone
 
@@ -76,20 +76,22 @@ last reported quality, rejected record count, and the last serial line.
 The **SE** Screen window now starts fusion instead of EMA. Do not run
 `state_estimator.py -p ema` alongside it: only fusion should publish
 `/pidrone/state`. The legacy rigid-transform camera pose node is no longer started
-by Screen. Optical flow, ToF, the flight controller's IMU, UWB and rosbridge remain
-separate processes. Existing manual movement controls keep their body-axis meaning.
+by Screen. ToF, the flight controller's IMU, UWB and rosbridge remain separate
+processes. Optical flow is no longer started by Screen or the shared Drone class;
+the camera remains available for video and AprilTags. Existing manual movement controls keep their body-axis meaning.
 
 The altitude and hover routines also start UWB and fusion, reusing running nodes.
 They refuse to start alongside the legacy `/state_estimator`. Their X/Y hold point
 comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
-0.20 m/s, for the existing PID; altitude changes keep that X/Y point and retain
-ToF height control. Relative `move_forward`/`move_back` still use optical flow.
+0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
+ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
+body-axis displacement is converted once into a fixed room target.
 During brief sensor gaps, fusion continues predicting the estimate. If that
 estimate expires, an active hold keeps its room target and requests zero XY
 velocity until fusion resumes. It does not switch into a different position-hold
-mode or capture a new target. Initial hold needs a fresh fused pose; camera flow
-is required only for the relative horizontal moves that explicitly use it.
+mode or capture a new target. Initial hold and relative horizontal moves require
+a fresh fused pose; neither requires optical flow.
 Local position hold retains velocity damping while moving or changing altitude.
 Manual velocity commands expire from their receipt time, before PID calculation.
 
@@ -118,7 +120,7 @@ alignment does not correct ongoing IMU yaw drift.
 | `/pidrone/localization/fused` | `geometry_msgs/PoseWithCovarianceStamped` | Fused room XY, ToF Z, IMU-derived orientation and position covariance |
 | `/pidrone/localization/odometry` | `nav_msgs/Odometry` | Continuous local pose in `odom`, velocity in `pidrone_body` |
 | `/pidrone/state` | `pidrone_pkg/State` | Controller pose in `odom`, body-axis velocity, ToF Z |
-| `/pidrone/localization/local_ready` | `std_msgs/Bool` | Fresh camera, IMU and ToF for local XY control |
+| `/pidrone/localization/local_ready` | `std_msgs/Bool` | Fresh accepted UWB and IMU for local XY control |
 | `/pidrone/localization/ready` | `std_msgs/Bool` | Fresh room solution, heading and four live anchors |
 | `/pidrone/localization/fusion_status` | `diagnostic_msgs/DiagnosticArray` | Fusion readiness and rejection reason |
 | `/pidrone/localization/generation` | `std_msgs/UInt32` | Reference invalidation counter; cancels active room targets |
@@ -285,37 +287,37 @@ not obstacle avoidance, collision avoidance, or formation planning.
 
 ### Fusion behavior
 
-The planar Kalman filter uses camera velocity, with the existing rotational-flow
-compensation, to predict motion. UWB XY fixes correct both room position and an
-estimated camera velocity error. This filtered velocity correction persists between
-UWB fixes, including when a uniform floor produces fresh camera readings near zero.
-The corrected body-frame XY velocity is published in `/pidrone/state` for the PID's
-motion feedback. Z still comes from ToF. The legacy camera position is not fused.
-Local odometry integrates corrected velocity without jumping at a UWB fix; direct
+The planar Kalman filter estimates room XY position and velocity from successive
+UWB fixes. It predicts constant velocity between fixes and filters measurement
+noise rather than directly differentiating each pair of positions. No optical-flow
+measurements, quality gate, or camera fallback are used. IMU heading rotates the
+estimated velocity into body axes for `/pidrone/state`; ToF supplies Z.
+Local odometry integrates velocity without jumping at a UWB fix; direct
 room-position corrections adjust the `map → odom` offset.
-Delayed UWB observations are advanced using interpolated camera displacement from
-their own timestamp, and additional uncertainty covers that interval. Repeated or
-out-of-order observations cannot renew a fix. Innovation gates reject inconsistent
-UWB observations. Prediction runs independently of camera callbacks. With no
-camera, the same filter estimates motion from UWB; camera recovery preserves the
-learned velocity rather than adding it twice.
+
+Delayed UWB observations measure `position - age * velocity`, with additional
+uncertainty over that interval. Repeated or out-of-order observations cannot renew
+a fix. Innovation gates reject inconsistent UWB observations. Prediction runs at
+60 Hz, but this does not increase the UWB measurement rate or remove its latency.
 
 Fusion owns sensor validity, with a single `sensor_timeout` (0.5 s by default).
-XY feedback requires fresh IMU and either accepted UWB fixes or camera velocity.
-Brief missing/invalid camera samples do not clear the UWB estimate. After UWB
-expires, local feedback can continue from camera velocity; if both expire, XY
-commands become neutral. ToF validity governs altitude output and does not reset
-the XY filter. Height is validated directly from ToF and IMU timestamps; it does
-not depend on a synthetic UWB sample or the current prediction time. Controllers watchdog the published estimate, rather than timing
-out separate readiness heartbeats. Fused pose stamps retain the UWB fix age.
+XY feedback requires fresh IMU and accepted UWB fixes. Once UWB expires, XY
+commands become neutral; the active hold target is retained for recovery. ToF
+validity governs altitude output and does not reset the XY filter. Height is
+validated directly from ToF and IMU timestamps; it does not depend on a synthetic
+UWB sample or the current prediction time. Controllers watchdog the published
+estimate, rather than timing out separate readiness heartbeats. Fused pose stamps
+retain the UWB fix age.
 
 Room output requires a recent accepted UWB fix and a validated convex four-anchor
 layout. Surveyed anchors remain valid across missing/partial reports; a changed
 complete layout resets the room reference. Sensor gaps do not change the room
 generation. Parameters in `params/fusion_localization.yaml` are initial tuning
-values. Camera velocity scale, noise assumptions and heading accuracy require
-measurement. The optical-flow scale can be set with
-`/pidrone/localization/flow_scale` before starting the flow node.
+values. `acceleration_stddev` controls process uncertainty in UWB-derived velocity
+and replaces the former `velocity_correction_stddev` parameter, with the same 0.3
+default. Camera-specific fusion settings are removed. UWB noise, latency and
+heading accuracy still require measurement; UWB-only estimation cannot eliminate
+radio position jumps or correct IMU yaw drift.
 
 ## Height, frames and timing
 
@@ -357,9 +359,7 @@ Tune rate, quality, freshness, timestamp skew, tilt limit and initial uncertaint
 `params/uwb_localization.yaml`. Initial standard deviations (0.15 m horizontal,
 0.03 m vertical) are configurable starting assumptions, not measured accuracy.
 Floor, mounting offset, topic names and frame can be overridden as launch arguments.
-Legacy camera drivers without a motion-vector Header use callback receipt time;
-drivers with a Header retain acquisition time. Camera/serial latency and flow scale
-must be measured rather than inferred from these default noise values.
+Serial latency must be measured rather than inferred from these default noise values.
 
 Each drone currently runs its own ROS master, so the topic names match on both.
 On a shared master, use `namespace:=drone1` / `namespace:=drone2` and appropriate
@@ -380,7 +380,7 @@ numbers, ToF-only height, tilt/offset math, freshness/time skew, ROS publication
 diagnostics, live anchor parsing/discovery, partial/stale/conflicting layouts,
 no duplicate publication, and independent dashboard telemetry.
 Fusion checks also cover delayed observations, axis rotation, covariance/outlier
-handling, camera gaps, room expiry, layout/time resets, bounded room commands,
+handling, UWB-derived velocity and expiry, layout/time resets, bounded room commands,
 manual overrides and explicit dashboard sending. Hardware-free tests need NumPy and Python 3.9+.
 
 Before flight, with props removed, inspect `rostopic echo /pidrone/localization/pose`

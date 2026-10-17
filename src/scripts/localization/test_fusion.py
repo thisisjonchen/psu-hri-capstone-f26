@@ -60,11 +60,11 @@ class FusionMathTest(unittest.TestCase):
 
     def test_delayed_uwb_corrects_room_without_jumping_local_odometry(self):
         f = PlanarFusion(yaw_offset=math.pi/2)
-        f.update_flow((0, 1), 0, 10)
+        f.predict(10)
         for time in (10.1, 10.2):
-            f.update_flow((0, 1), 0, time)
+            f.predict(time)
         self.assertTrue(f.update_uwb((2, 3), np.eye(2)*0.0225, 10.1)[0])
-        np.testing.assert_allclose(f.room, (2, 3.1), atol=1e-12)
+        np.testing.assert_allclose(f.room, (2, 3), atol=1e-12)
         odom = f.odom.copy()
         before = f.room.copy()
         self.assertTrue(f.update_uwb((2.1, 3.2), np.eye(2)*0.0225, 10.2)[0])
@@ -74,9 +74,9 @@ class FusionMathTest(unittest.TestCase):
 
     def test_outliers_invalid_covariance_and_duplicate_fixes_cannot_renew_solution(self):
         f = PlanarFusion(yaw_offset=0)
-        f.update_flow((0, 0), 0, 10)
+        f.predict(10)
         f.update_uwb((1, 2), np.eye(2)*0.0225, 10)
-        f.update_flow((0, 0), 0, 10.1)
+        f.predict(10.1)
         before_velocity, before_covariance = f.velocity.copy(), f.covariance.copy()
         for position, noise, stamp in [((20, 20), np.eye(2)*.0225, 10.1),
                 ((1, 2), np.zeros((2, 2)), 10.1), ((1, 2), np.eye(2), 10)]:
@@ -84,27 +84,25 @@ class FusionMathTest(unittest.TestCase):
             np.testing.assert_array_equal(f.velocity, before_velocity)
             np.testing.assert_array_equal(f.covariance, before_covariance)
         self.assertEqual(f.uwb_stamp, 10)
-        self.assertFalse(f.update_flow((0, 0), 0, 10.05))
+        self.assertFalse(f.predict(10.05))
 
     def test_estimator_clock_gap_requires_new_room_fix_without_integrating_missing_motion(self):
         f = PlanarFusion(yaw_offset=0)
-        f.update_flow((0, 1), 0, 10)
+        f.predict(10)
         f.update_uwb((1, 2), np.eye(2), 10)
-        f.update_flow((0, 1), 0, 11)
+        f.predict(11)
         self.assertIsNone(f.room)
         np.testing.assert_array_equal(f.odom, (0, 0))
         self.assertFalse(f.update_uwb((1, 2), np.eye(2), 10.9)[0])
 
-    def test_uwb_recovers_velocity_with_zero_or_biased_flow_and_delayed_fixes(self):
+    def test_uwb_estimates_velocity_and_braking_with_delayed_fixes(self):
         room_speed = np.array((.2, -.1))
-        for camera_fraction, delay in ((0, 0), (0, .1), (.25, .1), (1, .1)):
-            with self.subTest(camera_fraction=camera_fraction, delay=delay):
+        for delay in (0, .1):
+            with self.subTest(delay=delay):
                 f = PlanarFusion(yaw_offset=.7)
                 for i in range(301):
                     t = i / 60.0
-                    # Body angle is zero; flow is in the local odometry axes.
-                    flow = rotate(room_speed * camera_fraction, -.7) if t < 3 else (0, 0)
-                    f.update_flow(flow, math.pi/2, 10+t)
+                    f.predict(10+t)
                     if i % 6 == 0 and t >= delay:
                         acquired = t-delay
                         before = f.odom.copy()
@@ -112,7 +110,7 @@ class FusionMathTest(unittest.TestCase):
                                                        np.eye(2)*.0225, 10+acquired)
                         self.assertTrue(accepted, reason)
                         np.testing.assert_array_equal(f.odom, before)
-                    if i == 125:  # Between UWB updates: zero flow must not erase the correction.
+                    if i == 125:  # Velocity persists between UWB updates.
                         np.testing.assert_allclose(rotate(f.velocity, .7), room_speed, atol=.03)
                         learned = f.velocity.copy()
                         accepted, reason = f.update_uwb((20, 20), np.eye(2)*.0225, f.stamp)
@@ -124,15 +122,15 @@ class FusionMathTest(unittest.TestCase):
                         np.testing.assert_allclose(f.room, room_speed*3, atol=.025)
                 self.assertGreater(np.linalg.eigvalsh(f.covariance).min(), 0)
                 f.reset_room()
-                np.testing.assert_array_equal(f.velocity_correction, (0, 0))
-                np.testing.assert_array_equal(f.velocity, f.flow_velocity)
+                np.testing.assert_array_equal(f.room_velocity, (0, 0))
+                np.testing.assert_array_equal(f.velocity, (0, 0))
 
     def test_stationary_uwb_noise_is_filtered_instead_of_differentiated(self):
         f = PlanarFusion(yaw_offset=0)
         random = np.random.RandomState(7)
         fused, raw, previous = [], [], None
         for i in range(601):
-            f.update_flow((0, 0), math.pi/2, 10+i/60.0)
+            f.predict(10+i/60.0)
             if i % 6 == 0:
                 position = random.normal(0, .05, 2)
                 self.assertTrue(f.update_uwb(position, np.eye(2)*.0225, 10+i/60.0)[0])
@@ -152,7 +150,6 @@ class FusionNodeTest(unittest.TestCase):
         self.node.mode_callback(NS(mode='DISARMED'))
         self.refresh()
         self.report_anchors()
-        self.flow()
         self.uwb()
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
@@ -191,7 +188,6 @@ class FusionNodeTest(unittest.TestCase):
         self.node.mode_callback(NS(mode='DISARMED'))
         self.refresh()
         self.report_anchors()
-        self.flow()
         self.uwb()
         self.node.step()
 
@@ -223,7 +219,6 @@ class FusionNodeTest(unittest.TestCase):
         self.refresh(yaw=math.radians(64))
         self.node.mode_callback(NS(mode='DISARMED'))
         self.report_anchors()
-        self.flow()
         self.uwb()
         self.node.step()
         self.assertAlmostEqual(self.node.filter.yaw_offset, math.radians(26))
@@ -239,17 +234,11 @@ class FusionNodeTest(unittest.TestCase):
             self.refresh(yaw=math.radians(74))
             self.node.mode_callback(NS(mode=mode))
             self.node.invalidate_room()
-            self.flow()
             self.uwb()
             self.node.step()
             self.assertAlmostEqual(self.node.filter.yaw_offset, math.radians(26))
             q = self.messages['pidrone/localization/fused'][-1].pose.pose.orientation
             self.assertAlmostEqual(q.z, math.sin(math.radians(5)))
-
-    def flow(self, x=0, y=0, frame='pidrone_body'):
-        msg = NS(header=NS(stamp=Stamp(self.ros_now), frame_id=frame), twist=twist())
-        msg.twist.linear.x, msg.twist.linear.y = x, y
-        self.node.flow_callback(msg)
 
     def uwb(self, x=1, y=2):
         msg = Pose()
@@ -288,19 +277,19 @@ class FusionNodeTest(unittest.TestCase):
         self.node.invalidate_room()
         self.node.step()
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertIn('heading', self.messages['pidrone/localization/fusion_status'][-1].status[0].message)
 
-    def test_camera_loss_keeps_uwb_control_and_total_xy_loss_expires_once(self):
+    def test_uwb_velocity_reaches_controller_and_dropout_expires_once(self):
         generation = self.node.generation
         start = self.ros_now
-        # No camera callbacks at all; a single surveyed layout is sufficient.
+        # About 7 Hz, with a 0.45 s gap: prediction must bridge missing fixes.
         for i in range(1, 181):
             self.now += 1/60.0
             self.ros_now = start + i/60.0
             self.refresh()
-            if i % 6 == 0:
-                self.uwb(x=1, y=2 + .2*i/60.0)
+            if i % 9 == 0 and i not in (90, 99):
+                self.uwb(x=1 + .1*i/60.0, y=2 + .2*i/60.0)
             self.node.step()
             self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
             self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
@@ -309,18 +298,13 @@ class FusionNodeTest(unittest.TestCase):
         controller = self.controller()
         controller.desired_twist_callback(twist())
         command = controller.step()
+        self.assertAlmostEqual(controller.current_velocity.x, .1, delta=.03)
         self.assertAlmostEqual(controller.current_velocity.y, .2, delta=.03)
+        self.assertLess(command[0], 1495)
         self.assertLess(command[1], 1490)
+        covariance = self.messages['pidrone/state'][-1].twist_with_covariance.covariance
+        self.assertGreater(covariance[0], self.node.filter.velocity_variance)
         self.assertEqual(self.node.generation, generation)
-        # Returning camera flow must not double the UWB-derived velocity.
-        learned_velocity = self.node.filter.velocity.copy()
-        self.flow(y=.2)
-        np.testing.assert_allclose(self.node.filter.velocity, learned_velocity, atol=1e-12)
-        correction = self.node.filter.velocity_correction.copy()
-        # Bad flow packets and short gaps must not discard learned UWB motion.
-        self.flow(frame='wrong_frame')
-        self.node.step()
-        np.testing.assert_array_equal(self.node.filter.velocity_correction, correction)
         for i in range(36):
             self.now += 1/60.0
             self.ros_now += 1/60.0
@@ -337,7 +321,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.desired_velocity.y = .2
         self.assertEqual(controller.step()[:2], [1500, 1500])
         # New UWB restores the same frame without a mode or generation change.
-        self.uwb(x=1, y=2.6)
+        self.uwb(x=1.3, y=2.6)
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
         self.assertEqual(self.node.generation, generation)
@@ -350,7 +334,8 @@ class FusionNodeTest(unittest.TestCase):
         self.uwb()
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertIsNone(self.node.filter.flow_stamp)
+        topics = [call.args[0] for call in self.ros.Subscriber.call_args_list]
+        self.assertNotIn('pidrone/picamera/twist', topics)
         generation = self.node.generation
         count = len(self.messages['pidrone/state'])
         self.node.height.range = None
@@ -370,7 +355,6 @@ class FusionNodeTest(unittest.TestCase):
             self.ros_now = start + i / 60.0
             self.now += 1 / 60.0
             self.refresh()
-            self.flow()  # No useful camera motion feedback.
             if i % 6 == 0:
                 self.uwb(x=1 + .1 * i / 60.0, y=2)
             self.node.step()
@@ -382,14 +366,13 @@ class FusionNodeTest(unittest.TestCase):
                 self.ros_now = last_fix + i / 60.0
                 self.now += 1 / 60.0
                 self.refresh()
-                self.flow()
                 self.node.step()
             # A measurement is already queued on the first tick past expiry.
             self.now += .501 - (self.ros_now - last_fix)
             self.ros_now = last_fix + .501
             self.refresh()
-            self.flow()
-            x, y = self.node.filter.room
+            x, y = (self.node.filter.room + self.node.filter.room_velocity *
+                    (self.ros_now - self.node.filter.stamp))
             self.uwb(x=x if accepted else x + 20, y=y)
             self.node.step()
             self.assertEqual(self.messages['pidrone/localization/ready'][-1].data, accepted)
@@ -400,16 +383,15 @@ class FusionNodeTest(unittest.TestCase):
                 self.assertIsNone(self.node.filter.room)
                 np.testing.assert_array_equal(self.node.filter.velocity, (0, 0))
 
-    def test_layout_change_and_clock_reset_invalidate_but_bad_flow_does_not(self):
+    def test_layout_change_and_clock_reset_invalidate_xy(self):
         generation = self.node.generation
         self.ros_now += .1
         self.report_anchors(shift=.1)
         self.assertGreater(self.node.generation, generation)
         self.assertIsNone(self.node.filter.room)
         self.refresh()
-        self.flow(frame='camera')
         self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
         self.ros_now = 50
         self.node.step()
         self.assertIsNone(self.node.filter.stamp)
@@ -420,10 +402,9 @@ class FusionNodeTest(unittest.TestCase):
             self.now += .1
             self.ros_now += .1
             self.refresh()
-            self.flow()
             self.report_anchors()
             self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
         before = len(self.messages['pidrone/localization/fused'])
         self.uwb()
@@ -448,39 +429,6 @@ class FusionNodeTest(unittest.TestCase):
         controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
         controller.room_anchors_callback(self.report_anchors())
         return controller
-
-    def test_uwb_velocity_reaches_pid_when_camera_reports_zero_then_clears_on_dropout(self):
-        start = self.ros_now
-        for i in range(1, 121):
-            self.ros_now = start+i/60.0
-            self.now += 1/60.0
-            self.refresh()
-            self.flow()  # Uniform floor: fresh camera frames, zero measured motion.
-            self.report_anchors()
-            if i % 6 == 0:
-                self.uwb(x=1+.2*i/60.0, y=2+.1*i/60.0)
-            self.node.step()
-        controller = self.controller()
-        controller.desired_twist_callback(twist())  # Hold still: oppose measured motion.
-        command = controller.step()
-        np.testing.assert_allclose((controller.current_velocity.x, controller.current_velocity.y),
-                                   (.2, .1), atol=.03)
-        self.assertLess(command[0], 1490)
-        self.assertLess(command[1], 1495)
-        self.assertEqual(controller.current_position.z, .5)
-        covariance = self.messages['pidrone/state'][-1].twist_with_covariance.covariance
-        self.assertGreater(covariance[0], self.node.filter.velocity_variance)
-        for i in range(36):
-            self.ros_now += 1/60.0
-            self.now += 1/60.0
-            self.refresh()
-            self.flow()
-            self.report_anchors()
-            self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
-        np.testing.assert_allclose((velocity.x, velocity.y), (0, 0), atol=1e-12)
 
     def test_room_navigation_pauses_on_sensor_loss_and_cancels_on_manual_input(self):
         controller = self.controller()

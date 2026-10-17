@@ -1,14 +1,11 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
 velocity_stddev: 0.12
-# Process uncertainty for UWB's correction to camera velocity (m/s per sqrt(s)).
-velocity_correction_stddev: 0.3
+# Process uncertainty for UWB-derived velocity (m/s per sqrt(s)).
+acceleration_stddev: 0.3
 drift_stddev: 0.08
-velocity_tau: 0.08
-# Maximum age of a usable IMU, camera, UWB or height measurement.
+# Maximum age of a usable IMU, UWB or height measurement.
 sensor_timeout: 0.5
 max_sensor_skew: 0.15
-max_flow_speed: 2.0
-angular_compensation: 0.2
 # 99% chi-square gate for a two-dimensional position innovation.
 innovation_gate: 9.21
 max_innovation: 1.0

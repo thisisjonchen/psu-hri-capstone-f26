@@ -10,11 +10,11 @@ import time
 import rosnode
 import rospy
 import tf
-from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist, TwistStamped
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty
-from localization.fusion import target_velocity
+from localization.fusion import rotate, target_velocity
 
 
 class Drone(object):
@@ -43,16 +43,12 @@ class Drone(object):
         self.height_at = 0
         self.ground_height = None
         self.target_height = self.takeoff_height
-        self.flow_at = 0
-        self.flow_valid = False
         self.xy_anchor = None
         self.xy_frame = None
         self.fused_pose = None
         self.voltage = None
         self.battery_at = 0
         self.low_voltage_at = None
-        self.right_m = 0.0
-        self.forward_m = 0.0
         self.mode_pub = rospy.Publisher('/pidrone/desired/mode', Mode, queue_size=1)
         self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
         self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
@@ -61,7 +57,6 @@ class Drone(object):
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
         rospy.Subscriber('/pidrone/mode', Mode, self._mode_received)
         rospy.Subscriber('/pidrone/range', Range, self._range_received)
-        rospy.Subscriber('/pidrone/picamera/twist', TwistStamped, self._flow_received)
         rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped,
                          self._fused_received, queue_size=1)
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
@@ -76,19 +71,6 @@ class Drone(object):
         if msg.min_range <= msg.range <= msg.max_range:
             self.height = msg.range
             self.height_at = time.time()
-
-    def _flow_received(self, msg):
-        now = time.time()
-        vx = msg.twist.linear.x
-        vy = msg.twist.linear.y
-        self.flow_valid = abs(vx) <= 0.5 and abs(vy) <= 0.5
-        continuous = self.flow_at and 0 < now - self.flow_at < 0.2
-        # Relative move_forward/move_back still use flow; X/Y hold uses fusion.
-        if continuous and self.flow_valid:
-            dt = now - self.flow_at
-            self.right_m += vx * dt
-            self.forward_m += vy * dt
-        self.flow_at = now
 
     def _fused_received(self, msg):
         self.fused_pose = msg
@@ -126,19 +108,17 @@ class Drone(object):
             raise RuntimeError('Battery voltage is low ({:.1f} V)'.format(
                 self.voltage))
 
-    def _check_sensors(self, need_flow=False):
+    def _check_sensors(self):
         now = time.time()
         if now - self.mode_at > 0.5:
             raise RuntimeError('Flight controller mode is missing/stale')
         if now - self.height_at > 1.0:
             raise RuntimeError('Downward range is missing/stale')
-        if need_flow and (now - self.flow_at > 0.5 or not self.flow_valid):
-            raise RuntimeError('Optical flow is missing, stale or invalid')
 
-    def _check_flight(self, operation, need_flow=False, check_battery=True):
+    def _check_flight(self, operation, check_battery=True):
         if self.mode != 'FLYING':
             raise RuntimeError('Flight mode changed during ' + operation)
-        self._check_sensors(need_flow=need_flow)
+        self._check_sensors()
         if check_battery:
             self._check_battery()
 
@@ -229,7 +209,6 @@ class Drone(object):
             ('/vl53l1x', ['bash', '-c',
                          'source "$HOME/catkin_ws/install/setup.bash" && exec roslaunch "$1"',
                          'pals-tof', os.path.join(launch, 'tof.launch')]),
-            ('/optical_flow_node', [sys.executable, '-u', 'optical_flow_node.py']),
             ('/uwb_localization', ['roslaunch', os.path.join(launch, 'uwb_localization.launch'),
                                    'port:=' + os.environ.get('PALS_UWB_PORT', '/dev/ttyACM1')]),
             ('/fusion_localization', ['roslaunch', os.path.join(launch, 'fusion_localization.launch')]),
@@ -342,7 +321,7 @@ class Drone(object):
         self._set_mode('ARMED')
         self.target_height = self.takeoff_height
         rospy.sleep(1.0)
-        self._check_sensors(need_flow=False)
+        self._check_sensors()
         self._check_battery()
         self.twist_pub.publish(self._xy_hold_command())
         if hold_xy:
@@ -357,9 +336,6 @@ class Drone(object):
             now = time.time()
             settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
-                # Keep the anchor in the same coordinate frame.
-                if self.xy_anchor is None:
-                    self.right_m = self.forward_m = 0.0
                 self.target_height = self.takeoff_height
                 rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
                               self.ALTITUDE_SETTLE_SECONDS)
@@ -370,7 +346,7 @@ class Drone(object):
     def move(self, x=0.0, y=0.0, z=0.0):
         """Move relative to the drone: x right, y forward, z up (meters).
 
-        Horizontal distance comes from optical flow and is approximate.
+        Horizontal distance and heading come from the UWB/IMU room pose.
         """
         if self.mode != 'FLYING':
             raise RuntimeError('Drone must be flying before moving')
@@ -379,9 +355,18 @@ class Drone(object):
         horizontal = math.hypot(x, y)
         if horizontal and self.xy_anchor is not None:
             raise ValueError('Unlock X/Y before commanding horizontal movement')
-        self._check_sensors(need_flow=horizontal > 0)
-        start_x, start_y, start_z = self.right_m, self.forward_m, self.height
-        target_x, target_y, target_z = start_x + x, start_y + y, start_z + z
+        self._check_sensors()
+        start_z = self.height
+        target_z = start_z + z
+        if horizontal:
+            msg = self._hold_pose()
+            frame = msg.header.frame_id
+            p, q = msg.pose.pose.position, msg.pose.pose.orientation
+            start_xy = (p.x, p.y)
+            yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+            displacement = rotate((x, y), yaw)
+            target_xy = displacement + start_xy
+            self.position_mode_pub.publish(Bool(False))
         if z:
             self._set_altitude(target_z)
         started = time.time()
@@ -393,14 +378,20 @@ class Drone(object):
         settled_since = None
         try:
             while time.time() < deadline:
-                self._check_flight('movement', need_flow=horizontal > 0)
+                self._check_flight('movement')
                 now = time.time()
                 commanded_distance += last_command_speed * (now - last_command_at)
                 last_command_at = now
                 if horizontal and commanded_distance > max(0.4, horizontal * 1.5):
                     raise RuntimeError('Movement limit reached without reaching target')
-                ex = target_x - self.right_m
-                ey = target_y - self.forward_m
+                ex = ey = 0.0
+                if horizontal:
+                    msg = self._hold_pose()
+                    if msg.header.frame_id != frame:
+                        raise RuntimeError('Fused position frame changed during movement')
+                    p, q = msg.pose.pose.position, msg.pose.pose.orientation
+                    yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+                    ex, ey = rotate(target_xy - (p.x, p.y), -yaw)
                 ez = target_z - self.height
                 horizontal_done = (not horizontal or
                                    (abs(ex) <= 0.06 and abs(ey) <= 0.06))
@@ -413,10 +404,11 @@ class Drone(object):
                 if horizontal_done and vertical_done:
                     return
                 if now - started > 3.0:
-                    progress_xy = ((self.right_m - start_x) * x +
-                                   (self.forward_m - start_y) * y)
-                    if horizontal and progress_xy / horizontal < 0.03:
-                        raise RuntimeError('No horizontal movement detected')
+                    if horizontal:
+                        progress_xy = ((p.x - start_xy[0]) * displacement[0] +
+                                       (p.y - start_xy[1]) * displacement[1])
+                        if progress_xy / horizontal < 0.03:
+                            raise RuntimeError('No horizontal movement detected')
                     if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
