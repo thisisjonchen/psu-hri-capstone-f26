@@ -136,10 +136,11 @@ class PID:
         self.roll_low._i = self.roll_low.init_i
         self.pitch_low._i = self.pitch_low.init_i
 
-    def _planar_step(self, error, axis, trim, dt):
+    def _planar_step(self, error, axis, trim, dt, integrate=True):
         cap = self.trim_controller_cap_plane
         previous_trim = trim._i
-        trim.step(max(-cap, min(cap, error)), dt)
+        if integrate:
+            trim.step(max(-cap, min(cap, error)), dt)
         axis.step(error, dt)
         output = axis.midpoint + axis._p + axis._i + axis._d + trim._i
         lower, upper = axis.control_range
@@ -149,7 +150,7 @@ class PID:
             output = axis.midpoint + axis._p + axis._i + axis._d + trim._i
         return max(lower, min(upper, output))
 
-    def step(self, error, cmd_yaw_velocity=0, altitude_sample=None):
+    def step(self, error, cmd_yaw_velocity=0, altitude_sample=None, integrate_xy=True):
         """ Compute the control variables from the error using the step methods
         of each axis pid.
         """
@@ -157,8 +158,8 @@ class PID:
         time_elapsed = 0.0 if self._t is None else max(0.0, now - self._t)
         self._t = now
 
-        cmd_r = self._planar_step(error.x, self.roll, self.roll_low, time_elapsed)
-        cmd_p = self._planar_step(error.y, self.pitch, self.pitch_low, time_elapsed)
+        cmd_r = self._planar_step(error.x, self.roll, self.roll_low, time_elapsed, integrate_xy)
+        cmd_p = self._planar_step(error.y, self.pitch, self.pitch_low, time_elapsed, integrate_xy)
 
         # Compute yaw command
         cmd_y = 1500 + cmd_yaw_velocity

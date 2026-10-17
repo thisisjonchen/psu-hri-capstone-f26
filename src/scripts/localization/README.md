@@ -92,8 +92,12 @@ dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
 ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
 body-axis displacement is converted once into a fixed room target.
-During brief sensor gaps, fusion continues predicting the estimate. If that
-estimate expires, an active hold keeps its room target and requests zero XY
+During UWB gaps, fusion continues predicting for up to 1 second since the last
+accepted fix, while IMU and altitude freshness requirements remain unchanged.
+Active holds keep their target and velocity feedback. After the usual 0.5-second
+freshness window, XY trim is retained but stops accumulating until fresh fixes
+resume. The original fix timestamp is preserved throughout prediction. If the
+1-second window expires, an active hold keeps its room target and requests zero XY
 velocity until fusion resumes. It does not switch into a different position-hold
 mode or capture a new target. Initial hold and relative horizontal moves require
 a fresh fused pose; neither requires optical flow.
@@ -306,9 +310,12 @@ uncertainty over that interval. Repeated or out-of-order observations cannot ren
 a fix. Innovation gates reject inconsistent UWB observations. Prediction runs at
 60 Hz, but this does not increase the UWB measurement rate or remove its latency.
 
-Fusion owns sensor validity, with a single `sensor_timeout` (0.5 s by default).
-XY feedback requires fresh IMU and accepted UWB fixes. Once UWB expires, XY
-commands become neutral; the active hold target is retained for recovery. ToF
+Fusion owns sensor validity. `sensor_timeout` (0.5 s by default) still applies to
+IMU/height data and newly received fixes. Existing XY estimates can predict for
+up to 1 second without an accepted UWB fix; this limit is shared by fusion and
+the controller classes through `XY_PREDICTION_TIMEOUT`.
+XY feedback requires fresh IMU and an accepted UWB fix within that 1-second limit.
+Once UWB expires, XY commands become neutral; the active hold target is retained for recovery. ToF
 validity governs altitude output and does not reset the XY filter. Height is
 validated directly from ToF and IMU timestamps; it does not depend on a synthetic
 UWB sample or the current prediction time. Controllers watchdog the published

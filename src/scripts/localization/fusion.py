@@ -10,6 +10,10 @@ from collections import deque
 
 import numpy as np
 
+# Maximum age of an accepted UWB fix while continuing an existing XY hold.
+# IMU/height freshness and acceptance of newly received fixes remain separate.
+XY_PREDICTION_TIMEOUT = 1.0
+
 
 def rotate(vector, angle):
     c, s = math.cos(angle), math.sin(angle)

@@ -14,7 +14,7 @@ from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty
-from localization.fusion import rotate, target_velocity
+from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 
 
 class Drone(object):
@@ -75,10 +75,11 @@ class Drone(object):
     def _fused_received(self, msg):
         self.fused_pose = msg
 
-    def _hold_pose(self, required=True):
+    def _hold_pose(self, required=True, allow_prediction=False):
         msg = self.fused_pose
+        timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.estimate_timeout
         if (msg is None or not msg.header.frame_id or
-                not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= self.estimate_timeout):
+                not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= timeout):
             if not required:
                 return None
             raise RuntimeError('Fused position is missing/stale')
@@ -277,7 +278,7 @@ class Drone(object):
         command = Twist()
         if self.xy_anchor is None:
             return command
-        msg = self._hold_pose(required=False)
+        msg = self._hold_pose(required=False, allow_prediction=True)
         if msg is None:
             # Preserve the room anchor; stop requesting motion until fusion resumes.
             return command
@@ -386,7 +387,7 @@ class Drone(object):
                     raise RuntimeError('Movement limit reached without reaching target')
                 ex = ey = 0.0
                 if horizontal:
-                    msg = self._hold_pose()
+                    msg = self._hold_pose(allow_prediction=True)
                     if msg.header.frame_id != frame:
                         raise RuntimeError('Fused position frame changed during movement')
                     p, q = msg.pose.pose.position, msg.pose.pose.orientation

@@ -144,7 +144,10 @@ class RoutineControlTest(unittest.TestCase):
         pose.pose.pose.position.x += .2
         drone._fused_received(pose)
         self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.05)
-        self.fusion.ros_now += 1
+        self.fusion.ros_now += .7
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.05)
+        self.assertEqual(drone.xy_anchor, (1, 2))
+        self.fusion.ros_now += .4
         controller.local_ready_callback(NS(data=False))
         command = drone._xy_hold_command()
         self.assertEqual((command.linear.x, command.linear.y), (0, 0))
@@ -181,7 +184,7 @@ class RoutineControlTest(unittest.TestCase):
 
     def test_initial_lock_requires_fresh_fusion(self):
         drone = self.drone
-        self.fusion.ros_now += 1
+        self.fusion.ros_now += .7  # Grace is for an existing hold, not a new lock.
         with self.assertRaisesRegex(RuntimeError, 'missing/stale'):
             drone.lock_xy()
         drone._fused_received(None)

@@ -15,7 +15,7 @@ from pid_class import PID, PIDaxis
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import Mode, RC, State
 from std_msgs.msg import Empty, Bool, UInt32
-from localization.fusion import rotate, target_velocity
+from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 from pidrone_pkg.msg import AnchorLayout
 from three_dim_vec import Position, Velocity, Error, RPY
 
@@ -121,10 +121,11 @@ class PIDController(object):
         return (not self.use_fusion or self.local_estimate_ready and stamp > 0
                 and 0 <= rospy.get_time() - stamp <= self.measurement_timeout)
 
-    def room_ready(self):
+    def room_ready(self, allow_prediction=True):
+        timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.measurement_timeout
         return (self.use_fusion and self.local_ready() and self.room_estimate_ready
                 and self.room_pose is not None
-                and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= self.measurement_timeout)
+                and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= timeout)
 
     @synchronized
     def local_ready_callback(self, msg):
@@ -162,7 +163,7 @@ class PIDController(object):
 
     @synchronized
     def room_target_callback(self, msg):
-        if (not self.room_ready() or self.current_mode != 'FLYING'
+        if (not self.room_ready(allow_prediction=False) or self.current_mode != 'FLYING'
                 or msg.header.frame_id != self.room_pose.header.frame_id
                 or not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= 0.5
                 or not np.all(np.isfinite([msg.pose.position.x, msg.pose.position.y]))):
@@ -292,8 +293,10 @@ class PIDController(object):
         xy_ready = self.calc_error()
         requested_xy = (self.desired_velocity.x, self.desired_velocity.y)
 
+        # Retain learned trim during prediction, but do not learn from old UWB.
+        integrate_xy = not self.use_fusion or self.room_ready(allow_prediction=False)
         command = self.pid.step(self.pid_error, self.desired_yaw_velocity,
-                                self.altitude_sample)
+                                self.altitude_sample, integrate_xy=integrate_xy)
         if self.current_mode == 'FLYING':
             rospy.loginfo_throttle(1,
                 'XY PID: local_ready=%s position_control=%s desired=(%.3f, %.3f) '

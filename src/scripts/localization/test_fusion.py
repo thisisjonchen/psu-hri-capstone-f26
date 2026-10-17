@@ -305,7 +305,44 @@ class FusionNodeTest(unittest.TestCase):
         covariance = self.messages['pidrone/state'][-1].twist_with_covariance.covariance
         self.assertGreater(covariance[0], self.node.filter.velocity_variance)
         self.assertEqual(self.node.generation, generation)
-        for i in range(36):
+        previous_velocity = self.node.filter.velocity.copy()
+        controller.pid.roll_low._i, controller.pid.pitch_low._i = -2., -3.
+        for i in range(42):  # A 0.70 s UWB gap still permits braking.
+            self.now += 1/60.0
+            self.ros_now += 1/60.0
+            self.refresh()
+            self.node.step()
+            controller.current_state_callback(self.messages['pidrone/state'][-1])
+            controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
+            controller.local_ready_callback(self.messages['pidrone/localization/local_ready'][-1])
+            controller.room_ready_callback(self.messages['pidrone/localization/ready'][-1])
+            controller.desired_twist_callback(twist())
+            before = (controller.pid.roll_low._i, controller.pid.pitch_low._i)
+            command = controller.step()
+            self.assertTrue(controller.local_ready())
+            self.assertTrue(controller.room_ready())
+            self.assertLess(command[0], 1500)
+            self.assertLess(command[1], 1500)
+            if self.ros_now - self.node.filter.uwb_stamp > .5:
+                self.assertEqual((controller.pid.roll_low._i, controller.pid.pitch_low._i), before)
+                self.assertFalse(controller.room_ready(allow_prediction=False))
+                self.assertEqual(controller.room_pose.header.stamp.to_sec(), self.node.filter.uwb_stamp)
+            np.testing.assert_allclose(self.node.filter.velocity, previous_velocity)
+        # A matching accepted fix resumes trim without resetting velocity.
+        frozen_trim = (controller.pid.roll_low._i, controller.pid.pitch_low._i)
+        self.uwb(*self.node.filter.room)
+        self.node.step()
+        self.ros_now += 1/60.0
+        self.now += 1/60.0
+        self.refresh()
+        self.node.step()
+        controller.current_state_callback(self.messages['pidrone/state'][-1])
+        controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
+        controller.step()
+        self.assertLess(controller.pid.roll_low._i, frozen_trim[0])
+        self.assertLess(controller.pid.pitch_low._i, frozen_trim[1])
+        np.testing.assert_allclose(self.node.filter.velocity, previous_velocity)
+        for i in range(66):  # A longer outage still expires.
             self.now += 1/60.0
             self.ros_now += 1/60.0
             self.refresh()
@@ -362,14 +399,14 @@ class FusionNodeTest(unittest.TestCase):
         self.assertGreater(np.linalg.norm(previous), .08)
         for accepted in (True, False):
             last_fix = self.ros_now
-            for i in range(1, 30):
+            for i in range(1, 60):
                 self.ros_now = last_fix + i / 60.0
                 self.now += 1 / 60.0
                 self.refresh()
                 self.node.step()
             # A measurement is already queued on the first tick past expiry.
-            self.now += .501 - (self.ros_now - last_fix)
-            self.ros_now = last_fix + .501
+            self.now += 1.001 - (self.ros_now - last_fix)
+            self.ros_now = last_fix + 1.001
             self.refresh()
             x, y = (self.node.filter.room + self.node.filter.room_velocity *
                     (self.ros_now - self.node.filter.stamp))
@@ -382,6 +419,34 @@ class FusionNodeTest(unittest.TestCase):
             else:
                 self.assertIsNone(self.node.filter.room)
                 np.testing.assert_array_equal(self.node.filter.velocity, (0, 0))
+
+    def test_uwb_grace_does_not_extend_imu_or_height_freshness(self):
+        for missing in ('imu', 'height'):
+            with self.subTest(missing=missing):
+                self.node = type(self.node)()
+                self.node.mode_callback(NS(mode='DISARMED'))
+                self.refresh()
+                self.report_anchors()
+                self.uwb()
+                self.node.step()
+                controller = self.controller()
+                for _ in range(7):
+                    old_imu = self.node.imu
+                    old_attitude = self.node.height.attitude
+                    old_range = self.node.height.range
+                    self.ros_now += .1
+                    self.now += .1
+                    self.refresh()
+                    if missing == 'imu':
+                        self.node.imu, self.node.height.attitude = old_imu, old_attitude
+                    else:
+                        self.node.height.range = old_range
+                    self.node.step()
+                    controller.current_state_callback(self.messages['pidrone/state'][-1])
+                    controller.local_ready_callback(self.messages['pidrone/localization/local_ready'][-1])
+                self.assertFalse(controller.local_ready())
+                controller.desired_velocity.x = .1
+                self.assertEqual(controller.step()[:2], [1500, 1500])
 
     def test_layout_change_and_clock_reset_invalidate_xy(self):
         generation = self.node.generation
@@ -398,7 +463,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertIsNone(self.node.height.range)
 
     def test_uwb_expiry_stops_room_output_but_partial_reports_keep_surveyed_geometry(self):
-        for _ in range(6):
+        for _ in range(11):
             self.now += .1
             self.ros_now += .1
             self.refresh()
@@ -521,6 +586,7 @@ class FusionNodeTest(unittest.TestCase):
         # Eight seconds of correction must not overpower subsequent braking.
         for _ in range(481):
             current.header.stamp = Stamp(self.ros_now)
+            controller.room_pose.header.stamp = Stamp(self.ros_now)
             controller.current_state_callback(current)
             controller.desired_twist_callback(request)
             controller.step()

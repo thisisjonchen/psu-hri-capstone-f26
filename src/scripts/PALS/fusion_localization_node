@@ -13,7 +13,7 @@ from pidrone_pkg.msg import AnchorLayout, Mode, State
 from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Bool, UInt32
 
-from localization.fusion import PlanarFusion, body_angle, rotate
+from localization.fusion import PlanarFusion, body_angle, rotate, XY_PREDICTION_TIMEOUT
 from localization.position import PositionCombiner
 from localization.uwb_locator import monotonic
 
@@ -67,8 +67,9 @@ class FusionLocalizationNode(object):
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
         rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
 
-    def fresh(self, stamp, now):
-        return stamp is not None and 0 < stamp <= now and now - stamp <= self.timeout
+    def fresh(self, stamp, now, timeout=None):
+        limit = self.timeout if timeout is None else timeout
+        return stamp is not None and 0 < stamp <= now and now - stamp <= limit
 
     def invalidate_room(self):
         self.filter.reset_room()
@@ -174,15 +175,18 @@ class FusionLocalizationNode(object):
                     _, self.reason = self.filter.update_uwb(position, covariance, stamp)
             self.pending = []
             # Only an accepted fix renews the estimate; rejected fixes still expire.
-            if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now):
+            if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT):
                 self.filter.reset_room()
             if imu_ready:
                 # Predict between the slower UWB updates.
                 self.filter.predict(now)
-            uwb_ready = (self.filter.room is not None and self.fresh(self.filter.uwb_stamp, now))
+            uwb_ready = (self.filter.room is not None
+                         and self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT))
             local_ready = bool(imu_ready and uwb_ready)
             ready = bool(local_ready and self.layout is not None and height)
-            reason = ('OK' if ready else height_reason if height is None
+            predicting = uwb_ready and not self.fresh(self.filter.uwb_stamp, now)
+            reason = ('Predicting through UWB gap' if ready and predicting
+                      else 'OK' if ready else height_reason if height is None
                       else 'Waiting for disarmed mode and fresh IMU to align heading' if self.filter.yaw_offset is None
                       else 'IMU unavailable' if not imu_ready
                       else 'Four surveyed anchors required' if self.layout is None
@@ -194,7 +198,7 @@ class FusionLocalizationNode(object):
                 self.publish_estimates(height, local_ready, ready)
             status = DiagnosticStatus()
             status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof'
-            status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
+            status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
             status.message = reason
             status.values = [KeyValue(key='xy_source', value='UWB'),
                              KeyValue(key='height_source', value='ToF'),
