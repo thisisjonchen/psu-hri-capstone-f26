@@ -292,7 +292,7 @@ requested velocities, not guarantees of actual speed. Tune
 `/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`
 against the physical drone; both are read when the controller classes start.
 
-The XY velocity controller uses proportional feedback (0.5 RC units per cm/s of
+The XY velocity controller uses proportional feedback (0.75 RC units per cm/s of
 velocity error). XY trim integration is temporarily disabled (Ki=0) to isolate
 circling from accumulated correction; there is no fast XY integral either.
 This may leave steady drift that previously required trim compensation.
@@ -321,17 +321,15 @@ Local odometry integrates velocity without jumping at a UWB fix; direct
 room-position corrections adjust the `map → odom` offset.
 
 The experimental `use_imu_acceleration` option adds bias-corrected acceleration
-prediction while flying. It is **off by default**: replay of the recorded hover,
-with acceleration rescaled to 2048 counts/g, did not improve next-fix position
-prediction error (RMS 4.6 cm without it, 4.8 cm with it). These errors measure
-agreement with the next noisy UWB fix, not independently measured flight accuracy.
-Comparing changes between velocities fitted over adjacent one-second windows
-also shows incomplete agreement: map Y trends partly match, map X trends match
-weakly, and the combined difference is about 0.16 m/s RMS. Varying the comparison
-window, relative timing, or stationary bias average does not resolve this.
-These overlapping-window comparisons cannot identify which sensor is wrong.
-Existing recordings therefore do not yet justify enabling this option in
-`params/fusion_localization.yaml`; repeating the direction check is not needed.
+prediction while flying. It is disabled in the launch configuration;
+sensor replay has not established a flight benefit.
+When enabled, `imu_acceleration_gain` scales the room-frame XY
+acceleration before integration. Its default is 0.25 and its allowed range is
+greater than zero through one. This scales the acceleration input; it does not
+assign fixed percentages to UWB and IMU measurements. UWB still corrects position
+and velocity through the existing Kalman update. Both parameters are read when
+the fusion node starts. Replay agreement with noisy UWB fixes is not a measurement
+of true flight accuracy.
 
 Acceleration is already gravity-compensated by the flight-controller node. Fusion
 subtracts the startup body-frame bias, transforms right/forward/up into the IMU's

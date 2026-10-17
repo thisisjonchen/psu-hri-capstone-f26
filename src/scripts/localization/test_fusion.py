@@ -239,7 +239,7 @@ class FusionNodeTest(unittest.TestCase):
         np.testing.assert_array_equal(self.node.filter.accelerations[-1][1], (0, 0))
         self.node.use_imu_acceleration = True
         sample('FLYING', bias + (0, .2, 0))
-        np.testing.assert_allclose(self.node.filter.accelerations[-1][1], (0, .2), atol=1e-12)
+        np.testing.assert_allclose(self.node.filter.accelerations[-1][1], (0, .05), atol=1e-12)
         np.testing.assert_allclose(self.node.acceleration_bias, bias, atol=1e-12)
         self.report_anchors()
         self.uwb()
@@ -248,7 +248,7 @@ class FusionNodeTest(unittest.TestCase):
         self.ros_now += .1
         self.node.step()  # No new UWB: acceleration reaches controller velocity.
         message = self.messages['pidrone/state'][-1]
-        self.assertAlmostEqual(message.twist_with_covariance.twist.linear.y, .02)
+        self.assertAlmostEqual(message.twist_with_covariance.twist.linear.y, .005)
         self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
         self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
         sample('FLYING', (float('nan'), 0, 0))

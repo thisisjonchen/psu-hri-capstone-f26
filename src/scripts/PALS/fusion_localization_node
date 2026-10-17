@@ -46,6 +46,9 @@ class FusionLocalizationNode(object):
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
         self.imu = None
         self.use_imu_acceleration = bool(rospy.get_param('~use_imu_acceleration', False))
+        self.imu_acceleration_gain = float(rospy.get_param('~imu_acceleration_gain', 0.25))
+        if not np.isfinite(self.imu_acceleration_gain) or not 0 < self.imu_acceleration_gain <= 1:
+            raise ValueError('IMU acceleration gain must be greater than zero and at most one')
         self.acceleration_bias = None
         self.bias_samples = deque()
         self.mode = None
@@ -134,7 +137,7 @@ class FusionLocalizationNode(object):
         if (self.use_imu_acceleration and self.acceleration_bias is not None and valid
                 and mode_fresh and self.mode == 'FLYING' and self.filter.yaw_offset is not None):
             local = horizontal_acceleration(acceleration - self.acceleration_bias, attitude)
-            room_acceleration = rotate(local, self.filter.yaw_offset)
+            room_acceleration = rotate(local, self.filter.yaw_offset) * self.imu_acceleration_gain
         self.filter.update_acceleration(room_acceleration, stamp)
 
     def range_callback(self, msg):

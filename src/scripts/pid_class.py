@@ -83,10 +83,10 @@ class PID:
     def __init__(self,
 
                  # Use proportional XY feedback while diagnosing oscillation; trim is disabled.
-                 roll=PIDaxis(0.5, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
+                 roll=PIDaxis(0.75, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
                  roll_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
 
-                 pitch=PIDaxis(0.5, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
+                 pitch=PIDaxis(0.75, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
                  pitch_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
 
                  yaw=PIDaxis(0.0, 0.0, 0.0),
