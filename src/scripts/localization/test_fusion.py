@@ -492,7 +492,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.current_state_callback(current)
         command = controller.step()
         self.assertLess(controller.pid_error.y, -20)
-        self.assertLess(command[1], 1480)
+        self.assertLess(command[1], 1490)
         self.assertAlmostEqual(controller.pid_error.z, -15)
 
     def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
@@ -527,10 +527,8 @@ class FusionNodeTest(unittest.TestCase):
             self.ros_now += 1 / 60.0
         # Sustained error should learn useful trim within a short hover, but the
         # trim must stay small enough for velocity feedback to reverse the output.
-        self.assertGreater(controller.pid.roll_low._i, 5)
-        self.assertLessEqual(controller.pid.roll_low._i, 10)
-        self.assertLess(controller.pid.pitch_low._i, -5)
-        self.assertGreaterEqual(controller.pid.pitch_low._i, -10)
+        self.assertAlmostEqual(controller.pid.roll_low._i, 5)
+        self.assertAlmostEqual(controller.pid.pitch_low._i, -5)
         velocity.x, velocity.y = .2, -.2
         current.header.stamp = Stamp(self.ros_now)
         controller.current_state_callback(current)
@@ -553,12 +551,12 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(pid.roll_low._i, 5.)
         self.assertEqual(pid.pitch_low._i, -5.)
         # Existing trim unwinds when the velocity error reverses.
-        pid.roll_low._i, pid.pitch_low._i = 10., -10.
+        pid.roll_low._i, pid.pitch_low._i = 5., -5.
         output = pid.step(NS(x=-1., y=1., z=0.))
         self.assertLessEqual(output[0], pid.roll.control_range[1])
         self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
-        self.assertLess(pid.roll_low._i, 10.)
-        self.assertGreater(pid.pitch_low._i, -10.)
+        self.assertLess(pid.roll_low._i, 5.)
+        self.assertGreater(pid.pitch_low._i, -5.)
 
 
 if __name__ == '__main__':
