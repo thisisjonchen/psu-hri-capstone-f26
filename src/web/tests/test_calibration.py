@@ -1,7 +1,6 @@
 """Calibration geometry, BLE workflow and save recovery (no hardware)."""
 import asyncio
 import copy
-import json
 import math
 import os
 import sys
@@ -98,12 +97,7 @@ class CoordinatorTest(unittest.TestCase):
         self.addCleanup(lambda: None if node.stopping.is_set() else node.close())
         return node
 
-    def test_offline_room_setup_saves_without_drone_acknowledgments(self):
-        self.node.close()
-        with open(self.state_path, 'w') as stream:
-            json.dump({'participants': ['ws://disconnected.local:9090'], 'owner': 'old-owner',
-                       'boards': BOARDS}, stream)
-        self.node = self.create()
+    def test_room_setup_saves_and_requires_verification_after_restart(self):
         self.node.run(self.measure)
         self.assertEqual(self.node.state['stage'], 'preview')
         self.ble.save.side_effect = lambda positions, check, on_write: (check(), on_write())

@@ -97,11 +97,13 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(len(self.env.messages['/pidrone/battery']), len(battery_times))
         self.assertEqual(transactions[-2:], expected[:2])
 
-    def test_missing_bulk_reply_does_not_publish_cached_imu_and_still_disarms(self):
+    def test_missing_bulk_reply_skips_imu_and_keeps_loop_running_until_shutdown(self):
         self.missing_reply = MultiWii.RAW_IMU
         output = self.run_loop()
-        self.assertIn('Incomplete IMU response', output)
+        self.assertNotIn('internal error', output)
         self.assertEqual(self.env.messages['/pidrone/imu'], [])
+        self.assertTrue(self.env.ros.is_shutdown())
+        # Preserve the baseline disarm on actual node shutdown.
         self.assertEqual([(kind, code) for kind, code, _ in self.events[-2:]],
                          [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC)])
         self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)

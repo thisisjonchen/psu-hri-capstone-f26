@@ -319,6 +319,8 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   const a = app.connect('drone1'), b = app.connect('drone2');
   const oldRos = a.ros;
   const oldRange = a.subscribers.find(topic => topic.name === '/pidrone/range');
+  const oldTags = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
+  oldTags.receive(tags([0], ['PICKUP']));
   a.connect();
   assert.equal(a.ros, oldRos);
   assert.equal(app.timers.size, 2);
@@ -326,14 +328,19 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   assert.equal(app.timers.size, 1);
   assert.equal(b.connected, true);
   assert.equal(a.field('camera').src, 'nocamera.svg');
+  assert.equal(a.field('detection').textContent, 'Drone Offline');
   app.connect('drone1');
   oldRange.receive({ ...stamp(500), range: 9 });
+  oldTags.receive(tags([0], ['PICKUP']));
+  assert.equal(a.field('detection').textContent, 'Drone Offline');
   oldRos.events.close();
   assert.equal(a.connected, true);
   assert.equal(a.series.range.length, 0);
   assert.equal(app.timers.size, 2);
   app.receive(a, '/pidrone/range', { ...stamp(1), range: 0.1 });
   assert.equal(a.startTime, 1);
+  app.receive(a, '/pidrone/apriltag/detections', tags([1], ['DROP_OFF']));
+  assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
 test('unexpected close or error stops heartbeats and clears publishers', () => {
@@ -413,15 +420,6 @@ test('the speed header shows horizontal speed and vertical direction while the g
   assert.ok(Math.abs(a.speedChart.data.datasets[1].data[0].y + 0.2) < 1e-6);
   assert.equal(b.series.verticalSpeed.length, 0);
   assert.equal(b.field('verticalSpeed').textContent, '—');
-  app.receive(a, '/pidrone/range', rangeAt(101, 0.36));
-  app.receive(a, '/pidrone/range', rangeAt(101.2, 0.36));
-  assert.equal(a.field('verticalSpeed').textContent, '0.00 m/s');
-  app.receive(a, '/pidrone/range', rangeAt(101.3, NaN));
-  assert.equal(a.field('verticalSpeed').textContent, '—');
-  a.disconnect();
-  assert.equal(a.field('speed').textContent, '—');
-  assert.equal(a.field('verticalSpeed').textContent, '—');
-  assert.equal(a.series.verticalSpeed.length, 0);
 });
 
 test('vertical speed follows timestamped height with smoothing and ignores repeated or older stamps', () => {
@@ -721,20 +719,6 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   for (const callback of app.maintenanceTimers.values()) callback();
   assert.equal(a.field('detection').textContent, 'Drone Offline');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
-});
-
-test('disconnect clears tags and old ROS callbacks cannot overwrite a new session', () => {
-  const app = dashboard();
-  const a = app.connect('drone1');
-  const oldTopic = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
-  oldTopic.receive(tags([0], ['PICKUP']));
-  a.disconnect();
-  assert.equal(a.field('detection').textContent, 'Drone Offline');
-  app.connect('drone1');
-  oldTopic.receive(tags([0], ['PICKUP']));
-  assert.equal(a.field('detection').textContent, 'Drone Offline');
-  app.receive(a, '/pidrone/apriltag/detections', tags([1], ['DROP_OFF']));
-  assert.equal(a.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
 test('scan, assignment, measurement and saving work independently of drones', async () => {

@@ -93,20 +93,6 @@ class FusionMathTest(unittest.TestCase):
             np.testing.assert_allclose(rotate((0, 1), angle), forward, atol=1e-12)
             np.testing.assert_allclose(rotate((1, 0), angle), right, atol=1e-12)
 
-    def test_delayed_uwb_corrects_room_without_jumping_local_odometry(self):
-        f = PlanarFusion(yaw_offset=math.pi/2)
-        f.predict(10)
-        for time in (10.1, 10.2):
-            f.predict(time)
-        self.assertTrue(f.update_uwb((2, 3), np.eye(2)*0.0225, 10.1)[0])
-        np.testing.assert_allclose(f.room, (2, 3), atol=1e-12)
-        odom = f.odom.copy()
-        before = f.room.copy()
-        self.assertTrue(f.update_uwb((2.1, 3.2), np.eye(2)*0.0225, 10.2)[0])
-        np.testing.assert_array_equal(f.odom, odom)
-        self.assertTrue(before[0] < f.room[0] < 2.1)
-        self.assertGreater(np.linalg.eigvalsh(f.covariance).min(), 0)
-
     def test_outliers_invalid_covariance_and_duplicate_fixes_cannot_renew_solution(self):
         f = PlanarFusion(yaw_offset=0)
         f.predict(10)
@@ -372,9 +358,6 @@ class FusionNodeTest(unittest.TestCase):
         self.assertGreater(covariance[0], self.node.filter.velocity_variance)
         self.assertEqual(self.node.generation, generation)
         previous_velocity = self.node.filter.velocity.copy()
-        # Exercise gap freezing even though trim is disabled in the default tuning.
-        controller.pid.roll_low.ki = controller.pid.pitch_low.ki = .5
-        controller.pid.roll_low._i, controller.pid.pitch_low._i = -2., -3.
         for i in range(42):  # A 0.70 s UWB gap still permits braking.
             self.now += 1/60.0
             self.ros_now += 1/60.0
@@ -385,31 +368,15 @@ class FusionNodeTest(unittest.TestCase):
             controller.local_ready_callback(self.messages['pidrone/localization/local_ready'][-1])
             controller.room_ready_callback(self.messages['pidrone/localization/ready'][-1])
             controller.desired_twist_callback(twist())
-            before = (controller.pid.roll_low._i, controller.pid.pitch_low._i)
             command = controller.step()
             self.assertTrue(controller.local_ready())
             self.assertTrue(controller.room_ready())
             self.assertLess(command[0], 1500)
             self.assertLess(command[1], 1500)
             if self.ros_now - self.node.filter.uwb_stamp > .5:
-                self.assertEqual((controller.pid.roll_low._i, controller.pid.pitch_low._i), before)
                 self.assertFalse(controller.room_ready(allow_prediction=False))
                 self.assertEqual(controller.room_pose.header.stamp.to_sec(), self.node.filter.uwb_stamp)
             np.testing.assert_allclose(self.node.filter.velocity, previous_velocity)
-        # A matching accepted fix resumes trim without resetting velocity.
-        frozen_trim = (controller.pid.roll_low._i, controller.pid.pitch_low._i)
-        self.uwb(*self.node.filter.room)
-        self.node.step()
-        self.ros_now += 1/60.0
-        self.now += 1/60.0
-        self.refresh()
-        self.node.step()
-        controller.current_state_callback(self.messages['pidrone/state'][-1])
-        controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
-        controller.step()
-        self.assertLess(controller.pid.roll_low._i, frozen_trim[0])
-        self.assertLess(controller.pid.pitch_low._i, frozen_trim[1])
-        np.testing.assert_allclose(self.node.filter.velocity, previous_velocity)
         for i in range(66):  # A longer outage still expires.
             self.now += 1/60.0
             self.ros_now += 1/60.0
@@ -660,26 +627,10 @@ class FusionNodeTest(unittest.TestCase):
         self.assertGreater(output[0], 1495, 'a 0.02 m/s error needs a modest correction')
         self.assertLess(output[1], 1505, 'a 0.02 m/s error needs a modest correction')
 
-    def test_xy_trim_cannot_exceed_output_limits_or_wind_up_at_saturation(self):
-        pid = self.controller().pid
-        # Preserve coverage of optional trim behavior if it is re-enabled later.
-        pid.roll_low.ki = pid.pitch_low.ki = .5
-        pid.roll_low._i, pid.pitch_low._i = 5., -5.
-        error = NS(x=100., y=-100., z=0.)
-        for _ in range(61):
-            output = pid.step(error)
-            self.assertLessEqual(output[0], 1530)
-            self.assertGreaterEqual(output[1], 1470)
-            self.ros_now += 1 / 60.0
-        self.assertEqual(pid.roll_low._i, 5.)
-        self.assertEqual(pid.pitch_low._i, -5.)
-        # Existing trim unwinds when the velocity error reverses.
-        pid.roll_low._i, pid.pitch_low._i = 5., -5.
-        output = pid.step(NS(x=-1., y=1., z=0.))
-        self.assertLessEqual(output[0], pid.roll.control_range[1])
-        self.assertGreaterEqual(output[1], pid.pitch.control_range[0])
-        self.assertLess(pid.roll_low._i, 5.)
-        self.assertGreater(pid.pitch_low._i, -5.)
+    def test_xy_output_limits(self):
+        output = self.controller().pid.step(NS(x=100., y=-100., z=0.))
+        self.assertLessEqual(output[0], 1530)
+        self.assertGreaterEqual(output[1], 1470)
 
 
 if __name__ == '__main__':

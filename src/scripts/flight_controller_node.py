@@ -153,7 +153,8 @@ class FlightController(object):
         replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
         if any(not isinstance(reply, dict) for reply in replies) or set(
                 reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
-            raise RuntimeError('Incomplete IMU response from flight controller')
+            rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
+            return False
 
         # calculate values to update imu_message:
         roll = np.deg2rad(self.board.attitude['angx'])
@@ -229,6 +230,7 @@ class FlightController(object):
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
+        return True
 
     def update_battery_message(self):
         """
@@ -405,8 +407,8 @@ def main():
             fc.update_command()
             fc.send_rc_cmd()
 
-            fc.update_imu_message()
-            imupub.publish(fc.imu_message)
+            if fc.update_imu_message():
+                imupub.publish(fc.imu_message)
             # 2 Hz leaves margin for the routines' 1-second battery watchdog.
             now = rospy.get_time()
             if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:

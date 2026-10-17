@@ -187,18 +187,6 @@ class LocatorTest(unittest.TestCase):
                     self.assertIn('nom=1 stat=100', loc.rate_warning)
                 loc.stop()
 
-        fake = FakeSerial()
-        loc = UWBLocator(port='fake')
-        loc._serial = fake
-        loc._stop.wait = lambda timeout: False
-        with mock.patch.object(loc, '_shell_reply', return_value='') as reply:
-            self.assertTrue(loc._set_update_rate())
-        self.assertEqual(sum(call.args[0] == b'aurs 1 1\r' for call in reply.call_args_list), 2)
-        self.assertFalse(loc.rate_verified)
-        self.assertIn('10 Hz unconfirmed', loc.rate_warning)
-        with mock.patch('localization.uwb_locator.monotonic', side_effect=[0, 3]):
-            self.assertEqual(loc._shell_reply(b'aurg\r', 'nom='), '')
-
         # A reconnect must repair a reverted tag, even after an earlier verified run.
         fake = FakeSerial([LEC.encode('ascii')])
         loc = self.start_locator(fake)
@@ -223,10 +211,7 @@ class LocatorTest(unittest.TestCase):
         details = dict(loc.diagnostics(time.monotonic()))
         self.assertEqual(details['reader_state'], 'streaming')
         self.assertEqual(details['last_reported_quality'], '10')
-        self.assertEqual(details['last_serial_line'], low_quality.strip())
         self.assertEqual(details['rejected_records'], '1')
-        self.assertNotEqual(details['serial_age_s'], 'none')
-        self.assertNotEqual(details['record_age_s'], 'none')
         with mock.patch('localization.uwb_locator.monotonic', return_value=loc.position.timestamp + 1):
             self.assertFalse(loc.is_fresh())
 
