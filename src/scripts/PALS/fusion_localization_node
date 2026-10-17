@@ -2,6 +2,7 @@
 """UWB/ToF room localization with continuous local controller odometry."""
 import math
 import threading
+from collections import deque
 
 import numpy as np
 import rospy
@@ -13,7 +14,8 @@ from pidrone_pkg.msg import AnchorLayout, Mode, State
 from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Bool, UInt32
 
-from localization.fusion import PlanarFusion, body_angle, rotate, XY_PREDICTION_TIMEOUT
+from localization.fusion import (PlanarFusion, body_angle, horizontal_acceleration,
+                                 rotate, XY_PREDICTION_TIMEOUT)
 from localization.position import PositionCombiner
 from localization.uwb_locator import monotonic
 
@@ -43,6 +45,9 @@ class FusionLocalizationNode(object):
             floor_z=float(rospy.get_param('~floor_z', 0.0)),
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
         self.imu = None
+        self.use_imu_acceleration = bool(rospy.get_param('~use_imu_acceleration', False))
+        self.acceleration_bias = None
+        self.bias_samples = deque()
         self.mode = None
         self.mode_at = None
         self.pending = []
@@ -66,6 +71,7 @@ class FusionLocalizationNode(object):
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
         rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
+        rospy.loginfo('Keep still for 2 seconds while disarmed to measure startup acceleration bias')
 
     def fresh(self, stamp, now, timeout=None):
         limit = self.timeout if timeout is None else timeout
@@ -96,6 +102,40 @@ class FusionLocalizationNode(object):
             quaternion /= norm
             self.height.update_attitude(tuple(quaternion), stamp, monotonic())
             self.imu = (stamp, tf.transformations.euler_from_quaternion(quaternion), omega, quaternion)
+            self.update_acceleration(msg)
+
+    def update_acceleration(self, msg):
+        stamp, attitude, omega, _ = self.imu
+        a = msg.linear_acceleration
+        acceleration = np.array([a.x, a.y, a.z])
+        valid = (msg.linear_acceleration_covariance[0] != -1
+                 and np.all(np.isfinite(acceleration)))
+        mode_fresh = self.fresh(self.mode_at, rospy.get_time())
+        if self.acceleration_bias is None:
+            # Learn once, with motors off. Do not learn flight acceleration as bias.
+            stationary = (valid and mode_fresh and self.mode == 'DISARMED'
+                          and np.linalg.norm(omega) < .1
+                          and np.linalg.norm(acceleration) < .5)
+            if (not stationary or (self.bias_samples
+                    and stamp - self.bias_samples[-1][0] > self.timeout)):
+                self.bias_samples.clear()
+            if stationary:
+                self.bias_samples.append((stamp, acceleration.copy()))
+                while len(self.bias_samples) > 1 and self.bias_samples[1][0] <= stamp - 2.0:
+                    self.bias_samples.popleft()
+                samples = np.array([sample[1] for sample in self.bias_samples])
+                if (len(samples) >= 20 and stamp - self.bias_samples[0][0] >= 2.0
+                        and np.max(np.std(samples, axis=0)) < .05):
+                    self.acceleration_bias = samples.mean(axis=0)
+                    self.bias_samples.clear()
+                    rospy.loginfo('Startup acceleration bias ready: (%.4f, %.4f, %.4f) m/s^2',
+                                  *self.acceleration_bias)
+        room_acceleration = np.zeros(2)
+        if (self.use_imu_acceleration and self.acceleration_bias is not None and valid
+                and mode_fresh and self.mode == 'FLYING' and self.filter.yaw_offset is not None):
+            local = horizontal_acceleration(acceleration - self.acceleration_bias, attitude)
+            room_acceleration = rotate(local, self.filter.yaw_offset)
+        self.filter.update_acceleration(room_acceleration, stamp)
 
     def range_callback(self, msg):
         with self.lock:
@@ -150,6 +190,8 @@ class FusionLocalizationNode(object):
                 old = self.filter
                 old.stamp = None
                 old.history.clear()
+                old.accelerations.clear()
+                self.bias_samples.clear()
                 self.invalidate_room()
                 self.height.range = self.height.attitude = self.imu = None
                 self.layout = None
@@ -200,7 +242,9 @@ class FusionLocalizationNode(object):
             status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof'
             status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
             status.message = reason
-            status.values = [KeyValue(key='xy_source', value='UWB'),
+            status.values = [KeyValue(key='xy_source', value='UWB + IMU prediction'
+                                     if self.use_imu_acceleration and self.acceleration_bias is not None else 'UWB'),
+                             KeyValue(key='acceleration_bias_ready', value=str(self.acceleration_bias is not None)),
                              KeyValue(key='height_source', value='ToF'),
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='frame_id', value=self.frame),

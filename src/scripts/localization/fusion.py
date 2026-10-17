@@ -2,7 +2,7 @@
 
 The existing controller uses x=right, y=forward. The FC's IMU yaw describes
 forward in a conventional x/y world, so the controller basis is yaw - pi/2.
-UWB alone estimates room position and velocity; IMU heading converts the axes.
+UWB corrects room position and velocity; IMU acceleration predicts between fixes.
 Local odometry integrates the corrected velocity without position jumps.
 """
 import math
@@ -23,6 +23,19 @@ def rotate(vector, angle):
 
 def body_angle(imu_yaw):
     return imu_yaw - math.pi / 2.0
+
+
+def horizontal_acceleration(acceleration, attitude):
+    """Gravity-compensated right/forward/up acceleration -> local world XY.
+
+    The FC quaternion uses forward/left/up, unlike its acceleration topic.
+    Include tilt before projecting onto XY; do not subtract gravity again.
+    """
+    right, forward, up = acceleration
+    roll, pitch, yaw = attitude
+    sr, cr, sp, cp = math.sin(roll), math.cos(roll), math.sin(pitch), math.cos(pitch)
+    return rotate((cp * forward + sp * (-sr * right + cr * up),
+                   -cr * right - sr * up), yaw)
 
 
 def target_velocity(target, position, angle, gain, limit):
@@ -57,6 +70,33 @@ class PlanarFusion(object):
         self.stamp = None
         self.uwb_stamp = None
         self.history = deque()
+        self.accelerations = deque()
+
+    def update_acceleration(self, acceleration, stamp):
+        """Store a room-frame input at its measurement time, never renew its age."""
+        acceleration = np.asarray(acceleration, dtype=float)
+        if (acceleration.shape != (2,) or not np.all(np.isfinite(acceleration))
+                or not np.isfinite(stamp) or stamp <= 0
+                or (self.accelerations and stamp <= self.accelerations[-1][0])):
+            return False
+        self.accelerations.append((stamp, acceleration.copy()))
+        # Keep the last input before the observation history as well.
+        while len(self.accelerations) > 1 and self.accelerations[1][0] < stamp - 2.0:
+            self.accelerations.popleft()
+        return True
+
+    def acceleration_motion(self, start, end):
+        """Known velocity/displacement increments for held, timestamped inputs."""
+        velocity, displacement = np.zeros(2), np.zeros(2)
+        samples = list(self.accelerations)
+        for i, (stamp, acceleration) in enumerate(samples):
+            stop = samples[i + 1][0] if i + 1 < len(samples) else end
+            left, right = max(start, stamp), min(end, stop, stamp + self.max_gap)
+            if right > left:
+                duration = right - left
+                velocity += acceleration * duration
+                displacement += acceleration * duration * (end - (left + right) / 2.0)
+        return velocity, displacement
 
     def reset_room(self):
         self.room = None
@@ -68,7 +108,7 @@ class PlanarFusion(object):
         self.velocity = rotate(self.room_velocity, -self.yaw_offset)
 
     def predict(self, stamp):
-        """Predict constant velocity between accepted UWB fixes."""
+        """Predict with measured acceleration; fall back to constant velocity."""
         if not np.isfinite(stamp) or stamp <= 0:
             return False
         if self.stamp is not None and stamp <= self.stamp:
@@ -80,9 +120,12 @@ class PlanarFusion(object):
             self.history.clear()
         elif dt:
             displacement = self.velocity * dt
-            self.odom += displacement
             if self.room is not None:
-                self.room += rotate(displacement, self.yaw_offset)
+                delta_velocity, delta_position = self.acceleration_motion(self.stamp, stamp)
+                displacement += rotate(delta_position, -self.yaw_offset)
+                self.room += self.room_velocity * dt + delta_position
+                self.room_velocity += delta_velocity
+                self._update_local_velocity()
                 transition = np.eye(4)
                 transition[:2, 2:] = np.eye(2) * dt
                 # ROS Kinetic's NumPy predates np.block.
@@ -93,6 +136,7 @@ class PlanarFusion(object):
                 noise *= self.acceleration_variance
                 noise[:2, :2] += np.eye(2) * (self.velocity_variance * dt**2 + self.drift_variance * dt)
                 self.covariance = transition.dot(self.covariance).dot(transition.T) + noise
+            self.odom += displacement
         self.stamp = stamp
         self.history.append(stamp)
         while self.history and stamp - self.history[0] > 2.0:
@@ -113,18 +157,22 @@ class PlanarFusion(object):
             return False, 'Invalid UWB position/covariance'
         if not self.history or stamp < self.history[0] or stamp > self.history[-1]:
             return False, 'UWB timestamp is outside prediction history'
-        # A delayed fix observes position - age * velocity, not current position.
+        # Undo known acceleration as well when observing a past position.
         age = self.stamp - stamp
+        delta_velocity, delta_position = self.acceleration_motion(stamp, self.stamp)
+        acceleration_offset = age * delta_velocity - delta_position
         noise = covariance + np.eye(2) * (self.velocity_variance * age ** 2 + self.drift_variance * age)
         if self.room is None:
-            self.room = position.copy()
+            self.room = position.copy() + delta_position
+            self.room_velocity = delta_velocity
+            self._update_local_velocity()
             self.covariance = np.zeros((4, 4))
             self.covariance[2:, 2:] = np.eye(2) * self.acceleration_variance
             self.covariance[:2, :2] = noise + age**2 * self.covariance[2:, 2:]
             self.covariance[:2, 2:] = self.covariance[2:, :2] = age * self.covariance[2:, 2:]
         else:
             observation_matrix = np.hstack((np.eye(2), -age * np.eye(2)))
-            innovation = position - (self.room - age * self.room_velocity)
+            innovation = position - (self.room - age * self.room_velocity + acceleration_offset)
             cross = self.covariance.dot(observation_matrix.T)
             total = observation_matrix.dot(cross) + noise
             if (np.linalg.norm(innovation) > self.max_innovation

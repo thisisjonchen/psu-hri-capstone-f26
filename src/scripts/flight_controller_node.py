@@ -148,10 +148,12 @@ class FlightController(object):
         Compute the ROS IMU message by reading data from the board.
         """
 
-        # extract roll, pitch, heading
-        self.board.getData(MultiWii.ATTITUDE)
-        # extract lin_acc_x, lin_acc_y, lin_acc_z
-        self.board.getData(MultiWii.RAW_IMU)
+        # Queue both requests before waiting for replies, avoiding an extra
+        # request/response turnaround between attitude and acceleration.
+        replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
+        if any(not isinstance(reply, dict) for reply in replies) or set(
+                reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
+            raise RuntimeError('Incomplete IMU response from flight controller')
 
         # calculate values to update imu_message:
         roll = np.deg2rad(self.board.attitude['angx'])
@@ -389,6 +391,7 @@ def main():
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
     # set the loop rate (Hz)
     r = rospy.Rate(60)
+    last_battery_at = None
     try:
         while not rospy.is_shutdown():
             # if the current mode is anything other than disarmed
@@ -398,15 +401,18 @@ def main():
                 print("mode", fc.curr_mode)
                 break
                 
-            # update and publish flight controller readings
-            fc.update_battery_message()
-            fc.update_imu_message()
-            imupub.publish(fc.imu_message)
-            batpub.publish(fc.battery_message)
-
-            # update and send the flight commands to the board
+            # Deliver the current command before waiting for sensor telemetry.
             fc.update_command()
             fc.send_rc_cmd()
+
+            fc.update_imu_message()
+            imupub.publish(fc.imu_message)
+            # 2 Hz leaves margin for the routines' 1-second battery watchdog.
+            now = rospy.get_time()
+            if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:
+                fc.update_battery_message()
+                batpub.publish(fc.battery_message)
+                last_battery_at = rospy.get_time()
 
             # publish the current mode of the drone
             fc.modepub.publish(fc.curr_mode)

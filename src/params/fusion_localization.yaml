@@ -1,6 +1,9 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
+# Experimental: old flight replay did not improve next-fix prediction error.
+# Bias is measured at startup regardless; leave prediction off pending validation.
+use_imu_acceleration: false
 velocity_stddev: 0.12
-# Process uncertainty for UWB-derived velocity (m/s per sqrt(s)).
+# Process uncertainty for predicted velocity (m/s per sqrt(s)).
 acceleration_stddev: 0.3
 drift_stddev: 0.08
 # Freshness for IMU/height and newly received fixes; XY prediction has a shared 1 s limit.

@@ -9,7 +9,7 @@ from unittest import mock
 
 import numpy as np
 
-from localization.fusion import PlanarFusion, body_angle, rotate, target_velocity
+from localization.fusion import PlanarFusion, body_angle, horizontal_acceleration, rotate, target_velocity
 from localization import test_ros_node as ros_doubles
 from localization.test_ros_node import Pose, Stamp, Layout
 
@@ -47,6 +47,41 @@ def state():
 
 
 class FusionMathTest(unittest.TestCase):
+    def test_acceleration_axes_include_tilt_without_subtracting_gravity_twice(self):
+        np.testing.assert_allclose(horizontal_acceleration((1, 0, 0), (0, 0, 0)), (0, -1), atol=1e-12)
+        np.testing.assert_allclose(horizontal_acceleration((0, 1, 0), (0, 0, math.pi/2)), (0, 1), atol=1e-12)
+        tilt = math.pi/6
+        # A world-horizontal acceleration expressed in a pitched body.
+        np.testing.assert_allclose(horizontal_acceleration((0, math.cos(tilt), math.sin(tilt)),
+                                   (0, tilt, 0)), (1, 0), atol=1e-12)
+        # A world-vertical acceleration must not leak into planar velocity.
+        np.testing.assert_allclose(horizontal_acceleration((0, -math.sin(tilt), math.cos(tilt)),
+                                   (0, tilt, 0)), (0, 0), atol=1e-12)
+        np.testing.assert_allclose(horizontal_acceleration((-math.sin(tilt), 0, math.cos(tilt)),
+                                   (tilt, 0, 0)), (0, 0), atol=1e-12)
+
+    def test_acceleration_brakes_between_fixes_and_delayed_fix_does_not_undo_it(self):
+        f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5)
+        f.predict(10)
+        f.update_uwb((0, 0), np.eye(2)*.0225, 10)
+        f.update_acceleration((1, 0), 10)
+        f.update_acceleration((-1, 0), 10.2)
+        for i in range(1, 51):
+            f.predict(10+i*.02)
+            if i == 25:
+                np.testing.assert_allclose(f.room_velocity, (-.1, 0), atol=1e-10)
+                np.testing.assert_allclose(f.room, (.035, 0), atol=1e-10)
+                before = f.odom.copy()
+                self.assertEqual(f.uwb_stamp, 10)  # Prediction has not renewed the fix.
+                # At 10.3 the true position was .035 and velocity was +.1.
+                self.assertTrue(f.update_uwb((.035, 0), np.eye(2)*.0225, 10.3)[0])
+                np.testing.assert_allclose(f.room_velocity, (-.1, 0), atol=1e-10)
+                np.testing.assert_array_equal(f.odom, before)
+        # Last acceleration expires at 10.7, then only velocity is extrapolated.
+        np.testing.assert_allclose(f.room_velocity, (-.3, 0), atol=1e-10)
+        np.testing.assert_allclose(f.room, (-.095, 0), atol=1e-10)
+        np.testing.assert_allclose(rotate(f.odom, math.pi/2), f.room, atol=1e-10)
+
     def test_controller_right_and_forward_axes_at_two_headings(self):
         np.testing.assert_allclose(rotate((0, 1), body_angle(0)), (1, 0), atol=1e-12)
         np.testing.assert_allclose(rotate((1, 0), body_angle(0)), (0, -1), atol=1e-12)
@@ -191,11 +226,63 @@ class FusionNodeTest(unittest.TestCase):
         self.uwb()
         self.node.step()
 
-    def refresh(self, yaw=0):
+    def refresh(self, yaw=0, acceleration=(0, 0, 0), omega=(0, 0, 0), acceleration_valid=True):
         self.node.range_callback(NS(range=.5, min_range=.05, max_range=4, header=NS(stamp=Stamp(self.ros_now))))
         q = quaternion(yaw=yaw)
-        self.node.imu_callback(NS(orientation=NS(x=q[0], y=q[1], z=q[2], w=q[3]), angular_velocity=vector(),
+        self.node.imu_callback(NS(orientation=NS(x=q[0], y=q[1], z=q[2], w=q[3]),
+            angular_velocity=NS(**dict(zip(('x', 'y', 'z'), omega))),
+            linear_acceleration=NS(**dict(zip(('x', 'y', 'z'), acceleration))),
+            linear_acceleration_covariance=[0 if acceleration_valid else -1]*9,
             orientation_covariance=[0]*9, header=NS(stamp=Stamp(self.ros_now))))
+
+    def test_startup_bias_waits_for_stationary_disarmed_data_and_is_frozen_in_flight(self):
+        self.node = type(self.node)()
+        bias = np.array((.03, -.02, .02))
+
+        def sample(mode, acceleration=bias, omega=(0, 0, 0), valid=True):
+            self.ros_now += .1
+            self.node.mode_callback(NS(mode=mode))
+            self.refresh(acceleration=acceleration, omega=omega, acceleration_valid=valid)
+
+        # Arming, rotation, invalid data and a gravity-scale error cannot calibrate.
+        for mode, a, w, valid in [('ARMED', bias, (0, 0, 0), True),
+                                  ('DISARMED', bias, (0, 0, .2), True),
+                                  ('DISARMED', bias, (0, 0, 0), False),
+                                  ('DISARMED', (0, 0, 29), (0, 0, 0), True)]:
+            for _ in range(25):
+                sample(mode, a, w, valid)
+            self.assertIsNone(self.node.acceleration_bias)
+        for _ in range(10):
+            sample('DISARMED')
+        self.ros_now += 1  # A gap cannot count toward the stationary interval.
+        sample('DISARMED')
+        self.assertIsNone(self.node.acceleration_bias)
+        for _ in range(22):
+            sample('DISARMED')
+        np.testing.assert_allclose(self.node.acceleration_bias, bias, atol=1e-12)
+        self.node.filter.yaw_offset = math.pi/2
+        # Default remains UWB-only, even with successful bias measurement.
+        sample('FLYING', bias + (0, .2, 0))
+        np.testing.assert_array_equal(self.node.filter.accelerations[-1][1], (0, 0))
+        self.node.use_imu_acceleration = True
+        sample('FLYING', bias + (0, .2, 0))
+        np.testing.assert_allclose(self.node.filter.accelerations[-1][1], (0, .2), atol=1e-12)
+        np.testing.assert_allclose(self.node.acceleration_bias, bias, atol=1e-12)
+        self.report_anchors()
+        self.uwb()
+        self.node.step()
+        fix_stamp = self.node.filter.uwb_stamp
+        self.ros_now += .1
+        self.node.step()  # No new UWB: acceleration reaches controller velocity.
+        message = self.messages['pidrone/state'][-1]
+        self.assertAlmostEqual(message.twist_with_covariance.twist.linear.y, .02)
+        self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
+        self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
+        sample('FLYING', (float('nan'), 0, 0))
+        np.testing.assert_array_equal(self.node.filter.accelerations[-1][1], (0, 0))
+        sample('DISARMED', bias + (.1, 0, 0))
+        np.testing.assert_array_equal(self.node.filter.accelerations[-1][1], (0, 0))
+        np.testing.assert_allclose(self.node.acceleration_bias, bias, atol=1e-12)
 
     def test_startup_heading_waits_for_disarmed_mode_and_fresh_imu(self):
         self.node.filter.yaw_offset = None

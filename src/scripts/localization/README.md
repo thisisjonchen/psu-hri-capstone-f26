@@ -4,9 +4,18 @@ This integrates the `localization` branch at `69051388a6bfbbf56eb32280a29e31195a
 into the DD24 ROS package. The DWM1001/PANS tag computes horizontal position from
 room anchors. The ROS node publishes UWB x/y and **ToF z**, using the existing
 `/pidrone/range` and `/pidrone/imu` streams. UWB height is never used in the combined pose.
-The fusion node estimates XY position and velocity from UWB alone, uses IMU heading
+By default, fusion estimates XY position and velocity from UWB alone, uses IMU heading
 to convert room velocity into body axes, and supplies ToF Z. It owns the continuous
 local state used by the PID controller. Optical flow does not enter this estimate.
+
+The flight-controller loop sends RC commands before reading telemetry and queues
+attitude and raw-IMU requests together before waiting for their replies. Battery
+telemetry is polled at 2 Hz, leaving margin for the routines' one-second battery
+freshness check. The loop still targets 60 Hz; serial turnaround determines the
+achieved rate. After restarting the flight-controller node while disarmed, check
+`rostopic hz /pidrone/imu` and `rostopic hz /pidrone/battery`. A missing IMU reply
+ends the loop through its existing shutdown/disarm path instead of publishing a
+cached reading with a new timestamp.
 
 ## Install and launch on each drone
 
@@ -117,6 +126,14 @@ keep that offset. Restart fusion while facing +Y to align again. No routine or
 class calibration call is needed; the old manual launch/environment offset is
 removed. ToF still supplies height, and UWB still corrects room X/Y. This startup
 alignment does not correct ongoing IMU yaw drift.
+
+The node also measures acceleration bias once, over at least two seconds of
+stationary, disarmed IMU samples. Keep the drone still until it logs
+`Startup acceleration bias ready`. Rotation, gaps, unavailable acceleration,
+large residual gravity, or an unstable sample window prevent calibration.
+This does not require UWB and does not recalibrate the flight controller. The bias
+is frozen after capture; restarting the node measures it again. Without a bias,
+the estimator continues using UWB-only XY.
 
 ## ROS outputs and dashboard
 
@@ -296,15 +313,36 @@ not obstacle avoidance, collision avoidance, or formation planning.
 ### Fusion behavior
 
 The planar Kalman filter estimates room XY position and velocity from successive
-UWB fixes. It predicts constant velocity between fixes and filters measurement
-noise rather than directly differentiating each pair of positions. No optical-flow
+UWB fixes. By default it predicts constant velocity between fixes and filters
+measurement noise rather than directly differentiating each pair of positions. No optical-flow
 measurements, quality gate, or camera fallback are used. IMU heading rotates the
 estimated velocity into body axes for `/pidrone/state`; ToF supplies Z.
 Local odometry integrates velocity without jumping at a UWB fix; direct
 room-position corrections adjust the `map → odom` offset.
 
-Delayed UWB observations measure `position - age * velocity`, with additional
-uncertainty over that interval. Repeated or out-of-order observations cannot renew
+The experimental `use_imu_acceleration` option adds bias-corrected acceleration
+prediction while flying. It is **off by default**: replay of the recorded hover,
+with acceleration rescaled to 2048 counts/g, did not improve next-fix position
+prediction error (RMS 4.6 cm without it, 4.8 cm with it). These errors measure
+agreement with the next noisy UWB fix, not independently measured flight accuracy.
+Comparing changes between velocities fitted over adjacent one-second windows
+also shows incomplete agreement: map Y trends partly match, map X trends match
+weakly, and the combined difference is about 0.16 m/s RMS. Varying the comparison
+window, relative timing, or stationary bias average does not resolve this.
+These overlapping-window comparisons cannot identify which sensor is wrong.
+Existing recordings therefore do not yet justify enabling this option in
+`params/fusion_localization.yaml`; repeating the direction check is not needed.
+
+Acceleration is already gravity-compensated by the flight-controller node. Fusion
+subtracts the startup body-frame bias, transforms right/forward/up into the IMU's
+forward/left/up axes, then uses roll, pitch and yaw to obtain room XY acceleration.
+It does not integrate acceleration into Z. Timestamped inputs affect prediction
+only from their sample time and expire at `sensor_timeout`; invalid samples or
+non-flying modes supply zero acceleration. There is no extra smoothing window.
+
+Delayed UWB observations measure `position - age * velocity`, plus the known
+acceleration contribution when enabled, with additional uncertainty over that
+interval. Repeated or out-of-order observations cannot renew
 a fix. Innovation gates reject inconsistent UWB observations. Prediction runs at
 60 Hz, but this does not increase the UWB measurement rate or remove its latency.
 
@@ -324,7 +362,7 @@ Room output requires a recent accepted UWB fix and a validated convex four-ancho
 layout. Surveyed anchors remain valid across missing/partial reports; a changed
 complete layout resets the room reference. Sensor gaps do not change the room
 generation. Parameters in `params/fusion_localization.yaml` are initial tuning
-values. `acceleration_stddev` controls process uncertainty in UWB-derived velocity
+values. `acceleration_stddev` controls process uncertainty in predicted velocity
 and replaces the former `velocity_correction_stddev` parameter, with the same 0.3
 default. Camera-specific fusion settings are removed. UWB noise, latency and
 heading accuracy still require measurement; UWB-only estimation cannot eliminate
@@ -391,7 +429,8 @@ numbers, ToF-only height, tilt/offset math, freshness/time skew, ROS publication
 diagnostics, live anchor parsing/discovery, partial/stale/conflicting layouts,
 no duplicate publication, and independent dashboard telemetry.
 Fusion checks also cover delayed observations, axis rotation, covariance/outlier
-handling, UWB-derived velocity and expiry, layout/time resets, bounded room commands,
+handling, UWB-derived velocity and expiry, startup acceleration bias, inertial
+braking with delayed fixes, layout/time resets, bounded room commands,
 manual overrides and explicit dashboard sending. Hardware-free tests need NumPy and Python 3.9+.
 
 Before flight, with props removed, inspect `rostopic echo /pidrone/localization/pose`
