@@ -3,12 +3,17 @@
   <arg name="frame_id" default="map"/>
   <arg name="floor_z" default="0.0"/>
   <arg name="tof_offset_z" default="0.0"/>
+  <arg name="body_frame" default="pidrone_body"/>
   <group ns="$(arg namespace)">
     <node pkg="pidrone_pkg" type="fusion_localization_node" name="fusion_localization" output="screen">
       <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="tof_offset_z" value="$(arg tof_offset_z)"/>
+      <param name="body_frame" value="$(arg body_frame)"/>
+    </node>
+    <node pkg="pidrone_pkg" type="optical_flow_node.py" name="optical_flow_node" output="screen">
+      <param name="body_frame" value="$(arg body_frame)"/>
     </node>
   </group>
 </launch>

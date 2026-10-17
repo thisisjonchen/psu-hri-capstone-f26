@@ -3,6 +3,7 @@
 The existing controller uses x=right, y=forward. The FC's IMU yaw describes
 forward in a conventional x/y world, so the controller basis is yaw - pi/2.
 UWB corrects room position and velocity; IMU acceleration predicts between fixes.
+Controller velocity blends that estimate with timestamped optical flow.
 Local odometry integrates the corrected velocity without position jumps.
 """
 import math
@@ -48,13 +49,15 @@ class PlanarFusion(object):
     def __init__(self, yaw_offset=None, velocity_stddev=0.12,
                  drift_stddev=0.08,
                  max_gap=0.25, gate=9.21, max_innovation=1.0,
-                 acceleration_stddev=0.3):
+                 acceleration_stddev=0.3, flow_velocity_weight=0.2):
         values = (velocity_stddev, drift_stddev, max_gap, gate,
                   max_innovation, acceleration_stddev)
         if not all(np.isfinite(v) and v > 0 for v in values):
             raise ValueError('Fusion noise, timeouts and gates must be positive')
         if yaw_offset is not None and not np.isfinite(yaw_offset):
             raise ValueError('Room yaw offset must be finite')
+        if not np.isfinite(flow_velocity_weight) or not 0 <= flow_velocity_weight <= 1:
+            raise ValueError('Optical-flow velocity weight must be between zero and one')
         self.yaw_offset = yaw_offset
         self.velocity_variance = velocity_stddev ** 2
         self.drift_variance = drift_stddev ** 2
@@ -69,6 +72,10 @@ class PlanarFusion(object):
         self.covariance = np.eye(4)
         self.stamp = None
         self.uwb_stamp = None
+        self.flow_stamp = None
+        self.flow_velocity = np.zeros(2)
+        self.flow_variance = 0.0
+        self.flow_velocity_weight = flow_velocity_weight
         self.history = deque()
         self.accelerations = deque()
 
@@ -101,11 +108,34 @@ class PlanarFusion(object):
     def reset_room(self):
         self.room = None
         self.uwb_stamp = None
+        self.flow_stamp = None
         self.room_velocity[:] = 0
         self.velocity[:] = 0
 
-    def _update_local_velocity(self):
-        self.velocity = rotate(self.room_velocity, -self.yaw_offset)
+    def flow_active(self, stamp=None):
+        now = self.stamp if stamp is None else stamp
+        return bool(self.room is not None and self.flow_velocity_weight > 0
+                    and self.flow_stamp is not None and now is not None
+                    and 0 <= now - self.flow_stamp <= self.max_gap)
+
+    def _update_local_velocity(self, stamp=None):
+        now = self.stamp if stamp is None else stamp
+        velocity = self.room_velocity.copy()
+        if self.flow_active(now):
+            delta_velocity, _ = self.acceleration_motion(self.flow_stamp, now)
+            weight = self.flow_velocity_weight
+            velocity = (1 - weight) * velocity + weight * (self.flow_velocity + delta_velocity)
+        self.velocity = rotate(velocity, -self.yaw_offset)
+
+    def velocity_covariance(self):
+        covariance = self.covariance[2:, 2:] + np.eye(2) * self.velocity_variance
+        if self.flow_active():
+            noise = self.flow_variance + self.acceleration_variance * (self.stamp - self.flow_stamp)
+            weight = self.flow_velocity_weight
+            # Conservative bound: both branches share IMU attitude/prediction,
+            # so do not assume their errors are independent.
+            covariance = (1 - weight) * covariance + weight * np.eye(2) * noise
+        return covariance
 
     def predict(self, stamp):
         """Predict with measured acceleration; fall back to constant velocity."""
@@ -125,7 +155,7 @@ class PlanarFusion(object):
                 displacement += rotate(delta_position, -self.yaw_offset)
                 self.room += self.room_velocity * dt + delta_position
                 self.room_velocity += delta_velocity
-                self._update_local_velocity()
+                self._update_local_velocity(stamp)
                 transition = np.eye(4)
                 transition[:2, 2:] = np.eye(2) * dt
                 # ROS Kinetic's NumPy predates np.block.
@@ -186,4 +216,32 @@ class PlanarFusion(object):
             remainder = np.eye(4) - gain.dot(observation_matrix)
             self.covariance = remainder.dot(self.covariance).dot(remainder.T) + gain.dot(noise).dot(gain.T)
         self.uwb_stamp = stamp
+        return True, 'OK'
+
+    def update_flow(self, velocity, variance, stamp):
+        """Validate/cache flow for a fixed blend; never feed it back into UWB."""
+        velocity = np.asarray(velocity, dtype=float)
+        if (velocity.shape != (2,) or not np.all(np.isfinite(velocity))
+                or not np.isfinite(variance) or variance <= 0
+                or not np.isfinite(stamp) or stamp <= 0):
+            return False, 'Invalid optical-flow velocity'
+        if self.flow_stamp is not None and stamp <= self.flow_stamp:
+            return False, 'Repeated or out-of-order optical flow'
+        if self.room is None:
+            return False, 'UWB room is not initialized'
+        self.predict(stamp)
+        if self.room is None or not self.history or stamp < self.history[0]:
+            return False, 'Optical-flow timestamp is outside prediction history'
+        # A delayed camera observation measures velocity before the known IMU
+        # increments. Keep the prediction clock and continuous odometry intact.
+        delta_velocity, _ = self.acceleration_motion(stamp, self.stamp)
+        noise = np.eye(2) * (variance + self.acceleration_variance * (self.stamp - stamp))
+        innovation = velocity + delta_velocity - self.room_velocity
+        total = self.covariance[2:, 2:] + noise
+        if float(innovation.dot(np.linalg.solve(total, innovation))) > self.gate:
+            return False, 'Optical-flow innovation rejected'
+        self.flow_velocity = velocity.copy()
+        self.flow_variance = variance
+        self.flow_stamp = stamp
+        self._update_local_velocity()
         return True, 'OK'

@@ -93,6 +93,56 @@ class FusionMathTest(unittest.TestCase):
             np.testing.assert_allclose(rotate((0, 1), angle), forward, atol=1e-12)
             np.testing.assert_allclose(rotate((1, 0), angle), right, atol=1e-12)
 
+    def test_fixed_flow_blend_preserves_uwb_estimate_timestamps_and_continuous_odometry(self):
+        for weight in (0, .2, 1):
+            f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5, flow_velocity_weight=weight)
+            f.predict(10)
+            f.update_uwb((0, 0), np.eye(2)*.0225, 10)
+            f.update_acceleration((1, 0), 10)
+            f.predict(10.2)
+            before = f.odom.copy()
+            self.assertTrue(f.update_flow((.1, 0), .01, 10.1)[0])
+            # Delayed flow receives the same known IMU increment as UWB/IMU.
+            np.testing.assert_allclose(rotate(f.velocity, math.pi/2), (.2, 0), atol=1e-12)
+            np.testing.assert_array_equal(f.odom, before)
+            f.update_acceleration((0, 0), 10.2)
+            # Repeated zero-flow samples must keep the exact chosen percentage,
+            # rather than gradually replacing the independent UWB/IMU estimate.
+            for stamp in (10.25, 10.3, 10.35):
+                f.predict(stamp)
+                before, room, covariance = f.odom.copy(), f.room.copy(), f.covariance.copy()
+                self.assertTrue(f.update_flow((0, 0), .01, stamp)[0])
+                np.testing.assert_allclose(f.room_velocity, (.2, 0), atol=1e-12)
+                np.testing.assert_allclose(rotate(f.velocity, math.pi/2), ((1-weight)*.2, 0), atol=1e-12)
+                np.testing.assert_array_equal(f.odom, before)
+                np.testing.assert_array_equal(f.room, room)
+                np.testing.assert_array_equal(f.covariance, covariance)
+                self.assertEqual(f.uwb_stamp, 10)
+            self.assertGreater(np.linalg.eigvalsh(f.covariance).min(), 0)
+            self.assertGreater(np.linalg.eigvalsh(f.velocity_covariance()).min(), 0)
+            velocity, covariance = f.velocity.copy(), f.covariance.copy()
+            for sample, variance, stamp in [((0, 0), .01, 10.35), ((0, 0), 0, 10.4),
+                                            ((float('nan'), 0), .01, 10.4)]:
+                self.assertFalse(f.update_flow(sample, variance, stamp)[0])
+                np.testing.assert_array_equal(f.velocity, velocity)
+                np.testing.assert_array_equal(f.covariance, covariance)
+            f.predict(10.4)
+            velocity, covariance = f.velocity.copy(), f.covariance.copy()
+            self.assertFalse(f.update_flow((20, 20), .01, 10.4)[0])
+            np.testing.assert_array_equal(f.velocity, velocity)
+            np.testing.assert_array_equal(f.covariance, covariance)
+            self.assertEqual(f.flow_stamp, 10.35)  # Rejection cannot renew the accepted sample.
+            f.predict(10.86)
+            self.assertFalse(f.flow_active())
+            np.testing.assert_allclose(rotate(f.velocity, math.pi/2), (.2, 0), atol=1e-12)
+            self.assertEqual(f.uwb_stamp, 10)
+            f.reset_room()
+            self.assertFalse(f.update_flow((.1, 0), .01, 10.9)[0])
+            self.assertIsNone(f.room)
+        for weight in (-.1, 1.1, float('nan')):
+            with self.assertRaises(ValueError):
+                PlanarFusion(flow_velocity_weight=weight)
+
     def test_outliers_invalid_covariance_and_duplicate_fixes_cannot_renew_solution(self):
         f = PlanarFusion(yaw_offset=0)
         f.predict(10)
@@ -316,6 +366,61 @@ class FusionNodeTest(unittest.TestCase):
         self.node.anchors_callback(msg)
         return msg
 
+    def flow(self, x=.1, y=.2, stamp=None, frame='pidrone_body'):
+        msg = NS(header=NS(frame_id=frame, stamp=Stamp(self.ros_now if stamp is None else stamp)),
+                 twist=twist())
+        msg.twist.linear.x, msg.twist.linear.y = x, y
+        self.node.flow_callback(msg)
+
+    def test_flow_compensation_reaches_controller_and_camera_gaps_keep_uwb_hold(self):
+        generation, fix_stamp = self.node.generation, self.node.filter.uwb_stamp
+        self.ros_now += .05
+        self.refresh(yaw=math.pi/2, omega=(.2, -.4, 0))
+        # At 0.5 m, the legacy 0.2 angular factor removes (+.02,-.04) m/s.
+        self.flow(.12, .16)
+        self.node.step()
+        message = self.messages['pidrone/state'][-1]
+        velocity = message.twist_with_covariance.twist.linear
+        self.assertAlmostEqual(velocity.x, .02)
+        self.assertAlmostEqual(velocity.y, .04)
+        np.testing.assert_array_equal(self.node.filter.room_velocity, (0, 0))
+        self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
+        self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
+        self.assertEqual(self.node.flow_reason, 'OK')
+        values = {v.key: v.value for v in self.messages['pidrone/localization/fusion_status'][-1].status[0].values}
+        self.assertIn('optical flow', values['xy_source'])
+        self.assertEqual(float(values['flow_velocity_weight']), .2)
+        controller = self.controller()
+        output = controller.step()
+        self.assertLess(output[0], 1500)
+        self.assertLess(output[1], 1500)
+        before = self.node.filter.room_velocity.copy()
+        accepted_stamp = self.node.filter.flow_stamp
+        for x, y, stamp, frame in [(.1, .2, self.ros_now-1, 'pidrone_body'),
+                (.1, .2, self.ros_now+.1, 'pidrone_body'), (.1, .2, self.ros_now, 'map'),
+                (float('nan'), 0, self.ros_now, 'pidrone_body'), (3, 0, self.ros_now, 'pidrone_body'),
+                (.12, .16, self.ros_now, 'pidrone_body')]:
+            self.flow(x, y, stamp, frame)
+            np.testing.assert_array_equal(self.node.filter.room_velocity, before)
+            self.assertEqual(self.node.filter.flow_stamp, accepted_stamp)
+        # A camera sample can be fresh yet too far from the matching attitude.
+        self.ros_now += .25
+        self.refresh()
+        self.flow(stamp=self.ros_now-.2)
+        np.testing.assert_array_equal(self.node.filter.room_velocity, before)
+        for _ in range(6):
+            self.ros_now += .1
+            self.refresh()
+            self.uwb()
+            self.node.step()
+        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
+        self.assertEqual(self.node.generation, generation)
+        values = {v.key: v.value for v in self.messages['pidrone/localization/fusion_status'][-1].status[0].values}
+        self.assertNotIn('optical flow', values['xy_source'])
+        self.assertEqual(float(values['flow_velocity_weight']), 0)
+        velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
+        self.assertEqual((velocity.x, velocity.y), (0, 0))
+
     def test_tof_remains_z_and_room_corrections_leave_controller_pose_unchanged(self):
         state_msg = self.messages['pidrone/state'][-1]
         fused = self.messages['pidrone/localization/fused'][-1]
@@ -381,6 +486,7 @@ class FusionNodeTest(unittest.TestCase):
             self.now += 1/60.0
             self.ros_now += 1/60.0
             self.refresh()
+            self.flow()  # A live camera must not extend the absolute UWB horizon.
             self.node.step()
         self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
@@ -407,10 +513,11 @@ class FusionNodeTest(unittest.TestCase):
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
         topics = [call.args[0] for call in self.ros.Subscriber.call_args_list]
-        self.assertNotIn('pidrone/picamera/twist', topics)
+        self.assertIn('pidrone/picamera/twist', topics)
         generation = self.node.generation
         count = len(self.messages['pidrone/state'])
         self.node.height.range = None
+        self.flow()  # Camera data cannot substitute for missing ToF height.
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)

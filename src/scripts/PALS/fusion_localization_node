@@ -8,7 +8,7 @@ import numpy as np
 import rospy
 import tf
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import AnchorLayout, Mode, State
 from sensor_msgs.msg import Imu, Range
@@ -31,14 +31,21 @@ class FusionLocalizationNode(object):
             drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
             max_gap=self.timeout,
             gate=float(rospy.get_param('~innovation_gate', 9.21)),
-            max_innovation=float(rospy.get_param('~max_innovation', 1.0)))
+            max_innovation=float(rospy.get_param('~max_innovation', 1.0)),
+            flow_velocity_weight=float(rospy.get_param('~flow_velocity_weight', 0.2)))
         self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.odom_frame = rospy.get_param('~odom_frame', 'odom')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        flow_stddev = float(rospy.get_param('~flow_velocity_stddev', 0.4))
+        self.flow_variance = flow_stddev ** 2
+        self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
+        self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
         if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
                 or not all((self.frame, self.odom_frame, self.body_frame))
-                or not all(np.isfinite(v) and v > 0 for v in (self.timeout, self.skew))):
+                or not all(np.isfinite(v) and v > 0 for v in
+                           (self.timeout, self.skew, flow_stddev, self.flow_limit))
+                or not np.isfinite(self.angular_comp)):
             raise ValueError('Invalid fusion frames, limits or timeouts')
         self.height = PositionCombiner(
             stale_after=self.timeout, max_skew=self.skew,
@@ -59,6 +66,7 @@ class FusionLocalizationNode(object):
         self.generation = 0
         self.last_time = None
         self.reason = 'Waiting for sensors'
+        self.flow_reason = 'No optical flow received'
         self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
         self.pose_pub = rospy.Publisher('pidrone/localization/fused', PoseWithCovarianceStamped, queue_size=1)
         self.odom_pub = rospy.Publisher('pidrone/localization/odometry', Odometry, queue_size=1)
@@ -71,6 +79,7 @@ class FusionLocalizationNode(object):
             rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
             rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
+            rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
         rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
@@ -153,6 +162,33 @@ class FusionLocalizationNode(object):
             p, c = msg.pose.pose.position, msg.pose.covariance
             self.pending.append((stamp, (p.x, p.y), [[c[0], c[1]], [c[6], c[7]]]))
             self.pending = sorted(self.pending, key=lambda item: item[0])[-20:]
+
+    def flow_callback(self, msg):
+        with self.lock:
+            now = rospy.get_time()
+            stamp = msg.header.stamp.to_sec()
+            height, _ = self.height.height(monotonic(), now)
+            if (height is None or self.imu is None or not self.fresh(self.imu[0], now)
+                    or not self.fresh(stamp, now) or msg.header.frame_id != self.body_frame
+                    or max(stamp, self.imu[0], height.stamp)
+                    - min(stamp, self.imu[0], height.stamp) > self.skew):
+                self.flow_reason = 'Optical flow needs fresh, aligned IMU/ToF and body frame'
+                return
+            velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
+            # Restore the earlier camera/EMA rotation compensation.
+            velocity -= self.imu[2][:2] * (height.z - self.height.floor_z) * self.angular_comp
+            if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
+                self.flow_reason = 'Invalid optical-flow velocity'
+                return
+            if self.filter.yaw_offset is None:
+                self.flow_reason = 'Waiting for room heading'
+                return
+            if not self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT):
+                self.flow_reason = 'UWB missing or stale'
+                return
+            angle = body_angle(self.imu[1][2]) + self.filter.yaw_offset
+            _, self.flow_reason = self.filter.update_flow(
+                rotate(velocity, angle), self.flow_variance, stamp)
 
     def anchors_callback(self, msg):
         with self.lock:
@@ -242,16 +278,23 @@ class FusionLocalizationNode(object):
             if height and imu_ready:
                 self.publish_estimates(height, local_ready, ready)
             status = DiagnosticStatus()
-            status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof'
+            status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof+camera'
             status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
             status.message = reason
-            status.values = [KeyValue(key='xy_source', value='UWB + IMU prediction'
-                                     if self.use_imu_acceleration and self.acceleration_bias is not None else 'UWB'),
+            sources = ['UWB']
+            if self.use_imu_acceleration and self.acceleration_bias is not None:
+                sources.append('IMU prediction')
+            if self.filter.flow_active(now):
+                sources.append('optical flow')
+            status.values = [KeyValue(key='xy_source', value=' + '.join(sources)),
                              KeyValue(key='acceleration_bias_ready', value=str(self.acceleration_bias is not None)),
                              KeyValue(key='height_source', value='ToF'),
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='frame_id', value=self.frame),
-                             KeyValue(key='last_uwb_result', value=self.reason)]
+                             KeyValue(key='last_uwb_result', value=self.reason),
+                             KeyValue(key='flow_velocity_weight', value=str(
+                                 self.filter.flow_velocity_weight if self.filter.flow_active(now) else 0.0)),
+                             KeyValue(key='last_flow_result', value=self.flow_reason)]
             diagnostics = DiagnosticArray()
             diagnostics.header.stamp = rospy.Time.from_sec(now)
             diagnostics.status = [status]
@@ -280,7 +323,7 @@ class FusionLocalizationNode(object):
         if ready:
             rotation = np.column_stack((rotate((1, 0), -angle - self.filter.yaw_offset),
                                         rotate((0, 1), -angle - self.filter.yaw_offset)))
-            velocity_covariance += rotation.dot(self.filter.covariance[2:, 2:]).dot(rotation.T)
+            velocity_covariance = rotation.dot(self.filter.velocity_covariance()).dot(rotation.T)
         state.twist_with_covariance.covariance[0] = velocity_covariance[0, 0]
         state.twist_with_covariance.covariance[1] = velocity_covariance[0, 1]
         state.twist_with_covariance.covariance[6] = velocity_covariance[1, 0]
