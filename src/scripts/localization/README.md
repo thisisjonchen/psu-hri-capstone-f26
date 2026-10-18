@@ -288,7 +288,7 @@ It requires FLYING mode, fresh fused localization and matching live anchors. The
 controller independently checks freshness, frame, flight mode and that XY is inside
 the anchor outline. It retains the current commanded height; the target's Z is not
 an altitude command. The position error is rotated into body axes and converted to
-a proportional velocity command with gain 0.25, capped at 0.10 m/s by default.
+a proportional velocity command with gain 0.20, capped at 0.10 m/s by default.
 The shared Drone class uses the same settings for routine X/Y hold. These are
 requested velocities, not guarantees of actual speed. Tune
 `/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`

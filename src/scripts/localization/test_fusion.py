@@ -628,7 +628,11 @@ class FusionNodeTest(unittest.TestCase):
     def test_room_navigation_pauses_on_sensor_loss_and_cancels_on_manual_input(self):
         controller = self.controller()
         target = NS(header=NS(frame_id='map', stamp=Stamp(self.ros_now)),
-                    pose=NS(position=NS(x=2, y=2, z=999)))
+                    pose=NS(position=NS(x=1.2, y=2, z=999)))
+        controller.room_target_callback(target)
+        controller.calc_error()
+        self.assertAlmostEqual(controller.desired_velocity.x, .04)
+        target.pose.position.x = 2
         controller.room_target_callback(target)
         controller.calc_error()
         self.assertAlmostEqual(controller.desired_velocity.x, .1)

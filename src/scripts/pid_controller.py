@@ -110,7 +110,7 @@ class PIDController(object):
         self.local_estimate_ready = self.room_estimate_ready = False
         self.room_pose = self.room_target = self.room_anchors = None
         self.room_generation = None
-        self.room_target_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.25))
+        self.room_target_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.20))
         self.room_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
         if not all(np.isfinite(v) and v > 0 for v in (self.room_target_gain, self.room_speed_limit)):
             raise ValueError('Room target gain and speed must be positive')

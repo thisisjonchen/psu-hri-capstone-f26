@@ -81,7 +81,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(controller.desired_position.z, .5)
         self.assertEqual(controller.current_position.z, .5)
         self.assertEqual(controller.pid_error.z, 0)
-        self.assertAlmostEqual(controller.desired_velocity.x, -.05)
+        self.assertAlmostEqual(controller.desired_velocity.x, -.04)
         self.assertFalse(controller.position_control)
 
     def test_relative_move_tracks_uwb_target_through_heading_change(self):
@@ -143,9 +143,9 @@ class RoutineControlTest(unittest.TestCase):
         pose = copy.deepcopy(drone.fused_pose)
         pose.pose.pose.position.x += .2
         drone._fused_received(pose)
-        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.05)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.04)
         self.fusion.ros_now += .7
-        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.05)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.04)
         self.assertEqual(drone.xy_anchor, (1, 2))
         self.fusion.ros_now += .4
         controller.local_ready_callback(NS(data=False))
@@ -178,7 +178,7 @@ class RoutineControlTest(unittest.TestCase):
         command = drone._xy_hold_command()
         controller.position_control_callback(modes[-1])
         controller.desired_twist_callback(command)
-        self.assertAlmostEqual(command.linear.x, -.05)
+        self.assertAlmostEqual(command.linear.x, -.04)
         self.assertFalse(controller.position_control)
         self.assertEqual(drone.xy_anchor, (1, 2))
 

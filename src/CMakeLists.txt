@@ -162,6 +162,7 @@ catkin_install_python(PROGRAMS
   scripts/PALS/apriltag_detection_drone
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
+  scripts/optical_flow_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 install(DIRECTORY launch params
