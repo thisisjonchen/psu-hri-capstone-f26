@@ -22,7 +22,7 @@ pidrone_screen_node() {
         rigid) command=(python -u rigid_transform_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u pid_controller.py) ;;
-        se) command=(python -u state_estimator.py -p ema) ;;
+        se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch") ;;
         vision) command=(roslaunch --wait "$package_dir/launch/raspicam_node.launch") ;;
         flow) command=(python -u optical_flow_node.py) ;;
         tof)
@@ -36,7 +36,15 @@ pidrone_screen_node() {
             ;;
         bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
         video) command=(rosrun web_video_server web_video_server) ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|shell}' >&2
+        tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
+        tagmap) command=(roslaunch --wait "$package_dir/launch/apriltag_mapping.launch") ;;
+        uwb)
+            command=(roslaunch --wait "$package_dir/launch/uwb_localization.launch")
+            if [[ -n "${PALS_UWB_PORT:-}" ]]; then
+                command+=("port:=$PALS_UWB_PORT")
+            fi
+            ;;
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
            return 2 ;;
     esac
 

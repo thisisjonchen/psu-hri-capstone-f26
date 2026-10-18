@@ -9,10 +9,12 @@ import time
 
 import rosnode
 import rospy
-from geometry_msgs.msg import Pose, Twist, TwistStamped
+import tf
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
-from std_msgs.msg import Empty
+from std_msgs.msg import Bool, Empty
+from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 
 
 class Drone(object):
@@ -28,30 +30,35 @@ class Drone(object):
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
 
     def __init__(self):
+        self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
+        self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.20))
+        self.xy_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
+        if any(math.isnan(v) or math.isinf(v) or v <= 0
+               for v in (self.xy_hold_gain, self.xy_speed_limit)):
+            raise ValueError('Room target gain and speed must be positive')
         self.mode = None
         self.mode_at = 0
         self.height = None
         self.height_at = 0
         self.ground_height = None
         self.target_height = self.takeoff_height
-        self.flow_at = 0
-        self.flow_valid = False
         self.xy_anchor = None
-        self.xy_hold_valid = True
+        self.xy_frame = None
+        self.fused_pose = None
         self.voltage = None
         self.battery_at = 0
         self.low_voltage_at = None
-        self.right_m = 0.0
-        self.forward_m = 0.0
         self.mode_pub = rospy.Publisher('/pidrone/desired/mode', Mode, queue_size=1)
         self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
         self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
+        self.position_mode_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
         self.heartbeat_pub = rospy.Publisher(
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
         rospy.Subscriber('/pidrone/mode', Mode, self._mode_received)
         rospy.Subscriber('/pidrone/range', Range, self._range_received)
-        rospy.Subscriber('/pidrone/picamera/twist', TwistStamped, self._flow_received)
+        rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped,
+                         self._fused_received, queue_size=1)
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
         self.heartbeat = rospy.Timer(
             rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
@@ -65,20 +72,23 @@ class Drone(object):
             self.height = msg.range
             self.height_at = time.time()
 
-    def _flow_received(self, msg):
-        now = time.time()
-        vx = msg.twist.linear.x
-        vy = msg.twist.linear.y
-        self.flow_valid = abs(vx) <= 0.5 and abs(vy) <= 0.5
-        continuous = self.flow_at and 0 < now - self.flow_at < 0.2
-        if self.xy_anchor is not None and (not self.flow_valid or not continuous):
-            # A missed displacement cannot be recovered by later good samples.
-            self.xy_hold_valid = False
-        if continuous and self.flow_valid:
-            dt = now - self.flow_at
-            self.right_m += vx * dt
-            self.forward_m += vy * dt
-        self.flow_at = now
+    def _fused_received(self, msg):
+        self.fused_pose = msg
+
+    def _hold_pose(self, required=True, allow_prediction=False):
+        msg = self.fused_pose
+        timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.estimate_timeout
+        if (msg is None or not msg.header.frame_id or
+                not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= timeout):
+            if not required:
+                return None
+            raise RuntimeError('Fused position is missing/stale')
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        values = (p.x, p.y, q.x, q.y, q.z, q.w)
+        if (any(math.isnan(v) or math.isinf(v) for v in values) or
+                q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w < 1e-12):
+            raise RuntimeError('Fused position is invalid')
+        return msg
 
     def _battery_received(self, msg):
         voltage = msg.vbat
@@ -99,19 +109,17 @@ class Drone(object):
             raise RuntimeError('Battery voltage is low ({:.1f} V)'.format(
                 self.voltage))
 
-    def _check_sensors(self, need_flow=True):
+    def _check_sensors(self):
         now = time.time()
         if now - self.mode_at > 0.5:
             raise RuntimeError('Flight controller mode is missing/stale')
         if now - self.height_at > 1.0:
             raise RuntimeError('Downward range is missing/stale')
-        if need_flow and (now - self.flow_at > 0.5 or not self.flow_valid):
-            raise RuntimeError('Optical flow is missing, stale or invalid')
 
-    def _check_flight(self, operation, need_flow=False, check_battery=True):
+    def _check_flight(self, operation, check_battery=True):
         if self.mode != 'FLYING':
             raise RuntimeError('Flight mode changed during ' + operation)
-        self._check_sensors(need_flow=need_flow)
+        self._check_sensors()
         if check_battery:
             self._check_battery()
 
@@ -140,7 +148,8 @@ class Drone(object):
     def ready(self):
         self._start_missing_nodes()
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
-        publishers = (self.mode_pub, self.twist_pub, self.pose_pub, self.heartbeat_pub)
+        publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
+                      self.position_mode_pub, self.heartbeat_pub)
         ground_candidate = None
         candidate_at = 0
         reason = 'Waiting for flight nodes'
@@ -192,6 +201,8 @@ class Drone(object):
             mode = rospy.wait_for_message('/pidrone/mode', Mode, timeout=2.0)
             if mode.mode != 'DISARMED':
                 raise RuntimeError('Node startup requires the drone to be disarmed')
+        if running('/state_estimator'):
+            raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
         scripts = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         launch = os.path.join(os.path.dirname(scripts), 'launch')
         nodes = [
@@ -199,11 +210,13 @@ class Drone(object):
             ('/vl53l1x', ['bash', '-c',
                          'source "$HOME/catkin_ws/install/setup.bash" && exec roslaunch "$1"',
                          'pals-tof', os.path.join(launch, 'tof.launch')]),
-            ('/optical_flow_node', [sys.executable, '-u', 'optical_flow_node.py']),
-            ('/state_estimator', [sys.executable, '-u', 'state_estimator.py', '-p', 'ema']),
-            ('/state_estimator_ema', [sys.executable, '-u', 'StateEstimators/state_estimator_ema.py']),
+            ('/uwb_localization', ['roslaunch', os.path.join(launch, 'uwb_localization.launch'),
+                                   'port:=' + os.environ.get('PALS_UWB_PORT', '/dev/ttyACM1')]),
+            ('/fusion_localization', ['roslaunch', os.path.join(launch, 'fusion_localization.launch')]),
             ('/pid_controller', [sys.executable, '-u', 'pid_controller.py']),
             ('/flight_controller_node', [sys.executable, '-u', 'flight_controller_node.py']),
+            ('/apriltag_detection', ['roslaunch', os.path.join(launch, 'apriltag_detection.launch')]),
+            ('/apriltag_mapping', ['roslaunch', os.path.join(launch, 'apriltag_mapping.launch')]),
         ]
         for name, command in nodes:
             if rospy.is_shutdown():
@@ -244,30 +257,44 @@ class Drone(object):
         raise RuntimeError('Mode {} was not confirmed'.format(name))
 
     def lock_xy(self):
-        """
-        Hold the current optical-flow position while yaw stays unchanged.
-        """
+        """Hold the current fused room position through the velocity PID."""
         if self.mode not in ('ARMED', 'FLYING'):
             raise RuntimeError('Arm before locking X/Y')
         self._check_sensors()
-        self.xy_anchor = (self.right_m, self.forward_m)
-        self.xy_hold_valid = True
-        rospy.loginfo('Relative X/Y hold enabled')
+        msg = self._hold_pose()
+        p = msg.pose.pose.position
+        self.xy_anchor = (p.x, p.y)
+        self.xy_frame = msg.header.frame_id
+        # This routine supplies the position-to-velocity correction; do not add
+        # the PID's separate local-position correction on top of it.
+        self.position_mode_pub.publish(Bool(False))
+        rospy.loginfo('Fused X/Y hold enabled at %.3f, %.3f', p.x, p.y)
 
     def unlock_xy(self):
         self.xy_anchor = None
+        self.xy_frame = None
         self.twist_pub.publish(Twist())
 
     def _xy_hold_command(self):
         command = Twist()
         if self.xy_anchor is None:
             return command
-        self._check_sensors()
-        if not self.xy_hold_valid:
-            raise RuntimeError('X/Y hold lost optical-flow continuity')
-        command.linear.x = 0.5 * (self.xy_anchor[0] - self.right_m)
-        command.linear.y = 0.5 * (self.xy_anchor[1] - self.forward_m)
-        self._limit_planar_speed(command, 0.10)
+        msg = self._hold_pose(required=False, allow_prediction=True)
+        if msg is None:
+            # Preserve the room anchor; stop requesting motion until fusion resumes.
+            return command
+        if msg.header.frame_id != self.xy_frame:
+            raise RuntimeError('Fused position frame changed during X/Y hold')
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        # Fused orientation already expresses the controller's right/forward
+        # axes in the room frame. Use the same conversion as room navigation.
+        yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+        command.linear.x, command.linear.y = target_velocity(
+            self.xy_anchor, (p.x, p.y), yaw, self.xy_hold_gain, self.xy_speed_limit)
+        rospy.loginfo_throttle(1,
+            'XY hold: room_error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
+                self.xy_anchor[0] - p.x, self.xy_anchor[1] - p.y,
+                command.linear.x, command.linear.y))
         return command
 
     def hover(self, seconds=1.0):
@@ -283,7 +310,7 @@ class Drone(object):
         self.unlock_xy()
 
     def takeoff(self, hold_xy=False):
-        """Take off, optionally holding relative X/Y from before liftoff."""
+        """Take off, optionally holding fused room X/Y from before liftoff."""
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self._check_sensors()
@@ -296,7 +323,7 @@ class Drone(object):
         self._set_mode('ARMED')
         self.target_height = self.takeoff_height
         rospy.sleep(1.0)
-        self._check_sensors(need_flow=False)
+        self._check_sensors()
         self._check_battery()
         self.twist_pub.publish(self._xy_hold_command())
         if hold_xy:
@@ -311,9 +338,6 @@ class Drone(object):
             now = time.time()
             settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
-                # Keep the anchor in the same coordinate frame.
-                if self.xy_anchor is None:
-                    self.right_m = self.forward_m = 0.0
                 self.target_height = self.takeoff_height
                 rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
                               self.ALTITUDE_SETTLE_SECONDS)
@@ -324,7 +348,7 @@ class Drone(object):
     def move(self, x=0.0, y=0.0, z=0.0):
         """Move relative to the drone: x right, y forward, z up (meters).
 
-        Horizontal distance comes from optical flow and is approximate.
+        Horizontal distance and heading come from the UWB/IMU room pose.
         """
         if self.mode != 'FLYING':
             raise RuntimeError('Drone must be flying before moving')
@@ -333,9 +357,18 @@ class Drone(object):
         horizontal = math.hypot(x, y)
         if horizontal and self.xy_anchor is not None:
             raise ValueError('Unlock X/Y before commanding horizontal movement')
-        self._check_sensors(need_flow=horizontal > 0)
-        start_x, start_y, start_z = self.right_m, self.forward_m, self.height
-        target_x, target_y, target_z = start_x + x, start_y + y, start_z + z
+        self._check_sensors()
+        start_z = self.height
+        target_z = start_z + z
+        if horizontal:
+            msg = self._hold_pose()
+            frame = msg.header.frame_id
+            p, q = msg.pose.pose.position, msg.pose.pose.orientation
+            start_xy = (p.x, p.y)
+            yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+            displacement = rotate((x, y), yaw)
+            target_xy = displacement + start_xy
+            self.position_mode_pub.publish(Bool(False))
         if z:
             self._set_altitude(target_z)
         started = time.time()
@@ -347,14 +380,20 @@ class Drone(object):
         settled_since = None
         try:
             while time.time() < deadline:
-                self._check_flight('movement', need_flow=horizontal > 0)
+                self._check_flight('movement')
                 now = time.time()
                 commanded_distance += last_command_speed * (now - last_command_at)
                 last_command_at = now
                 if horizontal and commanded_distance > max(0.4, horizontal * 1.5):
                     raise RuntimeError('Movement limit reached without reaching target')
-                ex = target_x - self.right_m
-                ey = target_y - self.forward_m
+                ex = ey = 0.0
+                if horizontal:
+                    msg = self._hold_pose(allow_prediction=True)
+                    if msg.header.frame_id != frame:
+                        raise RuntimeError('Fused position frame changed during movement')
+                    p, q = msg.pose.pose.position, msg.pose.pose.orientation
+                    yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+                    ex, ey = rotate(target_xy - (p.x, p.y), -yaw)
                 ez = target_z - self.height
                 horizontal_done = (not horizontal or
                                    (abs(ex) <= 0.06 and abs(ey) <= 0.06))
@@ -367,10 +406,11 @@ class Drone(object):
                 if horizontal_done and vertical_done:
                     return
                 if now - started > 3.0:
-                    progress_xy = ((self.right_m - start_x) * x +
-                                   (self.forward_m - start_y) * y)
-                    if horizontal and progress_xy / horizontal < 0.03:
-                        raise RuntimeError('No horizontal movement detected')
+                    if horizontal:
+                        progress_xy = ((p.x - start_xy[0]) * displacement[0] +
+                                       (p.y - start_xy[1]) * displacement[1])
+                        if progress_xy / horizontal < 0.03:
+                            raise RuntimeError('No horizontal movement detected')
                     if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
@@ -432,7 +472,7 @@ class Drone(object):
                 try:
                     self.twist_pub.publish(self._xy_hold_command())
                 except RuntimeError as error:
-                    # Landing must remain possible after optical-flow failure.
+                    # Preserve the existing landing behavior when X/Y hold fails.
                     rospy.logwarn('Releasing X/Y hold during landing: %s', error)
                     self.unlock_xy()
                     hold_xy = False

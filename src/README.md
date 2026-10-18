@@ -30,7 +30,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    ```
 7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
 8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
-10. To control it, on your laptop/base station, clone this repo. Open the website at `packages/pidrone_pkg/web/index.html`.
+10. To control it, clone this repo on your laptop/base station and start the [dashboard server](#uwb--tof-localization), then open `http://localhost:8000`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
     1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
 11. Read all instructions carefully and be ready to disarm at all times.
 12. Congratulations, the drone is now ready to fly!
@@ -76,10 +76,49 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
 7. You are now ready to go. Take a look at **Changing Branches**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
 
 ## Camera Out of Focus
+
 The camera may be out of focus. Here are some steps to fix that.
 1. Follow **Standard Operation + Control**. You should have the drone connected to the interface and see a camera image.
 2. Take a look at the drone's camera: you should see a black ring. Twist it until it comes into focus, but not too much that it becomes blurry again.
 3. Congrats, you focused the camera!
+4. If you need the camera to be calibrated, ask Jon
+
+NOTE: IF CAMERA IS CALIBRATED, DO NOT TOUCH THE FOCUS RING.
+
+## AprilTag Detector Installation
+To allow AprilTag detection to work, we will have to install some dependencies.
+
+
+1. Run the following
+```
+cd ~/catkin_ws/src/pidrone_pkg
+python -m pip install --user -r scripts/PALS/requirements.txt
+cd ~/catkin_ws
+catkin_make
+source devel/setup.bash
+```
+2. Done!
+
+## UWB + ToF Localization
+
+Start each drone facing the top of the map (+Y) before starting its flight controller.
+
+When calibrating:
+- 4D12: Tag 6
+- 980C: Tag 5
+- 9781: Tag 4
+- CA83: Tag 3
+
+Start the dashboard on your laptop:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r src/web/requirements.txt
+python src/web/server.py
+```
+
+Run these commands from the repository root, then open `http://localhost:8000`.
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session

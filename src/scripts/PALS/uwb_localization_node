@@ -1,0 +1,177 @@
+#!/usr/bin/env python
+"""Publish UWB horizontal position with independently validated ToF height."""
+from __future__ import print_function
+
+import threading
+
+import rospy
+import serial
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from geometry_msgs.msg import Point, PoseWithCovarianceStamped
+from pidrone_pkg.msg import AnchorLayout
+from sensor_msgs.msg import Imu, Range
+
+from localization.uwb_locator import UWBLocator, finite, monotonic
+from localization.position import PositionCombiner
+
+
+class UWBLocalizationNode(object):
+    def __init__(self):
+        self.lock = threading.Lock()
+        stale = float(rospy.get_param('~stale_after', 0.5))
+        self.locator = UWBLocator(
+            port=rospy.get_param('~port', ''),
+            baud=int(rospy.get_param('~baud', 115200)),
+            min_quality=int(rospy.get_param('~min_quality', 50)), stale_after=stale)
+        self.combiner = PositionCombiner(
+            stale_after=stale, max_skew=float(rospy.get_param('~max_sensor_skew', 0.15)),
+            compensate_tilt=bool(rospy.get_param('~compensate_tilt', True)),
+            floor_z=float(rospy.get_param('~floor_z', 0.0)),
+            tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)),
+            max_tilt_degrees=float(rospy.get_param('~max_tilt_degrees', 45.0)))
+        self.frame_id = rospy.get_param('~frame_id', 'map')
+        self.rate = float(rospy.get_param('~rate', 20.0))
+        xy_stddev = float(rospy.get_param('~xy_stddev', 0.15))
+        z_stddev = float(rospy.get_param('~z_stddev', 0.03))
+        self.reconnect_delay = float(rospy.get_param('~reconnect_delay', 5.0))
+        if (not self.frame_id or not all(finite(v) and v > 0 for v in
+                (self.rate, xy_stddev, z_stddev, self.reconnect_delay))):
+            raise ValueError('Frame, rate, uncertainty and reconnect parameters are invalid')
+        self.xy_variance, self.z_variance = xy_stddev ** 2, z_stddev ** 2
+        self.next_connect = 0
+        self.last_published = None
+        self.last_xy_published = None
+        self.last_anchor_published = None
+        self.last_ros_time = None
+        self.publisher = rospy.Publisher('pidrone/localization/pose', PoseWithCovarianceStamped, queue_size=1)
+        self.xy_pub = rospy.Publisher('pidrone/localization/uwb', PoseWithCovarianceStamped, queue_size=1)
+        self.status_pub = rospy.Publisher('pidrone/localization/status', DiagnosticArray, queue_size=1)
+        # Publish live observations, rather than latching a layout that could be
+        # delivered as fresh long after the tag has disconnected.
+        self.anchor_pub = rospy.Publisher('pidrone/localization/anchors', AnchorLayout, queue_size=1)
+        self.range_sub = rospy.Subscriber(
+            rospy.get_param('~range_topic', 'pidrone/range'), Range, self.range_callback, queue_size=1)
+        self.imu_sub = rospy.Subscriber(
+            rospy.get_param('~imu_topic', 'pidrone/imu'), Imu, self.imu_callback, queue_size=1)
+        rospy.on_shutdown(self.stop)
+
+    def range_callback(self, msg):
+        with self.lock:
+            self.combiner.update_range(msg.range, msg.min_range, msg.max_range,
+                                       msg.header.stamp.to_sec(), monotonic())
+
+    def imu_callback(self, msg):
+        q = msg.orientation
+        with self.lock:
+            self.combiner.update_attitude((q.x, q.y, q.z, q.w), msg.header.stamp.to_sec(),
+                                          monotonic(), msg.orientation_covariance[0] != -1)
+
+    def step(self):
+        now = monotonic()
+        ros_now = rospy.Time.now().to_sec()
+        if self.locator.port and not self.locator.running and now >= self.next_connect:
+            self.next_connect = now + self.reconnect_delay
+            self.last_published = None
+            self.last_xy_published = None
+            try:
+                self.locator.start()
+            except (serial.SerialException, OSError, RuntimeError) as error:
+                self.locator.error = str(error)
+                rospy.logwarn_throttle(5, 'UWB connection failed: {}'.format(error))
+        p = self.locator.position
+        sample = self.locator.anchor_sample
+        if sample is not None and not 0 <= now - sample.timestamp <= self.locator.stale_after:
+            sample = None
+        with self.lock:
+            # Never reuse sensor samples across a reset of ROS/simulation time.
+            if self.last_ros_time is not None and ros_now < self.last_ros_time:
+                self.combiner.range = None
+                self.combiner.attitude = None
+                self.last_published = None
+                self.last_xy_published = None
+                self.last_anchor_published = None
+            self.last_ros_time = ros_now
+            fix, reason = self.combiner.combine(p, now, ros_now)
+        # Fusion needs the horizontal measurement's own acquisition estimate,
+        # independent of ToF's timestamp and availability.
+        if (p is not None and p.timestamp != self.last_xy_published
+                and all(finite(v) for v in (p.x, p.y, p.timestamp))
+                and 0 <= now - p.timestamp <= self.locator.stale_after):
+            stamp = ros_now - (now - p.timestamp)
+            if stamp > 0:
+                xy = PoseWithCovarianceStamped()
+                xy.header.frame_id, xy.header.stamp = self.frame_id, rospy.Time.from_sec(stamp)
+                xy.pose.pose.position.x, xy.pose.pose.position.y = p.x, p.y
+                xy.pose.pose.orientation.w = 1.0
+                xy.pose.covariance[0] = xy.pose.covariance[7] = self.xy_variance
+                for index in (14, 21, 28, 35):
+                    xy.pose.covariance[index] = 1e6
+                self.xy_pub.publish(xy)
+                self.last_xy_published = p.timestamp
+        anchor_stamp = sample.timestamp if sample is not None else None
+        anchor_time = ros_now - (now - anchor_stamp) if sample is not None else ros_now
+        if anchor_stamp != self.last_anchor_published and anchor_time >= 0:
+            anchors = AnchorLayout()
+            anchors.header.frame_id = self.frame_id
+            anchors.header.stamp = rospy.Time.from_sec(anchor_time)
+            for anchor in sample.anchors if sample is not None else ():
+                anchors.anchor_ids.append(anchor.id)
+                anchors.positions.append(Point(x=anchor.x, y=anchor.y, z=anchor.z))
+            self.anchor_pub.publish(anchors)
+            self.last_anchor_published = anchor_stamp
+        if fix is not None and p.timestamp != self.last_published:
+            msg = PoseWithCovarianceStamped()
+            msg.header.frame_id = self.frame_id
+            msg.header.stamp = rospy.Time.from_sec(fix.stamp)
+            msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z = fix.x, fix.y, fix.z
+            # Orientation is unmeasured; identity is a placeholder with high variance.
+            msg.pose.pose.orientation.w = 1.0
+            msg.pose.covariance[0] = msg.pose.covariance[7] = self.xy_variance
+            msg.pose.covariance[14] = self.z_variance
+            for index in (21, 28, 35):
+                msg.pose.covariance[index] = 1e6
+            self.publisher.publish(msg)
+            self.last_published = p.timestamp
+        status = DiagnosticStatus()
+        status.name = rospy.get_name().lstrip('/')
+        status.hardware_id = self.locator.port
+        status.level = DiagnosticStatus.OK if fix is not None else DiagnosticStatus.WARN
+        status.message = reason
+        if self.locator.error:
+            status.level, status.message = DiagnosticStatus.ERROR, self.locator.error
+        if not self.locator.port:
+            status.level = DiagnosticStatus.ERROR
+            status.message = 'Set port to the UWB tag serial device (flight controller also uses ttyACM)'
+        status.values = [KeyValue(key='quality', value=str(p.quality if p else 0)),
+                         KeyValue(key='height_source', value='ToF'),
+                         KeyValue(key='frame_id', value=self.frame_id),
+                         KeyValue(key='anchor_count', value=str(len(sample.anchors) if sample else 0))]
+        status.values.extend(KeyValue(key=key, value=value) for key, value in self.locator.diagnostics(now))
+        diagnostics = DiagnosticArray()
+        diagnostics.header.stamp = rospy.Time.from_sec(ros_now)
+        diagnostics.status = [status]
+        self.status_pub.publish(diagnostics)
+
+    def stop(self):
+        self.locator.stop()
+
+    def run(self):
+        rate = rospy.Rate(self.rate)
+        while not rospy.is_shutdown():
+            self.step()
+            rate.sleep()
+
+
+def main():
+    rospy.init_node('uwb_localization')
+    node = None
+    try:
+        node = UWBLocalizationNode()
+        node.run()
+    finally:
+        if node is not None:
+            node.stop()
+
+
+if __name__ == '__main__':
+    main()
