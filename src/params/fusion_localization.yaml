@@ -8,7 +8,8 @@ acceleration_bias_stddev: 0.15
 acceleration_bias_drift: 0.01
 velocity_stddev: 0.12
 # Optical-flow velocity noise (m/s); sets how strongly flow corrects filter velocity.
-flow_velocity_stddev: 0.4
+# 1.2 keeps UWB dominant: flow supplies roughly 30% of velocity at hover (0.4 gave ~85%).
+flow_velocity_stddev: 1.2
 # Preserve the earlier camera speed limit and EMA rotation compensation.
 max_flow_speed: 2.0
 angular_compensation: 0.2

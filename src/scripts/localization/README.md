@@ -331,7 +331,7 @@ existing camera scale (`/pidrone/localization/flow_scale`, default 0.165).
 Fusion restores the earlier EMA rotation compensation (angular rate times ToF
 height times `angular_compensation`, default 0.2), then rotates the horizontal
 velocity into the room frame and applies it as a Kalman velocity measurement.
-`flow_velocity_stddev` (0.4 m/s) is its measurement noise: a larger value makes
+`flow_velocity_stddev` (configured 1.2 m/s, so UWB stays dominant) is its measurement noise: a larger value makes
 flow correct velocity less. Room position remains anchored to UWB; flow can shift
 it only through the filter's position-velocity correlation. The original
 `max_flow_speed` limit (2 m/s), finite-value checks, frame, freshness and IMU/ToF
