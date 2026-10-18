@@ -21,7 +21,9 @@ frame_id: map
 max_tag_distance: 3.0
 # Photo and fused pose stamps must be near each other, in seconds.
 max_image_pose_skew: 0.35
-# Gate individual tag observations against an already averaged location (meters).
+# Maximum deviation within a candidate cluster (meters). Larger moves start a
+# new cluster; the last confirmed marker remains until that cluster is confirmed.
 max_tag_jump: 0.35
-# Do not publish a tag on the map from a single noisy frame.
+# Average this many recent, consistent, distinct frames for initial placement
+# and relocation. Observation gaps longer than max_image_pose_skew reset the window.
 min_tag_samples: 3

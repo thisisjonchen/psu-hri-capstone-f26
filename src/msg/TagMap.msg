@@ -5,4 +5,5 @@ std_msgs/Header header
 int32[] tag_ids
 string[] zones
 geometry_msgs/Point[] positions
+# Counts describe observations supporting each position, not lifetime detections.
 uint32[] sample_counts

@@ -30,6 +30,7 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
+    this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
       [0, 1, 2].map(i => ({
@@ -301,10 +302,17 @@ class FleetMap {
         !counts.every(count => Number.isInteger(count) && count > 0) ||
         !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
     if (this.tagReports[id] && stamp <= this.tagReports[id].stamp) return;
-    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => ({
-      id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
-      z: points[i].z, count: counts[i]
-    })) };
+    const previous = this.tagReports[id];
+    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => {
+      const value = { id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
+        z: points[i].z, count: counts[i] };
+      const old = previous && previous.frame === frame && previous.tags.find(p => p.id === tag);
+      // A snapshot can update another tag while retaining this cached position.
+      // Track changes locally; ROS clocks on the two drones need not agree.
+      const unchanged = old && ['zone', 'x', 'y', 'z', 'count'].every(key => old[key] === value[key]);
+      value.revision = unchanged ? old.revision : ++this.tagRevision;
+      return value;
+    }) };
     this.render();
   }
 
@@ -316,19 +324,13 @@ class FleetMap {
       if (!drones[id].connected || !report || report.frame !== this.room.frame ||
           !this.hasMatchingReport(id)) return;
       report.tags.forEach(tag => {
-        if (!groups.has(tag.id)) groups.set(tag.id, []);
-        groups.get(tag.id).push(tag);
+        const previous = groups.get(tag.id);
+        if (!previous || tag.revision > previous.revision) groups.set(tag.id, tag);
       });
     });
-    return Array.from(groups.entries()).sort((a, b) => a[0] - b[0]).map(([id, samples]) => {
-      // Don't average two drones' observations when mounting/yaw calibration disagrees.
-      const main = samples.reduce((a, b) => b.count > a.count ? b : a);
-      const compatible = samples.filter(p => Math.hypot(p.x - main.x, p.y - main.y) <= 0.5);
-      const total = compatible.reduce((sum, p) => sum + p.count, 0);
-      return { id, zone: main.zone,
-        x: compatible.reduce((sum, p) => sum + p.x * p.count, 0) / total,
-        y: compatible.reduce((sum, p) => sum + p.y * p.count, 0) / total };
-    });
+    // Lifetime sample counts and averaging can pin a moved tag to its old spot.
+    return Array.from(groups.values()).sort((a, b) => a.id - b.id)
+      .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x, y: tag.y }));
   }
 
   drawTagLabels(chart) {

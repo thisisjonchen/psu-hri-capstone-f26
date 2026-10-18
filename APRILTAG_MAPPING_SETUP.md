@@ -17,9 +17,20 @@ A separate `apriltag_mapping_node` subscribes to:
 It publishes `/pidrone/apriltag/map` (`pidrone_pkg/TagMap`), a collection of
 observed centers in `map` meters, read by `src/web/js/main.js` on both independent
 ROS masters. Tags are visible after 3 *different image frames* with acceptable
-measurements. A mapping observation **does not** modify the flight controller,
-UWB localization, or target behavior. If both drones map the same ID, their
-compatible coordinate estimates are averaged for display.
+measurements. Positions average the latest `min_tag_samples` consistent frames
+(3 by default), so older observations cannot pin a tag to its original location.
+A jump beyond `max_tag_jump` (0.35 m by default) starts a new candidate cluster;
+the previous marker remains until the new cluster has enough observations.
+Gaps longer than `max_image_pose_skew` reset the observation window but retain
+the last confirmed marker. Tags must remain on the configured horizontal plane.
+
+A mapping observation **does not** modify the flight controller, UWB localization,
+or target behavior. If both drones report the same ID, the dashboard uses the
+most recently changed estimate received in that browser session. An unchanged
+cached tag in another snapshot does not take precedence. This avoids averaging
+a moved tag back toward its old location and does not compare unsynchronized
+drone clocks. It is display ordering, not a per-tag measurement timestamp;
+after reconnecting, latched reports cannot establish which drone observed it last.
 
 ## Geometry and critical assumptions
 

@@ -95,8 +95,9 @@ class AprilTagMappingTests(unittest.TestCase):
         for index, pose_offset in enumerate((-.03, -.03, -.15)):
             self.now = 100 + index * .1
             message = self.observe(self.now - .1, self.now + pose_offset)
+            published = len(self.maps)
             self.node.detection_callback(message)
-            self.assertEqual(self.node.tags[0]['count'], index + 1)
+            self.assertEqual(len(self.maps), published)
             self.assertEqual(self.maps[-1].tag_ids, [0] if index == 2 else [])
         result = self.maps[-1]
         self.assertEqual(result.header.frame_id, 'map')
@@ -107,8 +108,9 @@ class AprilTagMappingTests(unittest.TestCase):
         # Losing readiness pauses sampling without erasing measured landmarks.
         self.node.ready_callback(NS(data=False))
         self.now += .1
+        published = len(self.maps)
         self.observe(self.now - .1, self.now)
-        self.assertEqual(self.node.tags[0]['count'], 3)
+        self.assertEqual(len(self.maps), published)
         self.node.generation_callback(NS(data=2))
         self.assertEqual(self.maps[-1].tag_ids, [])
         self.assertIsNone(self.node.pose)
@@ -123,12 +125,12 @@ class AprilTagMappingTests(unittest.TestCase):
         self.observe(99.95, 99.95)
         self.now = 100.4
         self.observe(100.35, 99.95)
-        self.assertEqual(self.node.tags[0]['count'], 1)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
         self.now = .1
         self.node.pose = None
         self.observe(0, 0)
         self.assertIsNone(self.node.pose)
-        self.assertEqual(self.node.tags[0]['count'], 1)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
 
     def test_equidistant_camera_maps_an_off_center_tag(self):
         # CameraInfo reported by Drone 2. Generate a pixel independently using
@@ -156,8 +158,49 @@ class AprilTagMappingTests(unittest.TestCase):
         self.node.camera_callback(NS(width=240, height=320, K=k, D=d + [0],
                                      distortion_model='equidistant'))
         self.now += .1
+        published = len(self.maps)
         self.observe(self.now, self.now, pixel=pixel, size=(240, 320))
-        self.assertEqual(self.node.tags[0]['count'], 3)
+        self.assertEqual(len(self.maps), published)
+
+    def test_moved_tag_replaces_old_position_after_consistent_distinct_frames(self):
+        self.node.rotation = camera_rotation(90)
+
+        def sample(x=160):
+            self.now += .1
+            return self.observe(self.now, self.now, pixel=(x, 120))
+
+        def mapped_x():
+            return self.maps[-1].positions[0].x
+
+        for _ in range(12):
+            sample()
+        self.assertAlmostEqual(mapped_x(), 1)
+        self.assertEqual(self.maps[-1].sample_counts, [3])
+        sample(10)  # A lone outlier must not move the marker.
+        self.assertAlmostEqual(mapped_x(), 1)
+        for _ in range(3):
+            sample()
+        self.assertAlmostEqual(mapped_x(), 1)
+
+        message = sample(310)  # Move 0.5 m, beyond max_tag_jump.
+        for _ in range(3):
+            self.node.detection_callback(message)
+        sample(310)
+        self.assertAlmostEqual(mapped_x(), 1)
+        sample(310)
+        self.assertAlmostEqual(mapped_x(), 1.5)
+        # Small movements also replace history rather than averaging forever.
+        for _ in range(3):
+            sample(280)
+        self.assertAlmostEqual(mapped_x(), 1.4)
+
+        sample(10)
+        self.now += 1  # A gap discards unfinished confirmation, not the marker.
+        sample(10)
+        sample(10)
+        self.assertAlmostEqual(mapped_x(), 1.4)
+        sample(10)
+        self.assertAlmostEqual(mapped_x(), .5)
 
 
 if __name__ == '__main__':

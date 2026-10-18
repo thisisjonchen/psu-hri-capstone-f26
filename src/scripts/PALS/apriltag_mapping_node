@@ -43,7 +43,7 @@ class AprilTagMappingNode(object):
         self.camera_info = None
         self.generation = None
         self.last_detection_stamp = None
-        self.tags = {}  # id -> {zone, sum, count}, mean is position sum/count
+        self.tags = {}  # id -> recent observations and last confirmed position
         self.publisher = rospy.Publisher('/pidrone/apriltag/map', TagMap, queue_size=1, latch=True)
         self.publish_map()
         rospy.Subscriber(rospy.get_param('~detection_topic', '/pidrone/apriltag/detections'),
@@ -65,15 +65,15 @@ class AprilTagMappingNode(object):
         msg.header.stamp = rospy.Time.now()
         for tag_id in sorted(self.tags):
             entry = self.tags[tag_id]
-            if entry['count'] < self.min_samples:
+            if entry['position'] is None:
                 continue
             point = Point()
-            position = entry['sum'] / entry['count']
+            position = entry['position']
             point.x, point.y, point.z = [float(v) for v in position]
             msg.tag_ids.append(tag_id)
             msg.zones.append(entry['zone'])
             msg.positions.append(point)
-            msg.sample_counts.append(entry['count'])
+            msg.sample_counts.append(self.min_samples)
         self.publisher.publish(msg)
 
     def generation_callback(self, msg):
@@ -141,7 +141,7 @@ class AprilTagMappingNode(object):
             self.last_detection_stamp = observation_time
             count = len(message.tag_ids)
             if (count != len(message.zones) or count != len(message.center_x) or
-                    count != len(message.center_y) or count == 0):
+                    count != len(message.center_y) or len(set(message.tag_ids)) != count or count == 0):
                 return
             info = self.camera_info
             if message.image_width != info.width or message.image_height != info.height:
@@ -173,15 +173,23 @@ class AprilTagMappingNode(object):
                     rospy.logwarn_throttle(5, 'AprilTag geometry rejected: {}'.format(error))
                     continue
                 entry = self.tags.get(tag_id)
-                if entry is not None and np.linalg.norm(measurement - entry['sum'] / entry['count']) > self.max_jump:
-                    rospy.logwarn_throttle(5, 'AprilTag position jump rejected; check calibration and yaw')
-                    continue
                 if entry is None:
-                    entry = {'zone': message.zones[index], 'sum': np.zeros(3), 'count': 0}
+                    entry = {'zone': message.zones[index], 'samples': [],
+                             'position': None, 'stamp': observation_time}
                     self.tags[tag_id] = entry
-                entry['sum'] += measurement
-                entry['count'] += 1
-                changed = True
+                samples = entry['samples']
+                # Confirm a new cluster after a move or observation gap. Keep
+                # displaying the last confirmed position during confirmation.
+                if samples and (observation_time - entry['stamp'] > self.max_skew or
+                                np.linalg.norm(measurement - np.mean(samples, axis=0)) > self.max_jump):
+                    samples[:] = []
+                samples.append(measurement)
+                del samples[:-self.min_samples]
+                entry['stamp'] = observation_time
+                if len(samples) == self.min_samples:
+                    entry['position'] = np.mean(samples, axis=0)
+                    entry['zone'] = message.zones[index]
+                    changed = True
             if changed:
                 self.publish_map()
 
