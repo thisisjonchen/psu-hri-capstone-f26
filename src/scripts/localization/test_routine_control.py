@@ -214,7 +214,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
 
-    def test_startup_reuses_nodes_and_launches_only_missing_uwb_and_fusion(self):
+    def test_startup_reuses_nodes_and_launches_missing_localization_and_mapper(self):
         self.drone.mode = 'DISARMED'
         running = ['/raspicam_node', '/vl53l1x',
                    '/pid_controller', '/flight_controller_node', '/apriltag_detection']
@@ -223,7 +223,8 @@ class RoutineControlTest(unittest.TestCase):
 
         def launch(command, **kwargs):
             commands.append(command)
-            name = '/uwb_localization' if any('uwb_localization.launch' in part for part in command) else '/fusion_localization'
+            launch_file = next(part for part in command if part.endswith('.launch'))
+            name = '/' + os.path.basename(launch_file).replace('.launch', '')
             running.append(name)
             return NS(poll=lambda: None)
 
@@ -234,7 +235,8 @@ class RoutineControlTest(unittest.TestCase):
                 mock.patch.dict(os.environ, {'PALS_UWB_PORT': '/dev/test-tag'}):
             self.drone._start_missing_nodes()
             self.drone._start_missing_nodes()
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(any('apriltag_mapping.launch' in part for part in commands[2]))
         self.assertIn('port:=/dev/test-tag', commands[0])
         self.assertFalse(any('state_estimator' in part for command in commands for part in command))
 

@@ -37,13 +37,14 @@ pidrone_screen_node() {
         bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
         video) command=(rosrun web_video_server web_video_server) ;;
         tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
+        tagmap) command=(roslaunch --wait "$package_dir/launch/apriltag_mapping.launch") ;;
         uwb)
             command=(roslaunch --wait "$package_dir/launch/uwb_localization.launch")
             if [[ -n "${PALS_UWB_PORT:-}" ]]; then
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|uwb|shell}' >&2
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
            return 2 ;;
     esac
 

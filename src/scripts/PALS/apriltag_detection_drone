@@ -67,6 +67,10 @@ class AprilTagNode(object):
                     ids = sorted(set(int(tag.tag_id) for tag in detections))
                     self.result.tag_ids = ids
                     self.result.zones = [TAG_ZONES.get(tag_id, 'UNKNOWN') for tag_id in ids]
+                    centers = {int(tag.tag_id): tag.center for tag in detections}
+                    self.result.center_x = [float(centers[tag_id][0]) for tag_id in ids]
+                    self.result.center_y = [float(centers[tag_id][1]) for tag_id in ids]
+                    self.result.image_height, self.result.image_width = image.shape
                     self.result.camera_online = True
                     self.last_frame_at = received
             except (ValueError, cv2.error, RuntimeError) as error:
