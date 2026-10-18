@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --allow-unauthenticated --no-install-re
     python-numpy \
     python-smbus \
     python-scipy \
+    python-monotonic \
     locate \
     ros-kinetic-rosbridge-suite \
     ros-kinetic-web-video-server \
@@ -102,6 +103,7 @@ RUN echo "cd $HOME/catkin_ws/src/pidrone_pkg && source setup.sh" >> $HOME/.bashr
 RUN echo "export ROS_PACKAGE_PATH=\$ROS_PACKAGE_PATH:$HOME/raspicam_node_ws/src" >> $HOME/.bashrc
 RUN sudo apt-get install libopencv-dev -y
 RUN pip install --no-cache-dir pyserial
+
 
 CMD ["bash"]
 

@@ -1,0 +1,10 @@
+baud: 115200
+min_quality: 50
+stale_after: 0.5
+max_sensor_skew: 0.15
+rate: 20.0
+reconnect_delay: 5.0
+max_tilt_degrees: 45.0
+# Initial uncertainty estimates in meters; measure and tune before control use.
+xy_stddev: 0.15
+z_stddev: 0.03

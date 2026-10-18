@@ -18,16 +18,11 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 
-from filterpy.common import (linear_ode_discretation, Q_discrete_white_noise,
-                             kinematic_kf)
+from filterpy.common import linear_ode_discretation, Q_discrete_white_noise
 from numpy import array
 
 def near_eq(x,y):
     return abs(x-y) < 1.e-17
-
-
-def test_kinematic():
-    kf = kinematic_kf(1,1)
 
 
 def test_Q_discrete_white_noise():

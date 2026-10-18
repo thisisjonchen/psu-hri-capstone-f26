@@ -1,0 +1,24 @@
+# Heading is aligned automatically at node startup while disarmed and facing map +Y.
+# Experimental: sensor replay has not established a flight benefit.
+# Enabled for a controlled flight trial; startup bias is required before use.
+use_imu_acceleration: true
+# Fraction of bias-corrected horizontal acceleration used when prediction is enabled.
+imu_acceleration_gain: 0.25
+velocity_stddev: 0.12
+# Fixed controller velocity blend: 20% optical flow, 80% UWB/IMU when flow is fresh.
+# Without a fresh accepted flow sample, use 100% UWB/IMU. Allowed range: 0 through 1.
+flow_velocity_weight: 0.2
+# Flow uncertainty (m/s) for outlier checks/covariance, not the blend percentage.
+flow_velocity_stddev: 0.4
+# Preserve the earlier camera speed limit and EMA rotation compensation.
+max_flow_speed: 2.0
+angular_compensation: 0.2
+# Process uncertainty for predicted velocity (m/s per sqrt(s)).
+acceleration_stddev: 0.3
+drift_stddev: 0.08
+# Freshness for IMU/height and newly received fixes; XY prediction has a shared 1 s limit.
+sensor_timeout: 0.5
+max_sensor_skew: 0.15
+# 99% chi-square gate for a two-dimensional position innovation.
+innovation_gate: 9.21
+max_innovation: 1.0

@@ -1,0 +1,9 @@
+<launch>
+  <arg name="image_topic" default="/raspicam_node/image/compressed"/>
+  <arg name="rate" default="10"/>
+  <node pkg="pidrone_pkg" type="apriltag_detection_drone" name="apriltag_detection" output="screen" respawn="true" respawn_delay="5">
+    <param name="image_topic" value="$(arg image_topic)"/>
+    <param name="rate" value="$(arg rate)"/>
+    <param name="camera_timeout" value="0.5"/>
+  </node>
+</launch>

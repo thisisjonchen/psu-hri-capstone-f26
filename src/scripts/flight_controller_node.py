@@ -2,6 +2,7 @@
 import traceback
 import sys
 import yaml
+import threading
 
 import rospy
 import rospkg
@@ -14,10 +15,11 @@ print("done tf import")
 
 
 import command_values as cmds
+import json
 from sensor_msgs.msg import Imu
 from h2rMultiWii import MultiWii
 from serial import SerialException
-from std_msgs.msg import Header, Empty
+from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State
 from sensor_msgs.msg import Range
@@ -51,6 +53,11 @@ class FlightController(object):
         # stores the current and previous modes
         self.curr_mode = 'DISARMED'         #initialize as disarmed
         self.prev_mode = 'DISARMED'         #initialize as disarmed
+        self.mode_lock = threading.RLock()
+        self.calibration_owner = rospy.get_param('/pidrone/localization/calibration_owner', '')
+        self.calibration_request = ''
+        # Clear the retired flight lock when upgrading an existing ROS session.
+        rospy.set_param('/pidrone/localization/calibration_lock', False)
         # store the command to send to the flight controller
         self.command = cmds.disarm_cmd      #initialize as disarmed
         self.last_command = cmds.disarm_cmd
@@ -94,9 +101,35 @@ class FlightController(object):
     ##################################
     def desired_mode_callback(self, msg):
         """ Set the current mode to the desired mode """
-        self.prev_mode = self.curr_mode
-        self.curr_mode = msg.mode
-        self.update_command()
+        with self.mode_lock:
+            self.prev_mode = self.curr_mode
+            self.curr_mode = msg.mode
+            self.update_command()
+
+    def calibration_owner_callback(self, msg):
+        try:
+            if len(msg.data) > 1024:
+                return
+            request = json.loads(msg.data)
+            owner, action, nonce = request['owner'], request['action'], request['request']
+            if not isinstance(owner, type(u'')) or not owner or len(owner) > 128:
+                return
+            if not isinstance(nonce, type(u'')) or not nonce or len(nonce) > 128 or action not in ('acquire', 'release'):
+                return
+            with self.mode_lock:
+                self.calibration_request = nonce
+                if action == 'acquire' and self.curr_mode != 'DISARMED':
+                    return
+                if action == 'acquire':
+                    if self.calibration_owner != owner and self.calibration_owner:
+                        return
+                    rospy.set_param('/pidrone/localization/calibration_owner', owner)
+                    self.calibration_owner = owner
+                elif action == 'release' and self.calibration_owner == owner:
+                    rospy.set_param('/pidrone/localization/calibration_owner', '')
+                    self.calibration_owner = ''
+        except (ValueError, KeyError, TypeError):
+            return
 
     def fly_commands_callback(self, msg):
         """ Store and send the flight commands if the current mode is FLYING """
@@ -115,10 +148,13 @@ class FlightController(object):
         Compute the ROS IMU message by reading data from the board.
         """
 
-        # extract roll, pitch, heading
-        self.board.getData(MultiWii.ATTITUDE)
-        # extract lin_acc_x, lin_acc_y, lin_acc_z
-        self.board.getData(MultiWii.RAW_IMU)
+        # Queue both requests before waiting for replies, avoiding an extra
+        # request/response turnaround between attitude and acceleration.
+        replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
+        if any(not isinstance(reply, dict) for reply in replies) or set(
+                reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
+            rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
+            return False
 
         # calculate values to update imu_message:
         roll = np.deg2rad(self.board.attitude['angx'])
@@ -194,6 +230,7 @@ class FlightController(object):
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
+        return True
 
     def update_battery_message(self):
         """
@@ -332,6 +369,8 @@ def main():
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
+    calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
+    calibration_owner_pub = rospy.Publisher('/pidrone/localization/calibration_owner/status', String, queue_size=1, latch=True)
     print('Publishing:')
     print('/pidrone/imu')
     print('/pidrone/mode')
@@ -340,6 +379,7 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
+    rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
     # heartbeat subscribers
@@ -353,6 +393,7 @@ def main():
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
     # set the loop rate (Hz)
     r = rospy.Rate(60)
+    last_battery_at = None
     try:
         while not rospy.is_shutdown():
             # if the current mode is anything other than disarmed
@@ -362,18 +403,25 @@ def main():
                 print("mode", fc.curr_mode)
                 break
                 
-            # update and publish flight controller readings
-            fc.update_battery_message()
-            fc.update_imu_message()
-            imupub.publish(fc.imu_message)
-            batpub.publish(fc.battery_message)
-
-            # update and send the flight commands to the board
+            # Deliver the current command before waiting for sensor telemetry.
             fc.update_command()
             fc.send_rc_cmd()
 
+            if fc.update_imu_message():
+                imupub.publish(fc.imu_message)
+            # 2 Hz leaves margin for the routines' 1-second battery watchdog.
+            now = rospy.get_time()
+            if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:
+                fc.update_battery_message()
+                batpub.publish(fc.battery_message)
+                last_battery_at = rospy.get_time()
+
             # publish the current mode of the drone
             fc.modepub.publish(fc.curr_mode)
+            with fc.mode_lock:
+                calibration_pub.publish(Bool(data=False))
+                calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
+                                                                     'request': fc.calibration_request})))
 
             # sleep for the remainder of the loop time
             r.sleep()

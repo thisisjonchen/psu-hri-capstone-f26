@@ -1,3 +1,6 @@
 .vscode
 *.pyc
 *.bag
+.venv/
+
+.calibration-state.json*

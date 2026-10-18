@@ -24,7 +24,7 @@ def main():
     drone.ready()
     try:
         drone.takeoff(hold_xy=True)
-        rospy.loginfo('Holding altitude %.2f m for 5 seconds with relative X/Y hold',
+        rospy.loginfo('Holding altitude %.2f m for 5 seconds with fused X/Y hold',
                       drone.takeoff_height)
         drone.hover(5.0)
     finally:
