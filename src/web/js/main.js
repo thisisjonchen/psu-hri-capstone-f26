@@ -29,6 +29,7 @@ class FleetMap {
     this.zoom = 1;
     this.anchorReports = {};
     this.anchorStamps = {};
+    this.tagReports = {};
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
       [0, 1, 2].map(i => ({
@@ -36,6 +37,9 @@ class FleetMap {
         data: [], borderColor: drone.id === 'drone1' ? '#0072b2' : '#d55e00',
         borderDash: dash, borderWidth: 2.5, pointRadius: 0, fill: false, lineTension: 0
       }))));
+    datasets.push({ key: 'apriltags', label: 'Mapped floor AprilTags', data: [], showLine: false,
+      backgroundColor: '#198a71', borderColor: '#198a71', pointStyle: 'rectRot',
+      pointRadius: 7, pointHoverRadius: 9, fill: false });
     datasets.push({ key: 'anchors', label: 'UWB anchors', data: [], borderColor: '#58677b',
       backgroundColor: '#58677b', pointStyle: 'rect', pointRadius: 5, borderDash: [4, 4],
       borderWidth: 1, fill: false, lineTension: 0 });
@@ -46,7 +50,7 @@ class FleetMap {
     this.chart = new Chart(document.getElementById('fleet-xyChart').getContext('2d'), {
       type: 'line', data: { datasets }, plugins: [{
         afterLayout: chart => this.equalizeScale(chart),
-        afterDatasetsDraw: chart => { this.drawAnchorLabels(chart); this.drawTargetLabels(chart); }
+        afterDatasetsDraw: chart => { this.drawAnchorLabels(chart); this.drawTagLabels(chart); this.drawTargetLabels(chart); }
       }], options: {
         responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
         scales: {
@@ -198,6 +202,7 @@ class FleetMap {
             [0, 1, 2].forEach(i => { drone.series[key + i] = []; });
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
+          this.tagReports = {};
         }
         this.room = candidate;
         this.targets = {};
@@ -277,6 +282,69 @@ class FleetMap {
         area.right - ctx.measureText(label).width - 4);
       const y = Math.max(area.top + 14, chart.scales['room-y'].getPixelForValue(anchor.y) - 9);
       ctx.fillText(label, x, y);
+    });
+    ctx.restore();
+  }
+
+  updateTagMap(id, message) {
+    const header = message.header || {};
+    const stamp = header.stamp && header.stamp.secs + header.stamp.nsecs / 1e9;
+    const tags = message.tag_ids, zones = message.zones;
+    const points = message.positions, counts = message.sample_counts;
+    const frame = roomFrame(header.frame_id);
+    if (!frame || !Number.isFinite(stamp) || stamp <= 0 || !Array.isArray(tags) ||
+        !Array.isArray(zones) || !Array.isArray(points) || !Array.isArray(counts) ||
+        tags.length !== zones.length || tags.length !== points.length || tags.length !== counts.length ||
+        new Set(tags).size !== tags.length ||
+        !tags.every(tag => Number.isInteger(tag) && tag >= 0) ||
+        !zones.every(zone => typeof zone === 'string') ||
+        !counts.every(count => Number.isInteger(count) && count > 0) ||
+        !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
+    if (this.tagReports[id] && stamp <= this.tagReports[id].stamp) return;
+    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => ({
+      id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
+      z: points[i].z, count: counts[i]
+    })) };
+    this.render();
+  }
+
+  mappedTags() {
+    if (!this.room || !this.layoutUsable) return [];
+    const groups = new Map();
+    Object.keys(drones).forEach(id => {
+      const report = this.tagReports[id];
+      if (!drones[id].connected || !report || report.frame !== this.room.frame ||
+          !this.hasMatchingReport(id)) return;
+      report.tags.forEach(tag => {
+        if (!groups.has(tag.id)) groups.set(tag.id, []);
+        groups.get(tag.id).push(tag);
+      });
+    });
+    return Array.from(groups.entries()).sort((a, b) => a[0] - b[0]).map(([id, samples]) => {
+      // Don't average two drones' observations when mounting/yaw calibration disagrees.
+      const main = samples.reduce((a, b) => b.count > a.count ? b : a);
+      const compatible = samples.filter(p => Math.hypot(p.x - main.x, p.y - main.y) <= 0.5);
+      const total = compatible.reduce((sum, p) => sum + p.count, 0);
+      return { id, zone: main.zone,
+        x: compatible.reduce((sum, p) => sum + p.x * p.count, 0) / total,
+        y: compatible.reduce((sum, p) => sum + p.y * p.count, 0) / total };
+    });
+  }
+
+  drawTagLabels(chart) {
+    if (!this.room) return;
+    const ctx = chart.ctx, area = chart.chartArea;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top); ctx.clip();
+    ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    this.mappedTags().forEach(tag => {
+      const text = tag.zone + ' · Tag ' + tag.id + ' (' + tag.x.toFixed(2) + ', ' + tag.y.toFixed(2) + ')';
+      const px = chart.scales['room-x'].getPixelForValue(tag.x);
+      const py = chart.scales['room-y'].getPixelForValue(tag.y);
+      const x = Math.min(area.right - ctx.measureText(text).width - 4, Math.max(area.left + 4, px + 10));
+      const y = Math.max(area.top + 14, py - 10);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.strokeText(text, x, y);
+      ctx.fillStyle = '#14765e'; ctx.fillText(text, x, y);
     });
     ctx.restore();
   }
@@ -464,7 +532,9 @@ class FleetMap {
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
     document.getElementById('target-stop').disabled = !selected || !drones[selected].connected;
     this.chart.data.datasets.forEach(dataset => {
-      if (dataset.key === 'anchors') {
+      if (dataset.key === 'apriltags') {
+        dataset.data = this.mappedTags().map(tag => ({ x: tag.x, y: tag.y }));
+      } else if (dataset.key === 'anchors') {
         dataset.data = this.room ? [...this.room.anchors, this.room.anchors[0]] : [];
       } else if (dataset.key === 'target') {
         const dragging = this.drag && this.drag.id === dataset.targetDrone && this.drag.point;
@@ -513,6 +583,7 @@ class FleetMap {
     this.chart.data.datasets.filter(dataset => dataset.droneId === id).forEach(dataset => { dataset.lastData = []; });
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
+    delete this.tagReports[id];
     this.refreshAnchors();
   }
 }
@@ -780,6 +851,7 @@ class DroneSession {
       this.subscribers.push(topic);
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
+    subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message));
     subscribe('/pidrone/localization/generation', 'std_msgs/UInt32', message => {
       if (!Number.isInteger(message.data)) return;
@@ -791,6 +863,7 @@ class DroneSession {
         // change clears display-only markers in refreshAnchors().
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
+        delete fleetMap.tagReports[this.id];
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;

@@ -1,0 +1,27 @@
+# AprilTag centers must lie on this horizontal plane in the UWB map (meters).
+# For tags laid flat on the floor and UWB z=0 at that floor, leave at 0.
+tag_plane_z: 0.0
+
+# IMPORTANT: 60 means 60 degrees BELOW HORIZONTAL (30 degrees from straight down).
+# If your measurement is 60 degrees from vertical, use 30 instead.
+camera_pitch_down_deg: 60.0
+# Zero assumes optical axis tilts toward the drone's forward (+Y) direction.
+# +90 means a tilt toward the drone's left (-X), due to RH rotation around Z.
+camera_azimuth_deg: 0.0
+# Image sensor rotated in its mounting plane? Adjust this from a measured fixture.
+camera_image_roll_deg: 0.0
+
+# Camera optical center RELATIVE TO UWB measurement point, in controller body:
+# [right (+X), forward (+Y), up (+Z)] METERS. Measure on the real drone.
+# Z=0 is ONLY a placeholder for a camera center at the UWB measurement point.
+camera_offset_body: [0.0, 0.0, 0.0]
+
+# Frame and maximum range; keep tight range for stable floor intersections.
+frame_id: map
+max_tag_distance: 3.0
+# Photo and fused pose stamps must be near each other, in seconds.
+max_image_pose_skew: 0.35
+# Gate individual tag observations against an already averaged location (meters).
+max_tag_jump: 0.35
+# Do not publish a tag on the map from a single noisy frame.
+min_tag_samples: 3

@@ -19,6 +19,10 @@ class TagDetection:
         self.camera_online = False
         self.tag_ids = []
         self.zones = []
+        self.center_x = []
+        self.center_y = []
+        self.image_width = 0
+        self.image_height = 0
 
 
 class DetectorTests(unittest.TestCase):
@@ -65,6 +69,9 @@ class DetectorTests(unittest.TestCase):
             self.assertTrue(self.messages[-1].camera_online)
             self.assertEqual(self.messages[-1].tag_ids, [tag])
             self.assertEqual(self.messages[-1].zones, [zone])
+            self.assertEqual(len(self.messages[-1].center_x), 1)
+            self.assertEqual(len(self.messages[-1].center_y), 1)
+            self.assertEqual((self.messages[-1].image_width, self.messages[-1].image_height), (240, 320))
         self.node.image_callback(self.frame())
         self.node.step()
         self.assertTrue(self.messages[-1].camera_online)

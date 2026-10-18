@@ -907,3 +907,26 @@ test('tap selection, overlapping targets, and keyboard adjustment work without c
   const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
   assert.doesNotMatch(html, /id="target-(drone|x|y|submit)"/);
 });
+
+test('mapped AprilTags use room coordinates, combine two drone observations, and clear on generation change', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const tagMap = (x, count, time = 100) => ({
+    header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
+    tag_ids: [0], zones: ['PICKUP'],
+    positions: [{ x, y: 2, z: 0 }], sample_counts: [count]
+  });
+  app.receive(a, '/pidrone/apriltag/map', tagMap(1, 4));
+  app.receive(b, '/pidrone/apriltag/map', tagMap(1.2, 6));
+  const tags = app.fleetMap.mappedTags();
+  assert.equal(tags.length, 1);
+  assert.equal(tags[0].id, 0);
+  assert.ok(Math.abs(tags[0].x - 1.12) < 1e-6);
+  assert.equal(app.fleetMap.chart.data.datasets.find(d => d.key === 'apriltags').data.length, 1);
+  app.receive(a, '/pidrone/localization/generation', { data: 0 });
+  app.receive(a, '/pidrone/localization/generation', { data: 1 });
+  assert.equal(app.fleetMap.tagReports.drone1, undefined);
+  assert.equal(app.fleetMap.mappedTags().length, 1); // Drone 2's independent map remains.
+  b.disconnect();
+  assert.equal(app.fleetMap.mappedTags().length, 0);
+});
