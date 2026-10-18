@@ -93,55 +93,60 @@ class FusionMathTest(unittest.TestCase):
             np.testing.assert_allclose(rotate((0, 1), angle), forward, atol=1e-12)
             np.testing.assert_allclose(rotate((1, 0), angle), right, atol=1e-12)
 
-    def test_fixed_flow_blend_preserves_uwb_estimate_timestamps_and_continuous_odometry(self):
-        for weight in (0, .2, 1):
-            f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5, flow_velocity_weight=weight)
-            f.predict(10)
-            f.update_uwb((0, 0), np.eye(2)*.0225, 10)
-            f.update_acceleration((1, 0), 10)
-            f.predict(10.2)
-            before = f.odom.copy()
-            self.assertTrue(f.update_flow((.1, 0), .01, 10.1)[0])
-            # Delayed flow receives the same known IMU increment as UWB/IMU.
-            np.testing.assert_allclose(rotate(f.velocity, math.pi/2), (.2, 0), atol=1e-12)
-            np.testing.assert_array_equal(f.odom, before)
-            f.update_acceleration((0, 0), 10.2)
-            # Repeated zero-flow samples must keep the exact chosen percentage,
-            # rather than gradually replacing the independent UWB/IMU estimate.
-            for stamp in (10.25, 10.3, 10.35):
-                f.predict(stamp)
-                before, room, covariance = f.odom.copy(), f.room.copy(), f.covariance.copy()
+    def test_flow_corrects_filter_velocity_and_learns_accelerometer_bias(self):
+        f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5)
+        f.predict(10)
+        f.update_uwb((0, 0), np.eye(2)*.0225, 10)
+        f.update_acceleration((1, 0), 10)
+        f.predict(10.2)
+        before, velocity = f.odom.copy(), f.room_velocity.copy()
+        # Delayed flow consistent with the known IMU increment changes nothing.
+        self.assertTrue(f.update_flow((.1, 0), .01, 10.1)[0])
+        np.testing.assert_allclose(f.room_velocity, velocity, atol=1e-12)
+        np.testing.assert_array_equal(f.odom, before)
+        f.update_acceleration((0, 0), 10.2)
+        f.predict(10.25)
+        variance = f.covariance[2, 2]
+        self.assertTrue(f.update_flow((0, 0), .01, 10.25)[0])
+        # Flow corrects the filter itself, and the controller uses that velocity.
+        self.assertTrue(0 < f.room_velocity[0] < .2)
+        self.assertLess(f.covariance[2, 2], variance)
+        np.testing.assert_allclose(rotate(f.velocity, math.pi/2), f.room_velocity, atol=1e-12)
+        self.assertEqual(f.uwb_stamp, 10)
+        f.predict(10.3)
+        state = f.room_velocity.copy(), f.bias.copy(), f.covariance.copy()
+        for sample, variance, stamp in [((0, 0), .01, 10.25), ((0, 0), 0, 10.3),
+                                        ((float('nan'), 0), .01, 10.3), ((20, 20), .01, 10.3)]:
+            self.assertFalse(f.update_flow(sample, variance, stamp)[0])
+            for value, expected in zip((f.room_velocity, f.bias, f.covariance), state):
+                np.testing.assert_array_equal(value, expected)
+        self.assertEqual(f.flow_stamp, 10.25)  # Rejection cannot renew the accepted sample.
+        f.reset_room()
+        self.assertFalse(f.update_flow((.1, 0), .01, 10.9)[0])
+        self.assertIsNone(f.room)
+
+        # A stationary drone whose accelerometer reads a constant offset: UWB and
+        # flow attribute it to bias instead of letting velocity run away.
+        f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5)
+        f.predict(10)
+        f.update_uwb((0, 0), np.eye(2)*.0225, 10)
+        for i in range(1, 501):
+            stamp = 10 + i*.02
+            f.update_acceleration((.2, 0), stamp)
+            f.predict(stamp)
+            if i % 2 == 0:
                 self.assertTrue(f.update_flow((0, 0), .01, stamp)[0])
-                np.testing.assert_allclose(f.room_velocity, (.2, 0), atol=1e-12)
-                np.testing.assert_allclose(rotate(f.velocity, math.pi/2), ((1-weight)*.2, 0), atol=1e-12)
-                np.testing.assert_array_equal(f.odom, before)
-                np.testing.assert_array_equal(f.room, room)
-                np.testing.assert_array_equal(f.covariance, covariance)
-                self.assertEqual(f.uwb_stamp, 10)
-            self.assertGreater(np.linalg.eigvalsh(f.covariance).min(), 0)
-            self.assertGreater(np.linalg.eigvalsh(f.velocity_covariance()).min(), 0)
-            velocity, covariance = f.velocity.copy(), f.covariance.copy()
-            for sample, variance, stamp in [((0, 0), .01, 10.35), ((0, 0), 0, 10.4),
-                                            ((float('nan'), 0), .01, 10.4)]:
-                self.assertFalse(f.update_flow(sample, variance, stamp)[0])
-                np.testing.assert_array_equal(f.velocity, velocity)
-                np.testing.assert_array_equal(f.covariance, covariance)
-            f.predict(10.4)
-            velocity, covariance = f.velocity.copy(), f.covariance.copy()
-            self.assertFalse(f.update_flow((20, 20), .01, 10.4)[0])
-            np.testing.assert_array_equal(f.velocity, velocity)
-            np.testing.assert_array_equal(f.covariance, covariance)
-            self.assertEqual(f.flow_stamp, 10.35)  # Rejection cannot renew the accepted sample.
-            f.predict(10.86)
-            self.assertFalse(f.flow_active())
-            np.testing.assert_allclose(rotate(f.velocity, math.pi/2), (.2, 0), atol=1e-12)
-            self.assertEqual(f.uwb_stamp, 10)
-            f.reset_room()
-            self.assertFalse(f.update_flow((.1, 0), .01, 10.9)[0])
-            self.assertIsNone(f.room)
-        for weight in (-.1, 1.1, float('nan')):
-            with self.assertRaises(ValueError):
-                PlanarFusion(flow_velocity_weight=weight)
+            if i % 5 == 0:
+                self.assertTrue(f.update_uwb((0, 0), np.eye(2)*.0225, stamp)[0])
+        self.assertTrue(.12 < f.bias[0] < .22)
+        self.assertAlmostEqual(f.bias[1], 0)
+        np.testing.assert_allclose(f.room_velocity, (0, 0), atol=.02)
+        # Unmeasured (zero) inputs are not corrected by that bias.
+        f.update_acceleration((0, 0), 20.02, measured=False)
+        f.predict(20.1)
+        velocity = f.room_velocity.copy()
+        f.predict(20.2)
+        np.testing.assert_array_equal(f.room_velocity, velocity)
 
     def test_outliers_invalid_covariance_and_duplicate_fixes_cannot_renew_solution(self):
         f = PlanarFusion(yaw_offset=0)
@@ -289,7 +294,7 @@ class FusionNodeTest(unittest.TestCase):
         np.testing.assert_array_equal(self.node.filter.accelerations[-1][1], (0, 0))
         self.node.use_imu_acceleration = True
         sample('FLYING', bias + (0, .2, 0))
-        np.testing.assert_allclose(self.node.filter.accelerations[-1][1], (0, .05), atol=1e-12)
+        np.testing.assert_allclose(self.node.filter.accelerations[-1][1], (0, .2), atol=1e-12)
         np.testing.assert_allclose(self.node.acceleration_bias, bias, atol=1e-12)
         self.report_anchors()
         self.uwb()
@@ -298,7 +303,7 @@ class FusionNodeTest(unittest.TestCase):
         self.ros_now += .1
         self.node.step()  # No new UWB: acceleration reaches controller velocity.
         message = self.messages['pidrone/state'][-1]
-        self.assertAlmostEqual(message.twist_with_covariance.twist.linear.y, .005)
+        self.assertAlmostEqual(message.twist_with_covariance.twist.linear.y, .02)
         self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
         self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
         sample('FLYING', (float('nan'), 0, 0))
@@ -381,15 +386,15 @@ class FusionNodeTest(unittest.TestCase):
         self.node.step()
         message = self.messages['pidrone/state'][-1]
         velocity = message.twist_with_covariance.twist.linear
-        self.assertAlmostEqual(velocity.x, .02)
-        self.assertAlmostEqual(velocity.y, .04)
-        np.testing.assert_array_equal(self.node.filter.room_velocity, (0, 0))
+        # The filter moves partway toward the compensated (.1, .2) m/s flow.
+        self.assertTrue(0 < velocity.x < .1)
+        self.assertAlmostEqual(velocity.y, 2 * velocity.x)
+        flow_speed = math.hypot(velocity.x, velocity.y)
         self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
         self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
         self.assertEqual(self.node.flow_reason, 'OK')
         values = {v.key: v.value for v in self.messages['pidrone/localization/fusion_status'][-1].status[0].values}
         self.assertIn('optical flow', values['xy_source'])
-        self.assertEqual(float(values['flow_velocity_weight']), .2)
         controller = self.controller()
         output = controller.step()
         self.assertLess(output[0], 1500)
@@ -417,9 +422,9 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(self.node.generation, generation)
         values = {v.key: v.value for v in self.messages['pidrone/localization/fusion_status'][-1].status[0].values}
         self.assertNotIn('optical flow', values['xy_source'])
-        self.assertEqual(float(values['flow_velocity_weight']), 0)
+        # Stationary UWB fixes then pull the velocity back toward zero.
         velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
-        self.assertEqual((velocity.x, velocity.y), (0, 0))
+        self.assertLess(math.hypot(velocity.x, velocity.y), flow_speed)
 
     def test_tof_remains_z_and_room_corrections_leave_controller_pose_unchanged(self):
         state_msg = self.messages['pidrone/state'][-1]

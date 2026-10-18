@@ -2,13 +2,12 @@
 # Experimental: sensor replay has not established a flight benefit.
 # Enabled for a controlled flight trial; startup bias is required before use.
 use_imu_acceleration: true
-# Fraction of bias-corrected horizontal acceleration used when prediction is enabled.
-imu_acceleration_gain: 0.25
+# Residual horizontal accelerometer bias after the startup measurement (m/s^2),
+# and how fast it may wander in flight (m/s^2 per sqrt(s)).
+acceleration_bias_stddev: 0.15
+acceleration_bias_drift: 0.01
 velocity_stddev: 0.12
-# Fixed controller velocity blend: 20% optical flow, 80% UWB/IMU when flow is fresh.
-# Without a fresh accepted flow sample, use 100% UWB/IMU. Allowed range: 0 through 1.
-flow_velocity_weight: 0.2
-# Flow uncertainty (m/s) for outlier checks/covariance, not the blend percentage.
+# Optical-flow velocity noise (m/s); sets how strongly flow corrects filter velocity.
 flow_velocity_stddev: 0.4
 # Preserve the earlier camera speed limit and EMA rotation compensation.
 max_flow_speed: 2.0

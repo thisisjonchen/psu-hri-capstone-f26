@@ -32,7 +32,8 @@ class FusionLocalizationNode(object):
             max_gap=self.timeout,
             gate=float(rospy.get_param('~innovation_gate', 9.21)),
             max_innovation=float(rospy.get_param('~max_innovation', 1.0)),
-            flow_velocity_weight=float(rospy.get_param('~flow_velocity_weight', 0.2)))
+            bias_stddev=float(rospy.get_param('~acceleration_bias_stddev', 0.15)),
+            bias_drift=float(rospy.get_param('~acceleration_bias_drift', 0.01)))
         self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.odom_frame = rospy.get_param('~odom_frame', 'odom')
@@ -53,9 +54,6 @@ class FusionLocalizationNode(object):
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
         self.imu = None
         self.use_imu_acceleration = bool(rospy.get_param('~use_imu_acceleration', False))
-        self.imu_acceleration_gain = float(rospy.get_param('~imu_acceleration_gain', 0.25))
-        if not np.isfinite(self.imu_acceleration_gain) or not 0 < self.imu_acceleration_gain <= 1:
-            raise ValueError('IMU acceleration gain must be greater than zero and at most one')
         self.acceleration_bias = None
         self.bias_samples = deque()
         self.mode = None
@@ -142,12 +140,12 @@ class FusionLocalizationNode(object):
                     self.bias_samples.clear()
                     rospy.loginfo('Startup acceleration bias ready: (%.4f, %.4f, %.4f) m/s^2',
                                   *self.acceleration_bias)
-        room_acceleration = np.zeros(2)
+        room_acceleration, measured = np.zeros(2), False
         if (self.use_imu_acceleration and self.acceleration_bias is not None and valid
                 and mode_fresh and self.mode == 'FLYING' and self.filter.yaw_offset is not None):
             local = horizontal_acceleration(acceleration - self.acceleration_bias, attitude)
-            room_acceleration = rotate(local, self.filter.yaw_offset) * self.imu_acceleration_gain
-        self.filter.update_acceleration(room_acceleration, stamp)
+            room_acceleration, measured = rotate(local, self.filter.yaw_offset), True
+        self.filter.update_acceleration(room_acceleration, stamp, measured)
 
     def range_callback(self, msg):
         with self.lock:
@@ -292,8 +290,8 @@ class FusionLocalizationNode(object):
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='frame_id', value=self.frame),
                              KeyValue(key='last_uwb_result', value=self.reason),
-                             KeyValue(key='flow_velocity_weight', value=str(
-                                 self.filter.flow_velocity_weight if self.filter.flow_active(now) else 0.0)),
+                             KeyValue(key='acceleration_bias_estimate',
+                                      value='%.4f, %.4f' % tuple(self.filter.bias)),
                              KeyValue(key='last_flow_result', value=self.flow_reason)]
             diagnostics = DiagnosticArray()
             diagnostics.header.stamp = rospy.Time.from_sec(now)
@@ -323,7 +321,7 @@ class FusionLocalizationNode(object):
         if ready:
             rotation = np.column_stack((rotate((1, 0), -angle - self.filter.yaw_offset),
                                         rotate((0, 1), -angle - self.filter.yaw_offset)))
-            velocity_covariance = rotation.dot(self.filter.velocity_covariance()).dot(rotation.T)
+            velocity_covariance += rotation.dot(self.filter.covariance[2:4, 2:4]).dot(rotation.T)
         state.twist_with_covariance.covariance[0] = velocity_covariance[0, 0]
         state.twist_with_covariance.covariance[1] = velocity_covariance[0, 1]
         state.twist_with_covariance.covariance[6] = velocity_covariance[1, 0]
