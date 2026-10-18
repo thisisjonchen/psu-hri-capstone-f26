@@ -98,9 +98,13 @@ roslaunch pidrone_pkg apriltag_detection.launch
 roslaunch pidrone_pkg apriltag_mapping.launch
 ```
 
-The normal `PALS/drone_controller.py` startup also starts the mapping launch
-file automatically. If you use that startup flow, no extra manual launch is
-needed. Check topics from the same ROS master on the drone:
+The normal `screen -c pi.screenrc` startup runs the mapper in the **TagMap**
+window, alongside the **AprilTags** detector window. `PALS/drone_controller.py`
+also starts the mapper if it is missing. With either startup flow, no extra
+manual launch is needed. For an already-running screen session that predates
+this change, launch `roslaunch pidrone_pkg apriltag_mapping.launch` in a free
+window after rebuilding and sourcing the workspace. Check topics from the same
+ROS master on the drone:
 
 ```bash
 rostopic echo -n 1 /pidrone/apriltag/detections
@@ -114,9 +118,11 @@ pose, position a stationary drone so a paper AprilTag on the floor is visible,
 then gently point/position the camera toward the tag. Compare the detected
 map coordinates to a tape measure. Do not arm, take off, or use coordinates to
 command motion just to test this feature. Image/pose pairing is limited by
-`max_image_pose_skew` (default 0.35 seconds); drone movement while mapping
-will increase error. If you map while flying, hover briefly and treat the
-result as a provisional landmark until validated.
+`max_image_pose_skew` (default 0.35 seconds). A pose may be newer or older than
+the image because detection takes time; both must still be fresh. The fused
+stamp tracks contributing sensor age, not a synchronized camera-time pose,
+so drone movement while mapping will increase error. If you map while flying,
+hover briefly and treat the result as a provisional landmark until validated.
 
 On the dashboard a green diamond and text label for each mapped tag will
 appear. The standard status card continues to report only *visibility* of a

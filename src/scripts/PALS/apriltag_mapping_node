@@ -122,8 +122,9 @@ class AprilTagMappingNode(object):
         return message.header.stamp.to_sec()
 
     def _fresh(self, stamp):
-        age = rospy.Time.now().to_sec() - self._stamp(stamp)
-        return 0 <= age <= self.max_skew
+        seconds = self._stamp(stamp)
+        age = rospy.Time.now().to_sec() - seconds
+        return seconds > 0 and 0 <= age <= self.max_skew
 
     def detection_callback(self, message):
         with self.lock:
@@ -147,8 +148,10 @@ class AprilTagMappingNode(object):
                 return
             # `fused` keeps the age of its UWB fix. Do not replace that timestamp
             # with receipt time or treat old position data as current.
+            # Detection may finish after a newer pose arrives. Either stamp can
+            # lead within the configured skew, but both must still be fresh.
             skew = self._stamp(message) - self._stamp(self.pose)
-            if skew < 0 or skew > self.max_skew or not self._fresh(self.pose):
+            if abs(skew) > self.max_skew or not self._fresh(self.pose):
                 return
             p, q = self.pose.pose.pose.position, self.pose.pose.pose.orientation
             position = (p.x, p.y, p.z)
