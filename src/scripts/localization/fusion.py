@@ -2,8 +2,8 @@
 
 The existing controller uses x=right, y=forward. The FC's IMU yaw describes
 forward in a conventional x/y world, so the controller basis is yaw - pi/2.
-UWB corrects room position, optical flow corrects velocity, and IMU acceleration
-predicts between them while the filter tracks its residual bias.
+UWB corrects room position and velocity; IMU acceleration predicts between fixes.
+Controller velocity blends that estimate with timestamped optical flow.
 Local odometry integrates the corrected velocity without position jumps.
 """
 import math
@@ -49,69 +49,61 @@ class PlanarFusion(object):
     def __init__(self, yaw_offset=None, velocity_stddev=0.12,
                  drift_stddev=0.08,
                  max_gap=0.25, gate=9.21, max_innovation=1.0,
-                 acceleration_stddev=0.3, bias_stddev=0.15, bias_drift=0.01):
+                 acceleration_stddev=0.3, flow_velocity_weight=0.2):
         values = (velocity_stddev, drift_stddev, max_gap, gate,
-                  max_innovation, acceleration_stddev, bias_stddev, bias_drift)
+                  max_innovation, acceleration_stddev)
         if not all(np.isfinite(v) and v > 0 for v in values):
             raise ValueError('Fusion noise, timeouts and gates must be positive')
         if yaw_offset is not None and not np.isfinite(yaw_offset):
             raise ValueError('Room yaw offset must be finite')
+        if not np.isfinite(flow_velocity_weight) or not 0 <= flow_velocity_weight <= 1:
+            raise ValueError('Optical-flow velocity weight must be between zero and one')
         self.yaw_offset = yaw_offset
         self.velocity_variance = velocity_stddev ** 2
         self.drift_variance = drift_stddev ** 2
         self.acceleration_variance = acceleration_stddev ** 2
-        self.bias_drift_variance = bias_drift ** 2
         self.max_gap = max_gap
         self.gate, self.max_innovation = gate, max_innovation
         self.odom = np.zeros(2)
         self.velocity = np.zeros(2)
-        # Kalman state: room X/Y position, room X/Y velocity and the residual
-        # room X/Y accelerometer bias left after the startup measurement.
+        # Kalman state: room X/Y position and room X/Y velocity.
         self.room_velocity = np.zeros(2)
         self.room = None
-        self.bias = np.zeros(2)
-        self.covariance = np.diag([1, 1, 1, 1, bias_stddev ** 2, bias_stddev ** 2])
+        self.covariance = np.eye(4)
         self.stamp = None
         self.uwb_stamp = None
         self.flow_stamp = None
+        self.flow_velocity = np.zeros(2)
+        self.flow_variance = 0.0
+        self.flow_velocity_weight = flow_velocity_weight
         self.history = deque()
         self.accelerations = deque()
 
-    def update_acceleration(self, acceleration, stamp, measured=True):
-        """Store a room-frame input at its measurement time, never renew its age.
-
-        Only measured inputs are corrected by the estimated bias.
-        """
+    def update_acceleration(self, acceleration, stamp):
+        """Store a room-frame input at its measurement time, never renew its age."""
         acceleration = np.asarray(acceleration, dtype=float)
         if (acceleration.shape != (2,) or not np.all(np.isfinite(acceleration))
                 or not np.isfinite(stamp) or stamp <= 0
                 or (self.accelerations and stamp <= self.accelerations[-1][0])):
             return False
-        self.accelerations.append((stamp, acceleration.copy(), measured))
+        self.accelerations.append((stamp, acceleration.copy()))
         # Keep the last input before the observation history as well.
         while len(self.accelerations) > 1 and self.accelerations[1][0] < stamp - 2.0:
             self.accelerations.popleft()
         return True
 
     def acceleration_motion(self, start, end):
-        """Bias-corrected velocity/displacement increments for held, timestamped
-        inputs, and the durations scaling their sensitivity to that bias."""
+        """Known velocity/displacement increments for held, timestamped inputs."""
         velocity, displacement = np.zeros(2), np.zeros(2)
-        velocity_time = displacement_time = 0.0
         samples = list(self.accelerations)
-        for i, (stamp, acceleration, measured) in enumerate(samples):
+        for i, (stamp, acceleration) in enumerate(samples):
             stop = samples[i + 1][0] if i + 1 < len(samples) else end
             left, right = max(start, stamp), min(end, stop, stamp + self.max_gap)
             if right > left:
                 duration = right - left
-                lever = end - (left + right) / 2.0
-                if measured:
-                    acceleration = acceleration - self.bias
-                    velocity_time += duration
-                    displacement_time += duration * lever
                 velocity += acceleration * duration
-                displacement += acceleration * duration * lever
-        return velocity, displacement, velocity_time, displacement_time
+                displacement += acceleration * duration * (end - (left + right) / 2.0)
+        return velocity, displacement
 
     def reset_room(self):
         self.room = None
@@ -120,12 +112,30 @@ class PlanarFusion(object):
         self.room_velocity[:] = 0
         self.velocity[:] = 0
 
-    def flow_active(self, stamp):
-        return bool(self.room is not None and self.flow_stamp is not None
-                    and 0 <= stamp - self.flow_stamp <= self.max_gap)
+    def flow_active(self, stamp=None):
+        now = self.stamp if stamp is None else stamp
+        return bool(self.room is not None and self.flow_velocity_weight > 0
+                    and self.flow_stamp is not None and now is not None
+                    and 0 <= now - self.flow_stamp <= self.max_gap)
 
-    def _update_local_velocity(self):
-        self.velocity = rotate(self.room_velocity, -self.yaw_offset)
+    def _update_local_velocity(self, stamp=None):
+        now = self.stamp if stamp is None else stamp
+        velocity = self.room_velocity.copy()
+        if self.flow_active(now):
+            delta_velocity, _ = self.acceleration_motion(self.flow_stamp, now)
+            weight = self.flow_velocity_weight
+            velocity = (1 - weight) * velocity + weight * (self.flow_velocity + delta_velocity)
+        self.velocity = rotate(velocity, -self.yaw_offset)
+
+    def velocity_covariance(self):
+        covariance = self.covariance[2:, 2:] + np.eye(2) * self.velocity_variance
+        if self.flow_active():
+            noise = self.flow_variance + self.acceleration_variance * (self.stamp - self.flow_stamp)
+            weight = self.flow_velocity_weight
+            # Conservative bound: both branches share IMU attitude/prediction,
+            # so do not assume their errors are independent.
+            covariance = (1 - weight) * covariance + weight * np.eye(2) * noise
+        return covariance
 
     def predict(self, stamp):
         """Predict with measured acceleration; fall back to constant velocity."""
@@ -141,45 +151,26 @@ class PlanarFusion(object):
         elif dt:
             displacement = self.velocity * dt
             if self.room is not None:
-                delta_velocity, delta_position, velocity_time, displacement_time = \
-                    self.acceleration_motion(self.stamp, stamp)
+                delta_velocity, delta_position = self.acceleration_motion(self.stamp, stamp)
                 displacement += rotate(delta_position, -self.yaw_offset)
                 self.room += self.room_velocity * dt + delta_position
                 self.room_velocity += delta_velocity
-                self._update_local_velocity()
-                transition = np.eye(6)
-                transition[:2, 2:4] = np.eye(2) * dt
-                transition[:2, 4:] = -np.eye(2) * displacement_time
-                transition[2:4, 4:] = -np.eye(2) * velocity_time
+                self._update_local_velocity(stamp)
+                transition = np.eye(4)
+                transition[:2, 2:] = np.eye(2) * dt
                 # ROS Kinetic's NumPy predates np.block.
-                noise = np.zeros((6, 6))
+                noise = np.zeros((4, 4))
                 noise[:2, :2] = np.eye(2) * dt**3 / 3
-                noise[:2, 2:4] = noise[2:4, :2] = np.eye(2) * dt**2 / 2
-                noise[2:4, 2:4] = np.eye(2) * dt
+                noise[:2, 2:] = noise[2:, :2] = np.eye(2) * dt**2 / 2
+                noise[2:, 2:] = np.eye(2) * dt
                 noise *= self.acceleration_variance
                 noise[:2, :2] += np.eye(2) * (self.velocity_variance * dt**2 + self.drift_variance * dt)
-                noise[4:, 4:] = np.eye(2) * self.bias_drift_variance * dt
                 self.covariance = transition.dot(self.covariance).dot(transition.T) + noise
             self.odom += displacement
         self.stamp = stamp
         self.history.append(stamp)
         while self.history and stamp - self.history[0] > 2.0:
             self.history.popleft()
-        return True
-
-    def _correct(self, observation_matrix, innovation, noise):
-        cross = self.covariance.dot(observation_matrix.T)
-        total = observation_matrix.dot(cross) + noise
-        if float(innovation.dot(np.linalg.solve(total, innovation))) > self.gate:
-            return False
-        gain = np.linalg.solve(total.T, cross.T).T
-        correction = gain.dot(innovation)
-        self.room += correction[:2]
-        self.room_velocity += correction[2:4]
-        self.bias += correction[4:]
-        self._update_local_velocity()
-        remainder = np.eye(6) - gain.dot(observation_matrix)
-        self.covariance = remainder.dot(self.covariance).dot(remainder.T) + gain.dot(noise).dot(gain.T)
         return True
 
     def update_uwb(self, position, covariance, stamp):
@@ -198,33 +189,37 @@ class PlanarFusion(object):
             return False, 'UWB timestamp is outside prediction history'
         # Undo known acceleration as well when observing a past position.
         age = self.stamp - stamp
-        delta_velocity, delta_position, velocity_time, displacement_time = \
-            self.acceleration_motion(stamp, self.stamp)
+        delta_velocity, delta_position = self.acceleration_motion(stamp, self.stamp)
         acceleration_offset = age * delta_velocity - delta_position
         noise = covariance + np.eye(2) * (self.velocity_variance * age ** 2 + self.drift_variance * age)
         if self.room is None:
             self.room = position.copy() + delta_position
             self.room_velocity = delta_velocity
             self._update_local_velocity()
-            # The bias belongs to the IMU, so it survives a room reset.
-            bias_covariance = self.covariance[4:, 4:].copy()
-            self.covariance = np.zeros((6, 6))
-            self.covariance[4:, 4:] = bias_covariance
-            self.covariance[2:4, 2:4] = np.eye(2) * self.acceleration_variance
-            self.covariance[:2, :2] = noise + age**2 * self.covariance[2:4, 2:4]
-            self.covariance[:2, 2:4] = self.covariance[2:4, :2] = age * self.covariance[2:4, 2:4]
+            self.covariance = np.zeros((4, 4))
+            self.covariance[2:, 2:] = np.eye(2) * self.acceleration_variance
+            self.covariance[:2, :2] = noise + age**2 * self.covariance[2:, 2:]
+            self.covariance[:2, 2:] = self.covariance[2:, :2] = age * self.covariance[2:, 2:]
         else:
-            observation_matrix = np.hstack((np.eye(2), -age * np.eye(2),
-                                            (displacement_time - age * velocity_time) * np.eye(2)))
+            observation_matrix = np.hstack((np.eye(2), -age * np.eye(2)))
             innovation = position - (self.room - age * self.room_velocity + acceleration_offset)
+            cross = self.covariance.dot(observation_matrix.T)
+            total = observation_matrix.dot(cross) + noise
             if (np.linalg.norm(innovation) > self.max_innovation
-                    or not self._correct(observation_matrix, innovation, noise)):
+                    or float(innovation.dot(np.linalg.solve(total, innovation))) > self.gate):
                 return False, 'UWB innovation rejected'
+            gain = np.linalg.solve(total.T, cross.T).T
+            correction = gain.dot(innovation)
+            self.room += correction[:2]
+            self.room_velocity += correction[2:]
+            self._update_local_velocity()
+            remainder = np.eye(4) - gain.dot(observation_matrix)
+            self.covariance = remainder.dot(self.covariance).dot(remainder.T) + gain.dot(noise).dot(gain.T)
         self.uwb_stamp = stamp
         return True, 'OK'
 
     def update_flow(self, velocity, variance, stamp):
-        """Correct the filter velocity with a room-frame flow measurement."""
+        """Validate/cache flow for a fixed blend; never feed it back into UWB."""
         velocity = np.asarray(velocity, dtype=float)
         if (velocity.shape != (2,) or not np.all(np.isfinite(velocity))
                 or not np.isfinite(variance) or variance <= 0
@@ -239,11 +234,14 @@ class PlanarFusion(object):
             return False, 'Optical-flow timestamp is outside prediction history'
         # A delayed camera observation measures velocity before the known IMU
         # increments. Keep the prediction clock and continuous odometry intact.
-        delta_velocity, _, velocity_time, _ = self.acceleration_motion(stamp, self.stamp)
+        delta_velocity, _ = self.acceleration_motion(stamp, self.stamp)
         noise = np.eye(2) * (variance + self.acceleration_variance * (self.stamp - stamp))
-        observation_matrix = np.hstack((np.zeros((2, 2)), np.eye(2), velocity_time * np.eye(2)))
         innovation = velocity + delta_velocity - self.room_velocity
-        if not self._correct(observation_matrix, innovation, noise):
+        total = self.covariance[2:, 2:] + noise
+        if float(innovation.dot(np.linalg.solve(total, innovation))) > self.gate:
             return False, 'Optical-flow innovation rejected'
+        self.flow_velocity = velocity.copy()
+        self.flow_variance = variance
         self.flow_stamp = stamp
+        self._update_local_velocity()
         return True, 'OK'

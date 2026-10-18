@@ -4,10 +4,9 @@ This integrates the `localization` branch at `69051388a6bfbbf56eb32280a29e31195a
 into the DD24 ROS package. The DWM1001/PANS tag computes horizontal position from
 room anchors. The ROS node publishes UWB x/y and **ToF z**, using the existing
 `/pidrone/range` and `/pidrone/imu` streams. UWB height is never used in the combined pose.
-Fusion estimates room XY position and velocity in one Kalman filter: UWB corrects
-position, camera optical flow corrects velocity, and IMU acceleration predicts between
-measurements while the filter tracks its residual bias. IMU heading converts velocity
-into body axes. ToF supplies Z.
+Fusion estimates room XY position and velocity from UWB, blends camera optical-flow
+velocity into controller feedback, and uses IMU heading to convert velocity into body axes.
+ToF supplies Z. The configured IMU acceleration input predicts between measurements.
 Fusion owns the continuous local state used by the PID controller.
 
 The flight-controller loop sends RC commands before reading telemetry and queues
@@ -135,8 +134,7 @@ stationary, disarmed IMU samples. Keep the drone still until it logs
 `Startup acceleration bias ready`. Rotation, gaps, unavailable acceleration,
 large residual gravity, or an unstable sample window prevent calibration.
 This does not require UWB and does not recalibrate the flight controller. The bias
-is frozen after capture; restarting the node measures it again. The fusion filter
-then estimates any remaining horizontal bias in flight (see Fusion behavior). Without a bias,
+is frozen after capture; restarting the node measures it again. Without a bias,
 the estimator continues using UWB and available optical flow, without acceleration input.
 
 ## ROS outputs and dashboard
@@ -316,36 +314,38 @@ not obstacle avoidance, collision avoidance, or formation planning.
 
 ### Fusion behavior
 
-The planar Kalman filter estimates room XY position, XY velocity and residual
-XY accelerometer bias. UWB fixes correct position, optical flow corrects velocity,
-and configured IMU acceleration predicts between them. Each measurement's weight
-comes from its noise setting and the filter's current uncertainty, so flow counts
-for more during a UWB gap and less right after a fix. It filters measurement noise
-rather than directly differentiating each pair of positions. IMU heading rotates
-the filter velocity into body axes for `/pidrone/state`; ToF supplies Z.
-Local odometry integrates that velocity without jumping at a UWB fix; direct
+The planar Kalman filter estimates room XY position and velocity from successive
+UWB fixes, with configured IMU acceleration prediction between fixes. It filters
+measurement noise rather than directly differentiating each pair of positions.
+Controller velocity blends this estimate with optical flow. IMU heading rotates
+the blended velocity into body axes for `/pidrone/state`; ToF supplies Z.
+Local odometry integrates blended velocity without jumping at a UWB fix; direct
 room-position corrections adjust the `map → odom` offset.
 
 Optical flow arrives on `/pidrone/picamera/twist` in `pidrone_body`, with the
 existing camera scale (`/pidrone/localization/flow_scale`, default 0.165).
 Fusion restores the earlier EMA rotation compensation (angular rate times ToF
 height times `angular_compensation`, default 0.2), then rotates the horizontal
-velocity into the room frame and applies it as a Kalman velocity measurement.
-`flow_velocity_stddev` (configured 1.2 m/s, so UWB stays dominant) is its measurement noise: a larger value makes
-flow correct velocity less. Room position remains anchored to UWB; flow can shift
-it only through the filter's position-velocity correlation. The original
+velocity into the room frame. `flow_velocity_weight` specifies a fixed fraction
+between zero and one, read at fusion startup. The launch configuration uses **0.2**:
+`controller_velocity = 0.8 * uwb_imu_velocity + 0.2 * flow_velocity`.
+A value of 0 disables flow's contribution; 1 uses flow for velocity whenever it
+is fresh and accepted. Room position always remains anchored to UWB.
+Flow does not modify the independent UWB/IMU Kalman state, so repeated camera frames
+do not compound its percentage. `flow_velocity_stddev` (0.4 m/s) controls outlier
+checks and reported covariance, not the blend percentage. The original
 `max_flow_speed` limit (2 m/s), finite-value checks, frame, freshness and IMU/ToF
 timestamp alignment checks remain separate from the statistical innovation gate.
 Delayed flow observations account for known IMU velocity increments without
 rewinding the estimator or jumping continuous odometry.
 
-Flow is optional: without camera samples the filter runs on UWB and IMU alone.
-A rejected frame never renews the last accepted sample's timestamp.
+Flow is optional: without a fresh accepted camera sample, feedback uses 100%
+UWB/IMU velocity. A rejected frame never renews the last accepted sample's timestamp.
 Flow cannot initialize the room, renew a UWB timestamp,
 extend the existing 1-second UWB horizon, or replace the hold target. Fusion
 diagnostics include `optical flow` in `xy_source` only while an accepted flow sample
-is fresh, and report `last_flow_result` and `acceleration_bias_estimate` for
-troubleshooting. Only fusion publishes
+is fresh and its weight is positive, and report the active `flow_velocity_weight`
+and `last_flow_result` for troubleshooting. Only fusion publishes
 `/pidrone/state`; do not start the legacy EMA alongside it.
 
 The camera motion-vector path has no tracking-confidence metric or texture gate.
@@ -357,14 +357,12 @@ use the arrival time of each new message, so their acquisition latency is unknow
 The experimental `use_imu_acceleration` option adds bias-corrected acceleration
 prediction while flying. The launch configuration enables it for a controlled
 flight trial; sensor replay has not established a flight benefit.
-When enabled, the full measured acceleration is used. Its trust is set by
-`acceleration_stddev`, and the filter estimates a residual room-frame XY bias,
-starting at zero with uncertainty `acceleration_bias_stddev` (0.15 m/s^2) and
-allowed to wander by `acceleration_bias_drift` (0.01 m/s^2 per sqrt(s)). UWB and
-flow make that bias observable; with the default noise it settles over roughly
-10-20 s of flight. The bias is modeled in the room frame, so it re-converges
-slowly after large yaw changes. It persists across UWB gaps and resets only when
-the node restarts. Parameters are read when the fusion node starts. Replay agreement with noisy UWB fixes is not a measurement
+When enabled, `imu_acceleration_gain` scales the room-frame XY
+acceleration before integration. Its default is 0.25 and its allowed range is
+greater than zero through one. This scales the acceleration input; it does not
+assign fixed percentages to UWB and IMU measurements. UWB still corrects position
+and velocity through the existing Kalman update. Both parameters are read when
+the fusion node starts. Replay agreement with noisy UWB fixes is not a measurement
 of true flight accuracy.
 
 Acceleration is already gravity-compensated by the flight-controller node. Fusion
@@ -374,9 +372,9 @@ It does not integrate acceleration into Z. Timestamped inputs affect prediction
 only from their sample time and expire at `sensor_timeout`; invalid samples or
 non-flying modes supply zero acceleration. There is no extra smoothing window.
 
-Delayed UWB and flow observations are compared with the estimate at their own
-timestamp, accounting for the bias-corrected acceleration since then, with
-additional uncertainty over that interval. Repeated or out-of-order observations cannot renew
+Delayed UWB observations measure `position - age * velocity`, plus the known
+acceleration contribution when enabled, with additional uncertainty over that
+interval. Repeated or out-of-order observations cannot renew
 a fix. Innovation gates reject inconsistent UWB observations. Prediction runs at
 60 Hz, but this does not increase the UWB measurement rate or remove its latency.
 
@@ -463,8 +461,7 @@ numbers, ToF-only height, tilt/offset math, freshness/time skew, ROS publication
 diagnostics, live anchor parsing/discovery, partial/stale/conflicting layouts,
 no duplicate publication, and independent dashboard telemetry.
 Fusion checks also cover delayed observations, axis rotation, covariance/outlier
-handling, UWB-derived velocity and expiry, optical-flow velocity correction,
-startup and in-flight acceleration bias, inertial
+handling, UWB-derived velocity and expiry, startup acceleration bias, inertial
 braking with delayed fixes, layout/time resets, bounded room commands,
 manual overrides and explicit dashboard sending. Hardware-free tests need NumPy and Python 3.9+.
 
