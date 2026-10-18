@@ -23,9 +23,9 @@ class AprilTagGeometryTests(unittest.TestCase):
             (0, 0, height), quaternion, offset, camera_rotation(pitch),
             plane_z=plane, max_distance=5.0)
 
-    def test_center_ray_at_sixty_degrees_lands_forward(self):
-        result = self.project()
-        np.testing.assert_allclose(result, (0, 1/math.sqrt(3), 0), atol=1e-7)
+    def test_off_center_pinhole_ray_lands_right_and_forward(self):
+        np.testing.assert_allclose(self.project(pixel=(190, 120)),
+                                   (.2/math.sqrt(3), 1/math.sqrt(3), 0), atol=1e-7)
 
     def test_vertical_camera_points_directly_below_camera(self):
         np.testing.assert_allclose(self.project(pitch=90, offset=(.1, .2, -.1)),
@@ -38,11 +38,6 @@ class AprilTagGeometryTests(unittest.TestCase):
                                    (-2/math.sqrt(3), 0, 0), atol=1e-7)
         np.testing.assert_allclose(self.project(height=1, plane=.5),
                                    (0, .5/math.sqrt(3), .5), atol=1e-7)
-
-    def test_image_right_corresponds_to_body_right(self):
-        p = self.project(pixel=(190, 120))
-        self.assertGreater(p[0], 0)
-        self.assertGreater(p[1], 0)
 
     def test_cannot_intersect_upwards_or_distant_plane(self):
         with self.assertRaises(ValueError):
@@ -83,15 +78,15 @@ class AprilTagMappingTests(unittest.TestCase):
         self.node.camera_callback(NS(width=320, height=240, K=AprilTagGeometryTests.K,
                                      D=[0] * 5, distortion_model='plumb_bob'))
 
-    def observe(self, image_stamp, pose_stamp):
+    def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
         pose = Pose()
         pose.header.frame_id, pose.header.stamp = 'map', Stamp(pose_stamp)
         pose.pose.pose.position = NS(x=1, y=2, z=1)
         pose.pose.pose.orientation.w = 1
         self.node.pose_callback(pose)
         message = NS(header=NS(stamp=Stamp(image_stamp)), camera_online=True,
-                     image_width=320, image_height=240, tag_ids=[0], zones=['PICKUP'],
-                     center_x=[160], center_y=[120])
+                     image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PICKUP'],
+                     center_x=[pixel[0]], center_y=[pixel[1]])
         self.node.detection_callback(message)
         return message
 
@@ -134,6 +129,35 @@ class AprilTagMappingTests(unittest.TestCase):
         self.observe(0, 0)
         self.assertIsNone(self.node.pose)
         self.assertEqual(self.node.tags[0]['count'], 1)
+
+    def test_equidistant_camera_maps_an_off_center_tag(self):
+        # CameraInfo reported by Drone 2. Generate a pixel independently using
+        # theta_d = theta * (1 + k1*theta^2 + ... + k4*theta^8).
+        k = [154.1638736, 0, 118.8348587, 0, 155.2131826, 153.5541936, 0, 0, 1]
+        d = [-.04846490008, .03309016118, -.03411731679, .009736962306]
+        self.node.camera_callback(NS(width=240, height=320, K=k, D=d,
+                                     distortion_model='equidistant'))
+        x, y = .5, .25
+        radius = math.hypot(x, y)
+        theta = math.atan(radius)
+        distorted = theta * (1 + sum(c * theta**(2*(i+1)) for i, c in enumerate(d)))
+        pixel = (k[2] + k[0]*x*distorted/radius, k[5] + k[4]*y*distorted/radius)
+        for i in range(3):
+            self.now = 100 + i*.1
+            self.observe(self.now, self.now, pixel=pixel, size=(240, 320))
+        result = self.maps[-1]
+        self.assertEqual(result.tag_ids, [0])
+        point = result.positions[0]
+        down = math.sqrt(3)/2 + y/2
+        np.testing.assert_allclose((point.x, point.y, point.z),
+                                   (1 + x/down, 2 + (.5-y*math.sqrt(3)/2)/down, 0), atol=1e-7)
+
+        # A malformed calibration update pauses observations without losing the map.
+        self.node.camera_callback(NS(width=240, height=320, K=k, D=d + [0],
+                                     distortion_model='equidistant'))
+        self.now += .1
+        self.observe(self.now, self.now, pixel=pixel, size=(240, 320))
+        self.assertEqual(self.node.tags[0]['count'], 3)
 
 
 if __name__ == '__main__':

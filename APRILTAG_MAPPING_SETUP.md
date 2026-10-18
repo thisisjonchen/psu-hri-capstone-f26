@@ -28,7 +28,11 @@ Frames: `map` is UWB +X/right, +Y/up on dashboard, +Z/up. `body` uses
 quaternion. OpenCV `camera` uses +x/image-right, +y/image-down, +z/optical
 forward. For an image measurement `u,v`:
 
-1. `cv2.undistortPoints()` converts `u,v` to camera ray `[x,y,1]`.
+1. The published CameraInfo distortion model selects the pixel-to-ray conversion:
+   `cv2.undistortPoints()` for `plumb_bob`/`rational_polynomial`, or
+   `cv2.fisheye.undistortPoints()` for `equidistant` with four coefficients.
+   Both produce the camera ray `[x,y,1]`. Equidistant calibration requires
+   OpenCV's Python fisheye API; it cannot be used as pinhole coefficients.
 2. The mounting rotation converts that ray to body coordinates. For a camera
    pointing **60 degrees below horizontal** and straight forward:
    `R_body_camera = [[1,0,0],[0,-sin(60),cos(60)],[0,-cos(60),-sin(60)]]`.

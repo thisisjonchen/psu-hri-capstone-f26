@@ -53,11 +53,12 @@ def camera_rotation(pitch_down_deg, azimuth_deg=0.0, image_roll_deg=0.0):
 
 def project_floor_tag(pixel, camera_matrix, distortion, drone_position,
                       drone_quaternion, camera_offset_body, rotation_body_camera,
-                      plane_z=0.0, max_distance=5.0):
+                      plane_z=0.0, max_distance=5.0, distortion_model='plumb_bob'):
     """Return [map_x, map_y, plane_z], or raise ValueError for invalid ray.
 
     pixel: detected tag center in the *unrectified* compressed camera image.
     camera_matrix/distortion: matching ROS CameraInfo intrinsics for that image.
+    distortion_model: ROS pinhole model or equidistant (four fisheye coefficients).
     drone_position: UWB/ToF fused position (origin is the UWB measurement point).
     camera_offset_body: UWB point -> optical center in controller right/forward/up.
     rotation_body_camera: camera optical vectors -> controller body vectors.
@@ -73,7 +74,16 @@ def project_floor_tag(pixel, camera_matrix, distortion, drone_position,
             or not np.isfinite(max_distance) or max_distance <= 0):
         raise ValueError('Invalid intrinsics or pose')
     try:
-        ray_xy = cv2.undistortPoints(uv, k, d).reshape(2)
+        if distortion_model == 'equidistant':
+            if d.size != 4:
+                raise ValueError('Equidistant calibration requires four coefficients')
+            if not hasattr(cv2, 'fisheye') or not hasattr(cv2.fisheye, 'undistortPoints'):
+                raise ValueError('OpenCV fisheye.undistortPoints is required for equidistant calibration')
+            ray_xy = cv2.fisheye.undistortPoints(uv, k, d).reshape(2)
+        elif distortion_model in ('plumb_bob', 'rational_polynomial'):
+            ray_xy = cv2.undistortPoints(uv, k, d).reshape(2)
+        else:
+            raise ValueError('Unsupported distortion model: {}'.format(distortion_model))
     except cv2.error as exc:
         raise ValueError('Cannot undistort tag: {}'.format(exc))
     ray_camera = np.array([ray_xy[0], ray_xy[1], 1.0])

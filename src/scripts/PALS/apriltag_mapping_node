@@ -109,11 +109,13 @@ class AprilTagMappingNode(object):
             # Do not use the older src/params/picamera.yaml blindly: its
             # 320x240 resolution differs from raspicam_node.launch's 240x320.
             if (msg.width <= 0 or msg.height <= 0 or len(msg.K) != 9 or
-                    msg.distortion_model not in ('plumb_bob', 'rational_polynomial') or
+                    msg.distortion_model not in ('plumb_bob', 'rational_polynomial', 'equidistant') or
+                    (msg.distortion_model == 'equidistant' and len(msg.D) != 4) or
                     not all(np.isfinite(v) for v in list(msg.K) + list(msg.D)) or
                     msg.K[0] <= 0 or msg.K[4] <= 0):
                 self.camera_info = None
-                rospy.logwarn_throttle(5, 'No valid calibrated camera_info; AprilTag map paused')
+                rospy.logwarn_throttle(5, 'Invalid camera_info: model=%s, size=%dx%d, K=%s, D=%s; AprilTag map paused',
+                                       msg.distortion_model, msg.width, msg.height, msg.K, msg.D)
                 return
             self.camera_info = msg
 
@@ -165,7 +167,8 @@ class AprilTagMappingNode(object):
                     measurement = project_floor_tag(
                         (message.center_x[index], message.center_y[index]), info.K, info.D,
                         position, orientation, self.camera_offset, self.rotation,
-                        plane_z=self.plane_z, max_distance=self.max_distance)
+                        plane_z=self.plane_z, max_distance=self.max_distance,
+                        distortion_model=info.distortion_model)
                 except ValueError as error:
                     rospy.logwarn_throttle(5, 'AprilTag geometry rejected: {}'.format(error))
                     continue
