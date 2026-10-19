@@ -303,9 +303,6 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .partner-logos { --partner-logo-height: 28px; display: flex; align-items: center; gap: 14px; padding-left: 12px; border-left: 1px solid var(--line); }
 .partner-logos a { display: flex; flex: none; }
 .partner-logos img { display: block; height: var(--partner-logo-height); width: auto; }
-/* The Penn State asset has transparent padding outside its 247 × 81 mark. */
-.partner-logos .penn-state-logo { height: var(--partner-logo-height); width: calc(var(--partner-logo-height) * 247 / 81); overflow: hidden; }
-.partner-logos .penn-state-logo img { height: calc(var(--partner-logo-height) * 111 / 81); max-width: none; }
 .header-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .github-link svg { fill: currentColor; stroke: none; }
 @media (max-width: 480px) {
