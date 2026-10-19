@@ -2,7 +2,7 @@
 
 The route process keeps sending its usual twist, pose, or room-target commands.
 The onboard PID adjusts their **final horizontal velocity request** to keep the
-drones around a nominal **0.75 m** center-to-center XY distance, subject to
+drones around a nominal **1.00 m** center-to-center XY distance, subject to
 configured minimum and maximum distance limits.
 It does not generate routes, fixed formation offsets, or takeoff/landing commands.
 
@@ -42,15 +42,15 @@ a clear area; corrections do not plan around walls, obstacles or suspended cable
 
 The shared geometry is saved in
 [`src/params/payload_geometry.yaml`](../../params/payload_geometry.yaml):
-nominal drone separation **0.75 m**, payload attachment drop **0.5 m**. With level
+nominal drone separation **1.00 m**, payload attachment drop **0.5 m**. With level
 drones and taut equal ropes meeting at a centered attachment, each effective rope
-length is `sqrt(0.5^2 + (0.75 / 2)^2) = 0.625 m` (1.25 m total), plus material for knots/fittings.
+length is `sqrt(0.5^2 + (1.0 / 2)^2) ≈ 0.707 m` (1.414 m total), plus material for knots/fittings.
 This assumes drone attachment spacing equals drone separation. `payload_drop_m`
 remains a planning input; it does not command altitude or enable payload flight.
 
 At startup, if `/pidrone/coordination` is absent, the PID automatically loads this
 geometry and [`src/params/coordination.yaml`](../../params/coordination.yaml).
-Coordination is available by default, with **0.60 m minimum** and **0.90 m maximum**.
+Coordination is available by default, with **0.85 m minimum** and **1.15 m maximum**.
 These are provisional unloaded-trial settings, not validated flight bounds or
 payload settings. Position uncertainty must leave the nominal target inside the
 usable band. The combined three-sigma XY margin must be below **0.15 m** for
