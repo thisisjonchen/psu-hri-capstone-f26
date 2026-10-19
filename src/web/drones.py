@@ -1,4 +1,6 @@
 """SSH access to the drones for the dashboard's script terminals."""
+import getpass
+import os
 import re
 import shlex
 import threading
@@ -18,6 +20,17 @@ SCRIPT = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]*\.py$')
 # Arguments are typed into a screen window, so exclude quotes and screen/shell escapes.
 ARGS = re.compile(r'^[A-Za-z0-9 _.,:=+/@%-]*$')
 
+SSH_CONFIG = '''
+# PALS drones (tools/pals.py ssh-setup)
+Host drone1 drone2
+    HostName %h.local
+    User duckie
+    IdentityFile ~/.ssh/pals_ed25519
+    IdentitiesOnly yes
+'''
+
+
+_setup_lock = threading.Lock()
 _clients = {}
 _lock = threading.Lock()
 
@@ -26,6 +39,24 @@ def host(drone):
     if drone not in DRONES:
         raise ValueError('Unknown drone: %r' % (drone,))
     return drone + '.local'
+
+
+def create_ssh_key(key):
+    """Create an OpenSSH key without requiring a platform's ssh-keygen program."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    if key.exists():
+        return
+    key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private = Ed25519PrivateKey.generate()
+    with os.fdopen(os.open(str(key), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
+        stream.write(private.private_bytes(serialization.Encoding.PEM,
+                                          serialization.PrivateFormat.OpenSSH,
+                                          serialization.NoEncryption()))
+    public = private.public_key().public_bytes(serialization.Encoding.OpenSSH,
+                                               serialization.PublicFormat.OpenSSH)
+    key.with_suffix('.pub').write_bytes(public + (' pals-' + getpass.getuser() + '\n').encode('utf-8'))
 
 
 def connect(drone, timeout=5):
@@ -45,6 +76,59 @@ def connect(drone, timeout=5):
         client.close()
         raise RuntimeError('%s is unreachable: %s' % (drone, error))
     return client
+
+
+def setup_ssh(drone):
+    """Connect with a key, installing it with the default password if needed.
+
+    Only an explicit Connect or CLI ssh-setup request uses this bootstrap path.
+    Serialize setup so simultaneous Connect clicks cannot race SSH file writes.
+    """
+    hostname = host(drone)
+    with _setup_lock:
+        try:
+            create_ssh_key(KEY)
+            known_hosts = KEY.parent / 'known_hosts'
+            config = KEY.parent / 'config'
+            if '# PALS drones' not in (config.read_text(encoding='utf-8') if config.exists() else ''):
+                with open(config, 'a', encoding='utf-8', newline='\n') as file:
+                    file.write(SSH_CONFIG)
+
+            class TrustFirstUse(paramiko.MissingHostKeyPolicy):
+                def missing_host_key(self, client, hostname, server_key):
+                    with open(known_hosts, 'a', encoding='utf-8', newline='\n') as file:
+                        file.write('%s %s %s\n' % (hostname, server_key.get_name(), server_key.get_base64()))
+
+            for auth in ({'key_filename': str(KEY)}, {'password': 'quackquack'}):
+                client = paramiko.SSHClient()
+                try:
+                    if known_hosts.exists():
+                        client.load_host_keys(str(known_hosts))
+                    client.set_missing_host_key_policy(TrustFirstUse())
+                    try:
+                        client.connect(hostname, username=USER, allow_agent=False, look_for_keys=False,
+                                       timeout=5, banner_timeout=5, auth_timeout=5, **auth)
+                    except paramiko.AuthenticationException:
+                        if 'key_filename' in auth:
+                            client.close()
+                            continue
+                        raise
+                    if 'key_filename' in auth:
+                        return client
+                    public = shlex.quote(KEY.with_suffix('.pub').read_text(encoding='utf-8').strip())
+                    _, stdout, _ = client.exec_command(
+                        'umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; '
+                        'grep -qxF %s ~/.ssh/authorized_keys || printf "%%s\\n" %s >> ~/.ssh/authorized_keys'
+                        % (public, public), timeout=10)
+                    if stdout.channel.recv_exit_status():
+                        raise RuntimeError('could not install the key')
+                except Exception:
+                    client.close()
+                    raise
+                client.close()
+                return connect(drone)
+        except (OSError, paramiko.SSHException) as error:
+            raise RuntimeError('%s: SSH setup failed: %s' % (drone, error)) from error
 
 
 def run(drone, command, timeout=10):
@@ -123,10 +207,10 @@ def execute(drone, script, args):
 def open_terminal(drone, cols, rows, start=False):
     """Attach to the drone's screen session; closing only detaches.
 
-    With start (the Connect button), first start the nodes here so their startup output
-    is visible, then report the exit status as the escape sequence OSC 777.
+    With start (the Connect button), set up SSH and start the nodes here so their
+    startup output is visible, then report the exit status as OSC 777.
     """
-    client = connect(drone)
+    client = setup_ssh(drone) if start else connect(drone)
     channel = client.get_transport().open_session()
     channel.get_pty(term='xterm-256color', width=cols, height=rows)
     attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)

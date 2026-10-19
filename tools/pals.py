@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """PALS laptop setup (macOS, Linux, Windows).
 
-  ssh-setup   create a key and install it on the drones (asks for the password once)
+  ssh-setup   create a key and install it on the drones using their default password
   provision   pin serial ports and build on the drones (nodes start from the dashboard)
   dashboard   start the dashboard server and open it in the browser
 """
 import argparse
-import getpass
 import hashlib
 import os
 import subprocess
@@ -20,14 +19,6 @@ WEB = ROOT / 'src' / 'web'
 VENV = ROOT / '.venv'
 VENV_PYTHON = VENV / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
 REQUIREMENTS = WEB / 'requirements.txt'
-SSH_CONFIG = '''
-# PALS drones (tools/pals.py ssh-setup)
-Host drone1 drone2
-    HostName %h.local
-    User duckie
-    IdentityFile ~/.ssh/pals_ed25519
-    IdentitiesOnly yes
-'''
 
 
 def ensure_venv():
@@ -58,43 +49,17 @@ def remote(client, drone, command):
 
 
 def ssh_setup(targets):
-    import paramiko
     import drones
 
-    key = drones.KEY
-    if not key.exists():
-        key.parent.mkdir(mode=0o700, exist_ok=True)
-        subprocess.check_call(['ssh-keygen', '-t', 'ed25519', '-N', '', '-C', 'pals-' + getpass.getuser(),
-                               '-f', str(key)])
-    public = key.with_suffix('.pub').read_text().strip()
-    known_hosts = key.parent / 'known_hosts'
-
-    class TrustFirstUse(paramiko.MissingHostKeyPolicy):
-        def missing_host_key(self, client, hostname, server_key):
-            with open(known_hosts, 'a') as file:
-                file.write('%s %s %s\n' % (hostname, server_key.get_name(), server_key.get_base64()))
-
-    password = getpass.getpass('Drone password for %s: ' % drones.USER)
+    ready = True
     for drone in targets:
-        client = paramiko.SSHClient()
-        if known_hosts.exists():
-            client.load_host_keys(str(known_hosts))
-        client.set_missing_host_key_policy(TrustFirstUse())
-        client.connect(drones.host(drone), username=drones.USER, password=password,
-                       allow_agent=False, look_for_keys=False, timeout=10)
-        status, _ = remote(client, drone, 'umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; '
-                           'grep -qxF "%s" ~/.ssh/authorized_keys || echo "%s" >> ~/.ssh/authorized_keys'
-                           % (public, public))
-        client.close()
-        if status:
-            sys.exit('%s: could not install the key' % drone)
-        drones.connect(drone).close()
-        print('[%s] key login works' % drone)
-    config = key.parent / 'config'
-    if '# PALS drones' not in (config.read_text() if config.exists() else ''):
-        with open(config, 'a') as file:
-            file.write(SSH_CONFIG)
-        print('Added drone1/drone2 to', config)
+        try:
+            drones.setup_ssh(drone).close()
+            print('[%s] key login works' % drone)
+        except RuntimeError as exc:
+            ready = False
+            print('[%s] SSH setup incomplete: %s' % (drone, exc))
+    return ready
 
 
 def choose_port(drone, devices, kind, hints):
@@ -158,7 +123,8 @@ def main():
     sys.path.insert(0, str(WEB))
     targets = [args.drone] if args.drone else ['drone1', 'drone2']
     if args.command == 'ssh-setup':
-        ssh_setup(targets)
+        if not ssh_setup(targets):
+            sys.exit(1)
     elif args.command == 'provision':
         provision(targets)
     else:

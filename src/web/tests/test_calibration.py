@@ -139,6 +139,26 @@ class CoordinatorTest(unittest.TestCase):
         self.ble.save.assert_not_called()
 
 
+class JournalTest(unittest.TestCase):
+    def test_invalid_state_releases_lock_for_recovery(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'calibration.json'
+            path.write_text('[]', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'Invalid calibration recovery file'):
+                CalibrationJournal(path)
+            path.write_text('{}', encoding='utf-8')
+            journal = CalibrationJournal(path)
+            try:
+                journal.save({'label': 'Room café'})
+            finally:
+                journal.close()
+            journal = CalibrationJournal(path)
+            try:
+                self.assertEqual(journal.values, {'label': 'Room café'})
+            finally:
+                journal.close()
+
+
 class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
     async def test_scan_accepts_service_data_only_and_skips_tags_and_failed_connections(self):
         from calibration.anchor_calibration import INFO, MODE, PAN

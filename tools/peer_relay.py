@@ -117,6 +117,42 @@ def peer_messages(snapshots, now, received_now):
     return messages
 
 
+def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
+    """Wait for both ROS connections and reconnect until the laptop server stops."""
+    from websockets.sync.client import connect
+    from websockets.exceptions import WebSocketException
+    previous = None
+
+    def report(status):
+        nonlocal previous
+        if status != previous:
+            print(status, flush=True)
+            previous = status
+
+    while not stop.is_set():
+        try:
+            with ExitStack() as stack:
+                clients = []
+                for url in endpoints:
+                    if stop.is_set():
+                        return
+                    clients.append(Client(stack.enter_context(connect(
+                        url, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=1))))
+                while not stop.is_set():
+                    try:
+                        messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
+                        for client, message in zip(clients, messages):
+                            client.send({'op': 'publish', 'topic': PEER_TOPIC, 'msg': message})
+                        status = 'Relaying peer telemetry; routes remain under their existing controllers.'
+                    except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
+                        status = 'Peer relay paused: ' + str(error)
+                    report(status)
+                    stop.wait(.1)
+        except (OSError, RuntimeError, WebSocketException) as error:
+            report('Peer relay waiting for both drones: ' + str(error))
+            stop.wait(2)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--drone1', default='ws://drone1.local:9090')
@@ -124,31 +160,13 @@ def main():
     args = parser.parse_args()
     if args.drone1 == args.drone2:
         parser.error('Use distinct rosbridge endpoints')
-    from websockets.sync.client import connect
-    from websockets.exceptions import WebSocketException
+    stop = threading.Event()
     try:
-        with ExitStack() as stack:
-            clients = [Client(stack.enter_context(connect(url, open_timeout=3, close_timeout=.3,
-                                                         ping_interval=1, ping_timeout=1)))
-                       for url in (args.drone1, args.drone2)]
-            previous = None
-            while True:
-                try:
-                    messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
-                    for client, message in zip(clients, messages):
-                        client.send({'op': 'publish', 'topic': PEER_TOPIC, 'msg': message})
-                    status = 'Relaying peer telemetry; routes remain under their existing controllers.'
-                except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
-                    status = 'Peer relay paused: ' + str(error)
-                if status != previous:
-                    print(status, flush=True)
-                    previous = status
-                time.sleep(.1)
+        run(stop, (args.drone1, args.drone2))
     except KeyboardInterrupt:
         print('\nRelay stopped; enabled onboard distance controllers will request XY braking on stale peer data.')
-    except (OSError, RuntimeError, WebSocketException) as error:
-        print('Peer relay stopped: ' + str(error), file=sys.stderr)
-        return 1
+    finally:
+        stop.set()
     return 0
 
 

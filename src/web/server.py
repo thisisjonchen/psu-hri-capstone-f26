@@ -17,9 +17,16 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from calibration.calibration_service import AnchorCalibration
 import drones
+sys.path.insert(0, str(ROOT.parents[1] / 'tools'))
+import peer_relay
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
+    # Windows registry MIME mappings can otherwise serve JavaScript as text/plain.
+    extensions_map = dict(SimpleHTTPRequestHandler.extensions_map, **{
+        '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+    })
+
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store')
         super().end_headers()
@@ -148,13 +155,18 @@ def main():
         origins = ['http://localhost:%d' % args.port, 'http://127.0.0.1:%d' % args.port]
         terminals = serve(terminal, '127.0.0.1', args.port + 1, origins=origins)
         threading.Thread(target=terminals.serve_forever, daemon=True).start()
+        relay_stop = threading.Event()
+        relay = threading.Thread(target=peer_relay.run, args=(relay_stop,), daemon=True)
+        relay.start()
         print('Dashboard: http://localhost:%d' % server.server_port, flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
+            relay_stop.set()
             terminals.shutdown()
+            relay.join(timeout=8)
             server.calibration.close()
 
 

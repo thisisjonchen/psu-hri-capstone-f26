@@ -6,7 +6,6 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-import fcntl
 import threading
 import uuid
 
@@ -19,20 +18,30 @@ class CalibrationJournal:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_file = open(str(self.path) + '.lock', 'a')
+        self.lock_file = open(str(self.path) + '.lock', 'a+b')
         try:
-            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == 'nt':
+                import msvcrt
+                self.lock_file.seek(0)
+                msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.lock_file.close()
             raise ValueError('Another laptop calibration service is using this recovery file')
-        self.values = json.loads(self.path.read_text()) if self.path.exists() else {}
-        if not isinstance(self.values, dict):
-            raise ValueError('Invalid calibration recovery file; restore it before starting')
+        try:
+            self.values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
+            if not isinstance(self.values, dict):
+                raise ValueError('Invalid calibration recovery file; restore it before starting')
+        except Exception:
+            self.close()
+            raise
 
     def save(self, values):
         descriptor, temporary = tempfile.mkstemp(dir=self.path.parent, prefix='.calibration-')
         try:
-            with os.fdopen(descriptor, 'w') as stream:
+            with os.fdopen(descriptor, 'w', encoding='utf-8', newline='\n') as stream:
                 json.dump(values, stream, allow_nan=False)
                 stream.flush()
                 os.fsync(stream.fileno())

@@ -10,7 +10,7 @@ Assuming that the base environment is already set up on the DD24 by following th
 1. Turn the drones on and connect them and your laptop to the same hotspot:
    - Network name: **duckietown**
    - Network password: **quackquack**
-2. For first-time setup, clone this repo on your laptop and run these commands from the repository root. Enter the drone password (**quackquack**) when prompted.
+2. For first-time setup, clone this repo on your laptop and run these commands from the repository root.
    ```
    python3 tools/pals.py ssh-setup
    python3 tools/pals.py provision
@@ -22,11 +22,8 @@ Assuming that the base environment is already set up on the DD24 by following th
    ```
    Open `http://localhost:8000` if it does not open automatically.
 4. Place each drone disarmed, stationary, and facing the top of the map (+Y).
-5. Select Drone1 or Drone2 and click **Connect**. This starts its nodes and opens its terminal. Repeat for the other drone if needed.
-6. For paired flight, connect both drones before arming and start the peer relay in another laptop terminal:
-   ```
-   .venv/bin/python tools/peer_relay.py
-   ```
+5. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
+6. For paired flight, connect both drones before arming. The dashboard server automatically relays peer telemetry once both ROS connections are available.
 7. Under **Routines**, select a script, enter its arguments, and click **Execute**. For `prototype-1-forward.py`, use `--fly --distance 0.25` on both drones to take off, move forward 0.25 m, and begin landing together. See [coordination](scripts/PALS/COORDINATION.md) for paired-flight details.
 8. Read all instructions carefully and be ready to disarm at all times. Press Esc to leave a terminal, then Space to disarm all connected drones.
 
@@ -109,13 +106,22 @@ When calibrating:
 Start the dashboard on your laptop:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r src/web/requirements.txt
-python src/web/server.py
+python3 tools/pals.py dashboard
 ```
 
-Run these commands from the repository root, then open `http://localhost:8000`.
+Run from the repository root. The dashboard opens at `http://localhost:8000`.
+
+On Windows, install Python 3.11 or newer and run from PowerShell:
+
+```powershell
+py -3 tools/pals.py dashboard
+```
+
+The launcher creates `.venv` and installs dependencies. Clicking **Connect** sets up
+SSH using the default password (`quackquack`) when needed; existing keys are reused.
+If a drone is offline, click **Connect** again once it is online. Bluetooth calibration
+requires a Bluetooth LE adapter. The drones must be reachable as `drone1.local`
+and `drone2.local` on the same network. The peer relay runs automatically with the dashboard.
 
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session

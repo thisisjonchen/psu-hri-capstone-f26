@@ -100,7 +100,7 @@ reload the YAML files, delete `/pidrone/coordination` before that restart. A fre
 ROS master loads the files again, so the ROS-only solo override is not persistent.
 Missing peer data never switches to solo mode. Invalid configuration or an unknown
 automatic identity inhibits XY motion while preserving altitude and watchdogs.
-The laptop peer relay still needs to be started separately.
+The dashboard server starts the laptop peer relay automatically.
 
 Dashboard Execute now waits for fresh readiness from every selected routine before
 sending its start releases. This is independent of the distance guard and does not
@@ -123,13 +123,15 @@ to be `pidrone_body`.
 
 ## Peer telemetry relay
 
-Use the existing laptop environment (`src/web/requirements.txt`, websockets 15):
+The dashboard server manages the relay and waits for both ROS connections. No
+separate command is needed. Without the dashboard server, run it standalone using
+the existing laptop environment (`src/web/requirements.txt`, websockets 15):
 
 ```sh
 .venv/bin/python tools/peer_relay.py
 ```
 
-Override `--drone1 ws://HOST:9090` and `--drone2 ws://HOST:9090` if needed. Start the
+For standalone use, override `--drone1 ws://HOST:9090` and `--drone2 ws://HOST:9090` if needed. Start the
 relay before flight. It waits for both drones to be flying with fresh localization
 and matching anchor maps, then forwards telemetry every 0.1 s. Starting the relay
 can enable spacing corrections on already-flying, configured drones.
@@ -141,8 +143,9 @@ flight modes, route targets, altitude commands, motor commands or heartbeats.
 
 Each PID rejects wrong identities, wrong frames, obsolete reference generations,
 and data older than 0.5 s, with a local monotonic receipt watchdog as well. The relay
-pauses both outgoing streams when either input becomes invalid or stale; there
-is no automatic network reconnect. Ctrl-C stops the relay. The onboard response
+pauses both outgoing streams when either input becomes invalid or stale and
+automatically retries lost connections. Stopping the dashboard server (or pressing
+Ctrl-C in standalone mode) stops the relay. The onboard response
 is XY braking when data expires, not a new disarm or target capture. The original
 FC watchdogs can still disarm for their existing fault conditions.
 
