@@ -15,7 +15,7 @@ class ExecuteTest(unittest.TestCase):
         def run(drone, command, timeout=10):
             self.commands.append(command)
             if command.startswith('ls'):
-                return 0, 'hover_routine.py\nREADME.md\n'
+                return 0, 'hover_routine.py\nprototype-1-forward.py\nREADME.md\n'
             if 'pgrep' in command:
                 return self.running, ''
             return 0, ''
@@ -25,10 +25,10 @@ class ExecuteTest(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     def test_types_routine_into_screen_window(self):
-        drones.execute('drone1', 'hover_routine.py', '--fly')
+        drones.execute('drone1', 'prototype-1-forward.py', '--fly --distance 0.25')
         self.assertEqual(self.commands[-1],
                          "docker exec pidrone_pkg screen -S pidrone -p routine -X stuff "
-                         "'^Upython -u ~/catkin_ws/src/pidrone_pkg/scripts/PALS/routines/hover_routine.py --fly^M'")
+                         "'^Upython -u ~/catkin_ws/src/pidrone_pkg/scripts/PALS/routines/prototype-1-forward.py --fly --distance 0.25^M'")
 
     def test_rejects_unsafe_or_unavailable_requests(self):
         for drone, script, args in [('drone3', 'hover_routine.py', ''),

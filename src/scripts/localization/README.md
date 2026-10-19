@@ -38,10 +38,7 @@ installed by the image. Configure the anchors and each tag with [SETUP.md](SETUP
 The coordinates in `anchors.json` are examples; measure the installed anchors or
 use dashboard BLE calibration below.
 
-**Provisioned drones pin both serial ports.** `tools/pals.py provision` records the
-flight controller's and tag's `/dev/serial/by-id/...` names in `~/catkin_ws/pals.ports`;
-`boot/pals-start.sh` resolves them each time nodes start into `PALS_FC_PORT` and
-`PALS_UWB_PORT` (`~/catkin_ws/pals.env`) and refuses to start if either is missing.
+**Provisioned drones use the serial devices selected during setup.**
 Without provisioning, the UWB tag defaults to `/dev/ttyACM1` and the flight controller
 probes `/dev/ttyACM0` and `/dev/ttyACM1`; confirm the tag still owns its configured
 port after reconnecting. To use another port, override it with the tag's persistent
@@ -100,9 +97,8 @@ processes. The fusion launch file also starts `/optical_flow_node`, so both Scre
 SE window and routines bring up the same flow path. Camera capture remains a separate
 node, shared with video and AprilTags. Existing manual movement controls keep their body-axis meaning.
 
-Routines do not start nodes: the `pidrone` Screen session started by the dashboard's
-**Connect** button owns them, and
-`Drone.ready()` waits up to 90 s, then names the missing or stale input. They refuse to start alongside the legacy `/state_estimator`. Their X/Y hold point
+The dashboard's **Connect** button starts the nodes; routines wait for them to be ready.
+They refuse to start alongside the legacy `/state_estimator`. Their X/Y hold point
 comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
@@ -129,8 +125,8 @@ ROS node. Once fresh disarmed-mode and IMU data arrive, the node automatically s
 until this startup alignment completes and UWB localization is ready.
 
 Alignment happens once per node start. Subsequent turns, disarming, and UWB gaps
-keep that offset. Restart fusion while facing +Y to align again (the dashboard's **Align +Y** button does
-this while disarmed). No routine or
+keep that offset. While disarmed and facing +Y, click **Align +Y** to restart fusion
+and align again. No routine or
 class calibration call is needed; the old manual launch/environment offset is
 removed. ToF still supplies height, and UWB still corrects room X/Y. This startup
 alignment does not correct ongoing IMU yaw drift.

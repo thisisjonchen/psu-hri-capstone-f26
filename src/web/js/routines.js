@@ -230,7 +230,8 @@ class RoutineRunner {
     const script = this.select.value;
     const targets = this.active;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
-    awaitSyncStart(targets.map(terminal => terminal.id));
+    const stages = script === 'prototype-1-forward.py' ? ['forward', 'land'] : [];
+    awaitSyncStart(targets.map(terminal => terminal.id), stages);
     const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script));
     if (results.every(result => result.status === 'fulfilled')) confirmSyncStart();
     else awaitSyncStart(null);

@@ -7,43 +7,32 @@ Here are some steps to make life with the DD24 a little simpler.
 ## Standard Operation + Control
 Assuming that the base environment is already set up on the DD24 by following the instructions [here](https://docs.duckietown.com/daffy/opmanual-dd24/preliminaries/environment-setup.html), feel free to continue.
 
-### One-time setup (per laptop, then per drone)
-Both the laptop and the drones must be on the same hotspot (network **duckietown**, password **quackquack**). From the repository root on your laptop (macOS, Linux or Windows, Python 3.8+):
+1. Turn the drones on and connect them and your laptop to the same hotspot:
+   - Network name: **duckietown**
+   - Network password: **quackquack**
+2. For first-time setup, clone this repo on your laptop and run these commands from the repository root. Enter the drone password (**quackquack**) when prompted.
+   ```
+   python3 tools/pals.py ssh-setup
+   python3 tools/pals.py provision
+   ```
+   Use `--drone drone1` to set up only one drone.
+3. Start the dashboard:
+   ```
+   python3 tools/pals.py dashboard
+   ```
+   Open `http://localhost:8000` if it does not open automatically.
+4. Place each drone disarmed, stationary, and facing the top of the map (+Y).
+5. Select Drone1 or Drone2 and click **Connect**. This starts its nodes and opens its terminal. Repeat for the other drone if needed.
+6. For paired flight, connect both drones before arming and start the peer relay in another laptop terminal:
+   ```
+   .venv/bin/python tools/peer_relay.py
+   ```
+7. Under **Routines**, select a script, enter its arguments, and click **Execute**. For `prototype-1-forward.py`, use `--fly --distance 0.25` on both drones to take off, move forward 0.25 m, and begin landing together. See [coordination](scripts/PALS/COORDINATION.md) for paired-flight details.
+8. Read all instructions carefully and be ready to disarm at all times. Press Esc to leave a terminal, then Space to disarm all connected drones.
 
-```
-python3 tools/pals.py ssh-setup   # creates ~/.ssh/pals_ed25519 and installs it; asks for the drone password once
-python3 tools/pals.py provision   # pins serial ports, pip install + catkin_make; does not start nodes
-```
-Use `--drone drone1` to target one drone. After provisioning, `ssh drone1` works without a password.
+Use **Restart nodes** after updating code, or **Align +Y** to re-align heading. Keep the drones disarmed, stationary, and facing +Y for either action.
 
-### Every session
-1. Turn the drones on. Nothing starts at boot.
-2. Start the dashboard: `python3 tools/pals.py dashboard` (creates `.venv` and installs requirements the first time; opens `http://localhost:8000`).
-3. Place each drone disarmed, stationary and **facing map +Y**.
-4. Select Drone1 or Drone2 and click **Connect** (repeat for the other drone). Connect opens that drone's terminal in **Routines** and starts the `pidrone_pkg` container and the `pidrone` screen session with every node, including the flight controller; fusion aligns its heading now. The startup output appears in the terminal, then the terminal attaches to the session's `routine` window, which checks each node (`ok` or `MISSING`, with the window to inspect). Telemetry connects once rosbridge is up. Connecting again while nodes run changes nothing; **Disconnect** closes the terminal too (nodes and routines keep running).
-5. Pick a script, set each drone's arguments (default `--fly`), and click **Execute**. Each routine waits disarmed; the dashboard sends start releases after every selected drone reports fresh readiness and all launch requests succeed. A failed launch, disconnect, Stop or Disarm cancels a pending release. Ctrl-C in a terminal interrupts that drone's routine (it lands). Use <kbd>`</kbd> + number to switch screen windows (e.g. FC, UWB). Esc leaves the terminal so Space disarms all again.
-6. Read all instructions carefully and be ready to disarm at all times.
-
-To re-align after a drone is moved, face it along +Y and click **Align +Y**: only fusion restarts, and it is refused unless the drone is DISARMED and no routine is running. **Restart nodes** restarts everything (e.g. after updating code).
-
-A terminal's own toggle opens it without starting nodes. Each button's result appears under that drone's terminal header. Node output stays in the drone's screen windows inside the terminal (<kbd>`</kbd> <kbd>3</kbd> = SE/fusion, which logs `Startup heading aligned with map +Y`).
-
-Closing the tab or losing Wi-Fi only detaches a terminal; a running routine continues and lands itself.
-
-Synchronized start is a best-effort readiness barrier, not an identical takeoff
-timestamp or synchronization of later route stages. A routine started manually
-also waits for a dashboard release and times out after 30 seconds without one.
-For paired flight, connect both drones before arming and start the laptop
-`tools/peer_relay.py` separately. Distance control retains its 0.75 m target and
-the solo/paired choice made before arming; see [coordination](scripts/PALS/COORDINATION.md).
-
-### Updating code on the drones
-Push your changes to GitHub, then in each drone's terminal run `cd ~/catkin_ws/src/pidrone_pkg && git pull` and click **Restart nodes** (drones disarmed and facing +Y, since restarting re-aligns heading). Run `catkin_make` in `~/catkin_ws` first if messages or build files changed. Don't edit code on the drones.
-
-### Manual fallback
-`ssh duckie@[drone].local`, then `docker exec -it pidrone_pkg screen -x pidrone` to attach to the nodes (`bash ~/catkin_ws/src/pidrone_pkg/boot/pals-start.sh start` starts them). On an unprovisioned drone, `rake start` followed by `screen -c pi.screenrc` still works; the FC window now starts the flight controller automatically.
-
-Note: Everything done on the drone is through this `pidrone_pkg`. Add any custom scripts or code to `~/.../pidrone_pkg/scripts/PALS`; routines in `scripts/PALS/routines` appear in the dashboard's script list.
+Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
 ## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
@@ -81,7 +70,7 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ls -l ~/catkin_ws/src/pidrone_pkg
    readlink -f ~/catkin_ws/src/pidrone_pkg
    ```
-7. You are now ready to go. Run the one-time setup in **Standard Operation + Control**.
+7. You are now ready to go. Continue from **Step 2** in **Standard Operation + Control**.
 
 ## Camera Out of Focus
 

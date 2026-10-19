@@ -315,6 +315,42 @@ test('a synchronized start releases every Execute drone together once all are fr
   assert.deepEqual(starts(), [1, 1]);
 });
 
+test('flight stages require both fresh participants in the current run and cancel on disconnect', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const begin = () => {
+    app.awaitSyncStart(['drone1', 'drone2'], ['forward', 'land']);
+    for (const drone of [a, b]) {
+      app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+      app.receive(drone, '/pidrone/routine/ready', {});
+    }
+    app.confirmSyncStart();
+    return JSON.parse(last(a, 'stageRelease').data).run;
+  };
+  const oldRun = begin(), run = begin();
+  const ready = (drone, stage, token = run) => app.receive(drone, '/pidrone/routine/stage_ready',
+    { data: JSON.stringify({ run: token, stage }) });
+  const stage = drone => JSON.parse(last(drone, 'stageRelease').data).stage;
+  ready(a, 'forward'); ready(b, 'forward');
+  assert.equal(stage(a), 'start'); // Both must actually be flying.
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
+  app.advanceTime(600);
+  ready(a, 'forward');
+  ready(b, 'forward', oldRun);
+  assert.equal(stage(a), 'start'); // Stale readiness and earlier run cannot release.
+  ready(b, 'forward');
+  assert.equal(stage(a), 'forward'); assert.equal(stage(b), 'forward');
+  ready(a, 'land'); ready(b, 'forward');
+  assert.equal(stage(a), 'forward'); // One drone is still completing movement.
+  ready(b, 'land');
+  assert.equal(stage(a), 'land'); assert.equal(stage(b), 'land');
+  const nextRun = begin();
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
+  b.disconnect();
+  ready(a, 'forward', nextRun);
+  assert.equal(stage(a), 'start');
+});
+
 test('an offline partner blocks shared flight commands without queued or partial sends', () => {
   const app = dashboard();
   const a = app.connect('drone1');

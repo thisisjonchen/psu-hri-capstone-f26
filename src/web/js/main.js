@@ -829,7 +829,8 @@ class DroneSession {
   }
 
   disconnect(status = 'Disconnected') {
-    if (syncStart && syncStart.ids.includes(this.id)) awaitSyncStart(null);
+    if ((syncStart && syncStart.ids.includes(this.id)) ||
+        (routineFlight && routineFlight.ids.includes(this.id))) awaitSyncStart(null);
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.waitUntil = 0;
@@ -866,8 +867,10 @@ class DroneSession {
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
     publisher('routineStart', '/pidrone/routine/start', 'std_msgs/Empty');
+    publisher('stageRelease', '/pidrone/routine/stage_release', 'std_msgs/String');
     // ROSLIB advertises on first publish, and the routine would miss that first start.
     this.publishers.routineStart.advertise();
+    this.publishers.stageRelease.advertise();
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -921,6 +924,9 @@ class DroneSession {
     subscribe('/pidrone/routine/ready', 'std_msgs/Empty', () => {
       this.routineReadyAt = Date.now();
       releaseSyncStart();
+    });
+    subscribe('/pidrone/routine/stage_ready', 'std_msgs/String', message => {
+      receiveRoutineStage(this.id, message);
     });
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
@@ -1151,8 +1157,12 @@ function connectSelected() {
 // Routines wait before takeoff (Drone.wait_for_start) until every drone of one
 // Execute posts ready; then all of them are released together.
 let syncStart = null;
-function awaitSyncStart(ids) {
-  syncStart = ids && { ids: ids.slice(), dispatched: false, expires: Date.now() + 120000 };
+let routineFlight = null;
+let routineSerial = 0;
+function awaitSyncStart(ids, stages = []) {
+  routineFlight = null;
+  syncStart = ids && { ids: ids.slice(), stages: stages.slice(), dispatched: false,
+    run: Date.now().toString(36) + '-' + (++routineSerial), expires: Date.now() + 120000 };
   if (ids) ids.forEach(id => { drones[id].routineReadyAt = null; });
 }
 function confirmSyncStart() {
@@ -1167,9 +1177,33 @@ function releaseSyncStart() {
       drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
       Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
   publishCoordinationSelection();
+  const run = syncStart.run;
+  if (syncStart.stages.length) {
+    routineFlight = { ids: syncStart.ids, run, stages: syncStart.stages, ready: {} };
+  }
   syncStart = null;
+  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run, stage: 'start' }) }));
   group.forEach(drone => drone.publish('routineStart', {}));
   feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
+}
+
+function receiveRoutineStage(id, message) {
+  const flight = routineFlight;
+  if (!flight || !flight.ids.includes(id)) return;
+  let ready;
+  try { ready = JSON.parse(message.data); } catch (_) { return; }
+  if (!ready || ready.run !== flight.run || ready.stage !== flight.stages[0]) return;
+  flight.ready[id] = Date.now();
+  const group = flight.ids.map(name => drones[name]);
+  if (!group.every(drone => drone.connected && flight.ready[drone.id] !== undefined &&
+      Date.now() - flight.ready[drone.id] >= 0 && Date.now() - flight.ready[drone.id] <= 500 &&
+      drone.field('flightMode').textContent === 'FLYING' && drone.modeReceivedAt !== null &&
+      Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
+  const stage = flight.stages.shift();
+  flight.ready = {};
+  if (!flight.stages.length) routineFlight = null;
+  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run: flight.run, stage }) }));
+  feedback('Synchronized ' + stage + ' sent to ' + group.map(drone => drone.id).join(' and ') + '.');
 }
 
 function dispatch(action, target = currentTarget()) {

@@ -1,5 +1,6 @@
 """Routine hold integration with the real fusion/PID code and mocked ROS transport."""
 import copy
+import json
 import math
 import os
 import runpy
@@ -26,6 +27,7 @@ class RoutineControlTest(unittest.TestCase):
         sys.modules['geometry_msgs.msg'].Pose = lambda: Pose().pose.pose
         sys.modules['geometry_msgs.msg'].Twist = twist
         sys.modules['std_msgs.msg'].Bool = lambda value: NS(data=value)
+        sys.modules['std_msgs.msg'].String = NS
         self.nodes = ModuleType('rosnode')
         self.nodes.get_node_names = mock.Mock(return_value=[])
         patch = mock.patch.dict(sys.modules, {'rosnode': self.nodes})
@@ -106,12 +108,13 @@ class RoutineControlTest(unittest.TestCase):
             drone._fused_received(pose)
 
         self.ros.sleep = tick
-        drone.move(x=.2)
+        drone.move(x=.2, speed_limit=.06)
         self.assertEqual(len(commands), 2)
         self.assertGreater(commands[0][0], 0)
         self.assertAlmostEqual(commands[0][1], 0)
         self.assertAlmostEqual(commands[1][0], 0)
         self.assertGreater(commands[1][1], 0)
+        self.assertTrue(all(math.hypot(*command) <= .06 for command in commands))
         final = self.fusion.messages['/pidrone/desired/twist'][-1]
         self.assertEqual((final.linear.x, final.linear.y), (0, 0))
         self.fusion.ros_now += 1
@@ -212,7 +215,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
 
-    def advance_until(self, release_at=None):
+    def advance_until(self, release_at=None, run=None):
         started = self.fusion.now
         self.drone.voltage = 16.
         self.drone.battery_at = self.drone.mode_at = self.drone.height_at = started
@@ -222,6 +225,8 @@ class RoutineControlTest(unittest.TestCase):
             self.drone.battery_at = self.drone.mode_at = self.drone.height_at = self.fusion.now
             if release_at is not None and self.fusion.now - started >= release_at:
                 self.drone._start_received(None)
+                if run is not None:
+                    self.drone._stage_received(NS(data=json.dumps({'run': run, 'stage': 'start'})))
         self.globals['time'] = NS(time=lambda: self.fusion.now, sleep=sleep)
 
     def test_synchronized_start_posts_ready_and_ignores_an_earlier_start(self):
@@ -232,6 +237,14 @@ class RoutineControlTest(unittest.TestCase):
         drone.wait_for_start()
         ready = self.fusion.messages['/pidrone/routine/ready']
         self.assertTrue(2 <= len(ready) <= 4)  # 5 Hz for 0.5 s
+        drone.routine_run = 'old-run'
+        self.advance_until(release_at=.01)
+        with self.assertRaisesRegex(RuntimeError, 'No synchronized start'):
+            drone.wait_for_start(timeout=.1, require_run=True)
+        self.assertFalse(drone.waiting_for_start)
+        self.advance_until(release_at=.01, run='new-run')
+        drone.wait_for_start(timeout=.1, require_run=True)
+        self.assertEqual(drone.routine_run, 'new-run')
 
     def test_no_start_or_mode_change_aborts_before_arming(self):
         drone = self.drone
@@ -251,6 +264,57 @@ class RoutineControlTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Downward range is missing/stale'):
             drone.wait_for_start()
         drone.mode_pub.publish.assert_not_called()
+
+    def test_stage_wait_holds_position_and_requires_the_current_run_release(self):
+        drone = self.drone
+        drone.mode = 'FLYING'
+        drone.lock_xy()
+        drone.routine_run = 'current-run'
+        self.advance_until()
+        sleep = self.globals['time'].sleep
+        started = self.fusion.now
+
+        def tick(seconds):
+            sleep(seconds)
+            run = 'old-run' if self.fusion.now - started < .5 else 'current-run'
+            drone._stage_received(NS(data=json.dumps({'run': run, 'stage': 'land'})))
+
+        self.globals['time'].sleep = tick
+        drone.wait_for_stage('land', timeout=1)
+        self.assertGreaterEqual(self.fusion.now - started, .5)
+        self.assertEqual(drone.xy_anchor, (1, 2))
+        self.assertGreater(len(self.fusion.messages['/pidrone/desired/twist']), 1)
+        ready = self.fusion.messages['/pidrone/routine/stage_ready'][-1]
+        self.assertEqual(json.loads(ready.data), {'run': 'current-run', 'stage': 'land'})
+        self.globals['time'].sleep = sleep
+        with self.assertRaisesRegex(RuntimeError, 'Timed out'):
+            drone.wait_for_stage('forward', timeout=.1)
+        drone.mode = 'DISARMED'
+        with self.assertRaisesRegex(RuntimeError, 'Flight mode changed'):
+            drone.wait_for_stage('land')
+
+    def test_prototype_sequences_stages_and_lands_on_movement_failure(self):
+        module = ModuleType('drone_controller')
+        module.Drone = mock.Mock()
+        drone = module.Drone.return_value
+        drone.mode = 'FLYING'
+        self.ros.init_node = mock.Mock()
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'prototype-1-forward.py')
+        with mock.patch.dict(sys.modules, {'drone_controller': module}), \
+                mock.patch.object(sys, 'argv', [script, '--fly', '--distance', '.3']):
+            main = runpy.run_path(script)['main']
+            main()
+            self.assertEqual([call[0] for call in drone.mock_calls],
+                             ['ready', 'takeoff', 'wait_for_stage', 'unlock_xy',
+                              'move_forward', 'lock_xy', 'wait_for_stage', 'land'])
+            self.assertEqual(drone.wait_for_stage.call_args_list, [mock.call('forward'), mock.call('land')])
+            drone.move_forward.assert_called_once_with(.3, speed_limit=.06, timeout=15.)
+            drone.reset_mock()
+            drone.move_forward.side_effect = RuntimeError('movement failed')
+            with self.assertRaisesRegex(RuntimeError, 'movement failed'):
+                main()
+            drone.land.assert_called_once_with(hold_xy=True)
+            drone.wait_for_stage.assert_called_once_with('forward')
 
     def test_ready_rejects_a_competing_legacy_state_publisher(self):
         self.drone.mode = 'DISARMED'

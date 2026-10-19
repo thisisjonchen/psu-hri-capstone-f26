@@ -105,7 +105,14 @@ The laptop peer relay still needs to be started separately.
 Dashboard Execute now waits for fresh readiness from every selected routine before
 sending its start releases. This is independent of the distance guard and does not
 start the peer relay. Launch failure, disconnect, Stop or Disarm cancels a pending
-release. Later route stages and takeoff times are not guaranteed synchronized.
+release. `prototype-1-forward.py` additionally waits for all Execute participants
+before forward movement and landing. Stage messages on `/pidrone/routine/stage_ready`
+and `/pidrone/routine/stage_release` use `std_msgs/String` JSON with `run` and `stage`;
+the dashboard assigns a fresh run ID at start and checks readiness age and FLYING mode.
+The existing Empty start/ready topics remain unchanged. Waiting drones hold X/Y and
+time out after 30 s into the routine's existing landing recovery. These are best-effort
+phase releases, not identical liftoff/touchdown times. Other routines still synchronize
+only their initial start.
 
 Rebuild with `catkin_make` on both drones to generate the new `PeerState` message.
 Use their ROS Kinetic/Python 2.7 environment. Both drones must use the same surveyed
