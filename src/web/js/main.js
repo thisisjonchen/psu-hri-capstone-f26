@@ -602,11 +602,14 @@ class DroneSession {
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
+    this.routineReadyAt = null;
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
     this.subscribers = [];
     this.heartbeat = null;
+    this.waitUntil = 0;
+    this.retryTimer = null;
     this.positionMode = false;
     this.startTime = null;
     this.latestTime = 0;
@@ -787,33 +790,49 @@ class DroneSession {
     if (fleetMap) fleetMap.clearDrone(this.id);
   }
 
-  connect() {
+  connect(waitForNodes = false) {
     // A pending socket is also a session; repeated clicks must not create duplicates.
     if (this.ros) return;
+    // Connect also starts the drone's nodes, so retry until its rosbridge is up.
+    if (waitForNodes) this.waitUntil = Date.now() + 90000;
     this.resetTelemetry();
     this.setStatus('Connecting…');
     const ros = new ROSLIB.Ros();
     this.ros = ros;
     ros.on('connection', () => {
       if (this.ros !== ros) return;
+      this.waitUntil = 0;
       this.setStatus('Connected', true);
       this.setupTopics(ros);
       this.field('camera').src = 'http://' + this.host + ':8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed';
       updateLayout();
     });
     ros.on('error', error => {
-      if (this.ros !== ros) return;
+      if (this.ros !== ros || this.retry(ros)) return;
       console.error(this.id + ' ROS connection error', error);
       this.disconnect('Connection error');
     });
     ros.on('close', () => {
-      if (this.ros !== ros) return;
+      if (this.ros !== ros || this.retry(ros)) return;
       this.disconnect();
     });
     ros.connect('ws://' + this.host + ':9090');
   }
 
+  retry(ros) {
+    if (ros.isConnected || !(Date.now() < this.waitUntil)) return false;
+    const until = this.waitUntil;
+    this.disconnect('Waiting for nodes…');
+    this.waitUntil = until;
+    this.retryTimer = setTimeout(() => { this.retryTimer = null; this.connect(); }, 2000);
+    return true;
+  }
+
   disconnect(status = 'Disconnected') {
+    if (syncStart && syncStart.ids.includes(this.id)) awaitSyncStart(null);
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.waitUntil = 0;
     const ros = this.ros;
     // Invalidate first, so callbacks from a replaced socket cannot update this drone.
     this.ros = null;
@@ -828,6 +847,7 @@ class DroneSession {
     if (ros) ros.close();
     this.resetTelemetry();
     this.setStatus(status);
+    publishCoordinationSelection();
     updateLayout();
   }
 
@@ -837,6 +857,7 @@ class DroneSession {
     };
     publisher('mode', '/pidrone/desired/mode', 'pidrone_pkg/Mode');
     publisher('heartbeat', '/pidrone/heartbeat/web_interface', 'std_msgs/Empty');
+    publisher('coordination', '/pidrone/coordination/paired', 'std_msgs/Bool');
     publisher('positionMode', '/pidrone/position_control', 'std_msgs/Bool');
     publisher('twist', '/pidrone/desired/twist', 'geometry_msgs/Twist');
     publisher('pose', '/pidrone/desired/pose', 'geometry_msgs/Pose');
@@ -844,6 +865,9 @@ class DroneSession {
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
+    publisher('routineStart', '/pidrone/routine/start', 'std_msgs/Empty');
+    // ROSLIB advertises on first publish, and the routine would miss that first start.
+    this.publishers.routineStart.advertise();
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -891,8 +915,13 @@ class DroneSession {
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
+      publishCoordinationSelection();
     });
 
+    subscribe('/pidrone/routine/ready', 'std_msgs/Empty', () => {
+      this.routineReadyAt = Date.now();
+      releaseSyncStart();
+    });
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
     });
@@ -1111,11 +1140,40 @@ function updateLayout() {
 function connectSelected() {
   stopHeldKeys();
   const selected = sessionsFor(selectedConnection());
-  // Connecting the selected drone adds it to the existing fleet.
-  selected.forEach(drone => drone.connect());
+  // Connecting the selected drone adds it to the existing fleet. Its terminal
+  // (routines.js) starts the nodes, which aligns map +Y.
+  selected.forEach(drone => {
+    document.dispatchEvent(new CustomEvent('drone-connect', { detail: drone.id }));
+    drone.connect(true);
+  });
+}
+
+// Routines wait before takeoff (Drone.wait_for_start) until every drone of one
+// Execute posts ready; then all of them are released together.
+let syncStart = null;
+function awaitSyncStart(ids) {
+  syncStart = ids && { ids: ids.slice(), dispatched: false, expires: Date.now() + 120000 };
+  if (ids) ids.forEach(id => { drones[id].routineReadyAt = null; });
+}
+function confirmSyncStart() {
+  if (syncStart) { syncStart.dispatched = true; releaseSyncStart(); }
+}
+function releaseSyncStart() {
+  if (!syncStart || !syncStart.dispatched) return;
+  if (Date.now() > syncStart.expires) { awaitSyncStart(null); return; }
+  const group = syncStart.ids.map(id => drones[id]);
+  if (!group.every(drone => drone.connected && drone.routineReadyAt !== null &&
+      Date.now() - drone.routineReadyAt >= 0 && Date.now() - drone.routineReadyAt <= 500 &&
+      drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
+      Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
+  publishCoordinationSelection();
+  syncStart = null;
+  group.forEach(drone => drone.publish('routineStart', {}));
+  feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
 }
 
 function dispatch(action, target = currentTarget()) {
+  if (action === 'disarm' || action === 'stop') awaitSyncStart(null);
   const sessions = sessionsFor(target);
   const available = sessions.filter(drone => drone.connected);
   // Stop and disarm can still reach a remaining drone if its partner is offline.
@@ -1142,6 +1200,21 @@ function stopHeldKeys() {
   heldKeys.clear();
 }
 
+// Keep one selection across staggered arming. Onboard PIDs latch it when armed.
+let coordinationPaired = null;
+function publishCoordinationSelection() {
+  const connected = Object.values(drones).filter(drone => drone.connected);
+  if (!connected.length) { coordinationPaired = null; return; }
+  const fresh = drone => drone.modeReceivedAt !== null &&
+    Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500;
+  if (!connected.every(fresh)) return;
+  if (connected.every(drone => drone.field('flightMode').textContent === 'DISARMED')) {
+    coordinationPaired = connected.length === 2;
+  }
+  if (coordinationPaired === null) return;
+  connected.forEach(drone => drone.publish('coordination', { data: coordinationPaired }));
+}
+
 function isFormControl(target) {
   return target && (target.isContentEditable || !!target.closest('input, textarea, select, summary'));
 }
@@ -1154,6 +1227,7 @@ document.addEventListener('DOMContentLoaded', () => {
   fleetMap = new FleetMap();
   anchorCalibration = new AnchorCalibration();
   setInterval(() => {
+    publishCoordinationSelection();
     Object.values(drones).forEach(drone => { drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); });
     fleetMap.refreshAnchors();
     anchorCalibration.refresh();
@@ -1166,7 +1240,10 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (button.dataset.connect) sessionsFor(button.dataset.connect).forEach(drone => drone.connect());
     if (button.dataset.disconnect) {
       stopHeldKeys();
-      sessionsFor(button.dataset.disconnect === 'selected' ? selectedConnection() : button.dataset.disconnect).forEach(drone => drone.disconnect());
+      sessionsFor(button.dataset.disconnect === 'selected' ? selectedConnection() : button.dataset.disconnect).forEach(drone => {
+        drone.disconnect();
+        document.dispatchEvent(new CustomEvent('drone-disconnect', { detail: drone.id }));
+      });
     }
     if (button.dataset.analysis) drones[button.dataset.analysis].toggleAnalysis(button);
     if (!button.dataset.command) return;
@@ -1182,6 +1259,8 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('keydown', event => {
   const key = event.key.toLowerCase();
   if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // Drone terminals receive every key, including Space; Esc leaves the terminal.
+  if (event.target && event.target.closest && event.target.closest('.script-terminal')) return;
   if (key === ' ') {
     event.preventDefault();
     stopHeldKeys();

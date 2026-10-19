@@ -8,6 +8,8 @@ const vm = require('node:vm');
 // Test command routing without opening network sockets or contacting hardware.
 function dashboard({ discover = true, calibrationFetch = null } = {}) {
   const listeners = {};
+  const events = [];
+  const retries = [];
   const calibrationRequests = [];
   const storage = new Map();
   const timers = new Map();
@@ -64,7 +66,8 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     createElement: () => element(),
     getElementById: id => elements.get(id),
     querySelector: () => elements.get('droneSelection'),
-    addEventListener: (name, callback) => { listeners[name] = callback; }
+    addEventListener: (name, callback) => { listeners[name] = callback; },
+    dispatchEvent: event => events.push(event)
   };
   class Ros {
     constructor() { this.events = {}; this.isConnected = false; this.topics = []; }
@@ -76,6 +79,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   class Topic {
     constructor(options) { Object.assign(this, options); this.messages = []; this.ros.topics.push(this); }
     publish(message) { this.messages.push(JSON.parse(JSON.stringify(message))); }
+    advertise() { this.advertised = true; }
     subscribe(callback) { this.callback = callback; }
     unsubscribe() { this.unsubscribed = true; }
     unadvertise() { this.unadvertised = true; }
@@ -127,12 +131,15 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     ROSLIB: { Ros, Topic, Message: class { constructor(data) { Object.assign(this, data); } } },
     Date: class extends Date { static now() { return now; } },
     setInterval(callback, delay) { const id = ++nextTimer; (delay === 250 || delay === 500 ? maintenanceTimers : timers).set(id, callback); return id; },
-    clearInterval(id) { timers.delete(id); }
+    clearInterval(id) { timers.delete(id); },
+    setTimeout(callback) { retries.push(callback); },
+    clearTimeout() {},
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectSelected, currentTarget })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectSelected, currentTarget, awaitSyncStart, confirmSyncStart })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -140,7 +147,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     return api.drones[id];
   };
   const key = (name, value, target = element(), repeat = false) => listeners[name]({ key: value, target, repeat, preventDefault() {} });
-  return { ...api, calibrationRequests, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
+  return { ...api, calibrationRequests, events, retries, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
 }
 const stamp = secs => ({ header: { stamp: { secs, nsecs: 0 } } });
 const rangeAt = (secs, range) => ({ ...stamp(secs), range, min_range: 0.05, max_range: 1.2 });
@@ -149,6 +156,31 @@ const anchorsAt = (secs, points = [[0, 0, 2.25], [3, 0, 2.25], [3, 6, 2.25], [0,
   header: { stamp: { secs, nsecs: 0 }, frame_id: 'map' },
   anchor_ids: ['1150', '111C', '1151', '0CA8'].slice(0, points.length),
   positions: points.map(([x, y, z]) => ({ x, y, z }))
+});
+
+test('coordination selects solo or paired while disarmed and keeps the selection during staggered arming', () => {
+  const app = dashboard();
+  const a = app.connect('drone1');
+  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(a, 'coordination').data, false);
+  const b = app.connect('drone2');
+  app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(a, 'coordination').data, true);
+  assert.equal(last(b, 'coordination').data, true);
+  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
+  assert.equal(last(b, 'coordination').data, true);
+  b.disconnect();
+  assert.equal(last(a, 'coordination').data, true);
+  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(a, 'coordination').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
+  b.connect(); b.ros.open();
+  app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(b, 'coordination').data, false);
+  const count = b.publishers.coordination.messages.length;
+  app.advanceTime(2000);
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(b.publishers.coordination.messages.length, count);
 });
 
 test('room targets require live fused localization and explicit send, stay isolated, and stop on conflict', () => {
@@ -249,6 +281,40 @@ test('shared commands reach both bridges and individual commands only their targ
   }
 });
 
+test('a synchronized start releases every Execute drone together once all are freshly ready', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const starts = () => [a, b].map(drone => drone.publishers.routineStart.messages.length);
+  assert.ok(a.publishers.routineStart.advertised && b.publishers.routineStart.advertised);
+  for (const drone of [a, b]) {
+    app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+    app.receive(drone, '/pidrone/routine/ready', {}); // Earlier Execute must not count.
+  }
+  app.awaitSyncStart(['drone1', 'drone2']);
+  app.receive(a, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [0, 0]);
+  app.advanceTime(600);
+  app.receive(b, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [0, 0]);  // drone1's ready is stale.
+  app.receive(a, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [0, 0]); // Wait for both HTTP launches to succeed too.
+  app.confirmSyncStart();
+  assert.deepEqual(starts(), [1, 1]);
+  app.receive(a, '/pidrone/routine/ready', {});
+  app.receive(b, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [1, 1]);  // Released once per Execute.
+  app.awaitSyncStart(['drone1', 'drone2']);
+  app.awaitSyncStart(null); // A failed launch cancels release.
+  app.confirmSyncStart();
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [1, 1]);
+  app.awaitSyncStart(['drone1', 'drone2']);
+  app.confirmSyncStart();
+  app.dispatch('disarm', 'both');
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [1, 1]);
+});
+
 test('an offline partner blocks shared flight commands without queued or partial sends', () => {
   const app = dashboard();
   const a = app.connect('drone1');
@@ -293,7 +359,10 @@ test('Space disarms all despite individual selection and form focus', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   app.elements.get('droneSelection').value = 'drone1';
-  const input = app.element(); input.closest = () => input;
+  const terminal = app.element(); terminal.closest = selector => selector === '.script-terminal' ? terminal : null;
+  app.key('keydown', ' ', terminal);
+  assert.equal(last(a, 'mode'), undefined);
+  const input = app.element(); input.closest = selector => selector.includes('input') ? input : null;
   app.key('keydown', ' ', input);
   assert.equal(last(a, 'mode').mode, 'DISARMED');
   assert.equal(last(b, 'mode').mode, 'DISARMED');
@@ -375,6 +444,11 @@ test('UKF analysis and bounded streams stay independent', () => {
 test('connecting the other drone preserves its partner and automatically targets both', () => {
   const app = dashboard();
   app.connectSelected();
+  assert.deepEqual(app.events.map(event => [event.type, event.detail]), [['drone-connect', 'drone1']]);
+  // Connect starts the nodes, so a refused rosbridge retries instead of failing.
+  app.drones.drone1.ros.events.error(new Error('starting'));
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-text]').textContent, 'Waiting for nodes…');
+  app.retries.pop()();
   const firstRos = app.drones.drone1.ros;
   assert.equal(app.drones.drone2.ros, null);
   firstRos.open();

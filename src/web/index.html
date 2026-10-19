@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PALS Flight Dashboard</title>
   <link rel="stylesheet" href="css/bootstrap.css">
-  <link rel="stylesheet" href="css/main.css?v=20261016-drag-targets">
+  <link rel="stylesheet" href="css/xterm.css">
+  <link rel="stylesheet" href="css/main.css?v=20261018-routines">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261015-independent-calibration" defer></script>
-  <script src="js/main.js?v=20261016-drag-targets" defer></script>
+  <script src="js/main.js?v=20261018-routines" defer></script>
+  <script src="js/xterm.js" defer></script>
+  <script src="js/xterm-addon-fit.js" defer></script>
+  <script src="js/routines.js?v=20261018-routines" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
@@ -115,6 +119,32 @@
         </div>
       </section></div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
+    </section>
+    <section class="panel routine-panel" aria-label="Routines">
+      <div class="panel-header"><h3>Routines</h3>
+        <div class="routine-actions"><button class="btn btn-outline-secondary" id="nodes-restart" type="button" disabled>Restart nodes</button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Align +Y</button><select id="routine-script" aria-label="Routine script"></select><button class="btn btn-primary" id="routine-execute" type="button" disabled>Execute</button></div>
+      </div>
+      <p class="map-note" id="routine-status" role="status" aria-live="polite"></p>
+      <div class="routine-terminals">
+      <article class="routine-terminal" data-terminal="drone1">
+        <div class="routine-terminal-header"><button class="btn btn-outline-secondary" data-field="toggle" type="button" aria-pressed="false">Drone 1 terminal</button><span class="routine-state" data-field="state" role="status">Off</span></div>
+        <p class="routine-result" data-field="result" role="status" aria-live="polite"></p>
+        <label class="routine-args">Arguments<input data-field="args" value="--fly" spellcheck="false" autocomplete="off"></label>
+        <div class="script-terminal" data-field="terminal"></div>
+      </article>
+      <article class="routine-terminal" data-terminal="drone2">
+        <div class="routine-terminal-header"><button class="btn btn-outline-secondary" data-field="toggle" type="button" aria-pressed="false">Drone 2 terminal</button><span class="routine-state" data-field="state" role="status">Off</span></div>
+        <p class="routine-result" data-field="result" role="status" aria-live="polite"></p>
+        <label class="routine-args">Arguments<input data-field="args" value="--fly" spellcheck="false" autocomplete="off"></label>
+        <div class="script-terminal" data-field="terminal"></div>
+      </article>
+      </div>
+      <div class="command-buttons" data-controller="shared">
+        <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+        <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
+        <button class="btn btn-danger" data-command="disarm">Disarm all</button>
+      </div>
+      <p class="map-note">Connect starts each drone's nodes in its terminal, and its heading aligns then, so face the drones along map +Y first. Align +Y re-aligns later by restarting only fusion. Node output is in each terminal's screen windows (SE = fusion). Click a terminal to type. Esc returns the keyboard to the flight shortcuts (Space = Disarm all). Inside, <kbd>`</kbd> + number switches screen windows (<kbd>`</kbd> <kbd>`</kbd> types a backtick).</p>
     </section>
     <div class="fleet-grid" id="fleetGrid" data-count="0"><section class="drone-dashboard" id="drone1" aria-labelledby="drone1-heading">
           <div class="drone-heading"><div><h2 id="drone1-heading">Drone 1</h2></div>

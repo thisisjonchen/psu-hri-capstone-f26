@@ -190,3 +190,21 @@ kbd { flex: none; min-width: 28px; padding: var(--space-1) var(--space-2); borde
   .calibration-grid, .calibration-actions, .status-grid { grid-template-columns: 1fr; }
   .shortcut-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.routine-panel { margin-bottom: var(--space-6); }
+.routine-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.routine-actions select, .routine-args input { min-height: var(--control-default); border: 1px solid #dce3ed; border-radius: var(--radius-control); padding: 6px var(--space-2); color: var(--ink); background: var(--surface); font: 400 var(--type-body)/20px var(--font-ui); }
+.routine-actions select { min-width: 220px; }
+.routine-terminals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
+.routine-terminal { min-width: 0; display: grid; gap: var(--space-2); }
+.routine-terminal-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.routine-terminal [aria-pressed="true"] { background: var(--blue); border-color: var(--blue); color: #fff; }
+.routine-state { font-size: var(--type-label); font-weight: 600; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+.routine-state[data-state="running"] { color: var(--warning); }
+.routine-state[data-state="error"] { color: var(--error); }
+.routine-args { display: grid; gap: var(--space-1); margin: 0; font-size: var(--type-label); font-weight: 600; color: var(--muted); }
+.routine-args input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--type-label); }
+.script-terminal { height: 360px; padding: var(--space-2); border-radius: var(--radius-control); background: #0f1726; overflow: hidden; }
+@media (max-width: 900px) { .routine-terminals { grid-template-columns: 1fr; } }
+.routine-result { margin: 0; font-size: var(--type-label); color: var(--muted); overflow-wrap: anywhere; }
+.routine-result:empty { display: none; }
+.routine-panel .command-buttons { width: min(440px, 100%); margin-top: var(--space-3); }

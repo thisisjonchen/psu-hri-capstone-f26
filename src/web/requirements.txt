@@ -1,2 +1,4 @@
 bleak>=0.22,<2
 numpy>=1.24
+paramiko>=3.4,<4
+websockets>=15,<16

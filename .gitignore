@@ -4,3 +4,4 @@
 .venv/
 
 .calibration-state.json*
+.DS_Store

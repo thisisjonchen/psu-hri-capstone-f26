@@ -56,6 +56,7 @@ add_message_files(
   TagDetection.msg
   TagMap.msg
   AnchorLayout.msg
+  PeerState.msg
 
 )
 

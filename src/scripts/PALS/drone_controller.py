@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 
 import math
-import os
-import subprocess
-import sys
-import tempfile
 import time
 
 import rosnode
@@ -28,6 +24,7 @@ class Drone(object):
     LAND_STEP_M = 0.05 # Target height decrease per landing step (meters)
     LAND_STEP_SECONDS = 1.0 # Time between landing steps (seconds)
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
+    START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
     def __init__(self):
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
@@ -55,6 +52,10 @@ class Drone(object):
         self.position_mode_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
         self.heartbeat_pub = rospy.Publisher(
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
+        # The dashboard releases every drone of one Execute together once all are ready.
+        self.start_at = None
+        self.ready_pub = rospy.Publisher('/pidrone/routine/ready', Empty, queue_size=1)
+        rospy.Subscriber('/pidrone/routine/start', Empty, self._start_received)
         rospy.Subscriber('/pidrone/mode', Mode, self._mode_received)
         rospy.Subscriber('/pidrone/range', Range, self._range_received)
         rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped,
@@ -62,6 +63,9 @@ class Drone(object):
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
         self.heartbeat = rospy.Timer(
             rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
+
+    def _start_received(self, msg):
+        self.start_at = time.time()
 
     def _mode_received(self, msg):
         self.mode = msg.mode
@@ -146,7 +150,9 @@ class Drone(object):
         return now if since is None else since
 
     def ready(self):
-        self._start_missing_nodes()
+        """Wait for the boot-started flight nodes; routines do not launch nodes."""
+        if '/state_estimator' in rosnode.get_node_names():
+            raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
         publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
                       self.position_mode_pub, self.heartbeat_pub)
@@ -188,64 +194,31 @@ class Drone(object):
             time.sleep(0.1)
         raise RuntimeError('Readiness timed out: ' + reason)
 
-    def _start_missing_nodes(self):
-        """Start missing flight nodes locally, once before takeoff."""
-        def running(name):
-            return (name in rosnode.get_node_names() and
-                    rosnode.rosnode_ping(name, max_count=1, verbose=False))
-
-        if self.mode in ('ARMED', 'FLYING'):
-            raise RuntimeError('Node startup requires the drone to be disarmed')
-        rospy.loginfo('Checking flight-controller status')
-        if running('/flight_controller_node'):
-            mode = rospy.wait_for_message('/pidrone/mode', Mode, timeout=2.0)
-            if mode.mode != 'DISARMED':
-                raise RuntimeError('Node startup requires the drone to be disarmed')
-        if running('/state_estimator'):
-            raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
-        scripts = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        launch = os.path.join(os.path.dirname(scripts), 'launch')
-        nodes = [
-            ('/raspicam_node', ['roslaunch', os.path.join(launch, 'raspicam_node.launch')]),
-            ('/vl53l1x', ['bash', '-c',
-                         'source "$HOME/catkin_ws/install/setup.bash" && exec roslaunch "$1"',
-                         'pals-tof', os.path.join(launch, 'tof.launch')]),
-            ('/uwb_localization', ['roslaunch', os.path.join(launch, 'uwb_localization.launch'),
-                                   'port:=' + os.environ.get('PALS_UWB_PORT', '/dev/ttyACM1')]),
-            ('/fusion_localization', ['roslaunch', os.path.join(launch, 'fusion_localization.launch')]),
-            ('/pid_controller', [sys.executable, '-u', 'pid_controller.py']),
-            ('/flight_controller_node', [sys.executable, '-u', 'flight_controller_node.py']),
-            ('/apriltag_detection', ['roslaunch', os.path.join(launch, 'apriltag_detection.launch')]),
-            ('/apriltag_mapping', ['roslaunch', os.path.join(launch, 'apriltag_mapping.launch')]),
-        ]
-        for name, command in nodes:
+    def wait_for_start(self, timeout=START_TIMEOUT_S, hold_xy=False):
+        """Post ready until the dashboard's start arrives; never take off alone."""
+        rospy.loginfo('Waiting for synchronized start (up to %.0f s)', timeout)
+        self.start_at = None
+        started = time.time()
+        last_ready = 0
+        while time.time() - started < timeout:
             if rospy.is_shutdown():
-                raise RuntimeError('ROS shut down during node startup')
-            rospy.loginfo('Checking %s', name)
-            if running(name):
-                rospy.loginfo('%s is running', name)
-                continue
-            # Detached processes remain available after this routine finishes.
-            # Each attempt has a separate log, including early startup failures.
-            with tempfile.NamedTemporaryFile(
-                    prefix='pals-' + name.strip('/') + '-', suffix='.log',
-                    delete=False) as log:
-                log_path = log.name
-                rospy.loginfo('Starting %s; log: %s', name, log_path)
-                with open(os.devnull, 'rb') as stdin:
-                    process = subprocess.Popen(
-                        ['setsid'] + command, cwd=scripts, stdin=stdin, stdout=log,
-                        stderr=subprocess.STDOUT)
-            deadline = time.time() + 20.0
-            while time.time() < deadline and not rospy.is_shutdown():
-                if process.poll() is not None:
-                    raise RuntimeError('{} exited during startup; see {}'.format(name, log_path))
-                if running(name):
-                    rospy.loginfo('%s started', name)
-                    break
-                time.sleep(0.2)
-            else:
-                raise RuntimeError('{} did not become reachable; see {}'.format(name, log_path))
+                raise RuntimeError('ROS shut down while waiting for synchronized start')
+            if self.mode != 'DISARMED':
+                raise RuntimeError('Mode changed to {} while waiting for synchronized start'.format(self.mode))
+            self._check_sensors()
+            self._check_battery()
+            if self.voltage < self.MIN_START_V:
+                raise RuntimeError('Battery voltage is too low for synchronized start')
+            if hold_xy:
+                self._hold_pose()
+            if self.start_at is not None and self.start_at >= started:
+                rospy.loginfo('Synchronized start received')
+                return
+            if time.time() - last_ready >= 0.2:
+                self.ready_pub.publish(Empty())
+                last_ready = time.time()
+            time.sleep(0.02)
+        raise RuntimeError('No synchronized start within {:.0f} s; not taking off'.format(timeout))
 
     def _set_mode(self, name):
         deadline = time.time() + 5.0
@@ -297,12 +270,14 @@ class Drone(object):
                 command.linear.x, command.linear.y))
         return command
 
-    def hover(self, seconds=1.0):
-        self.twist_pub.publish(self._xy_hold_command())
+    def hover(self, seconds=1.0, command=None):
+        """Hover, publishing command() (default: fused X/Y hold) each cycle."""
+        command = command or self._xy_hold_command
+        self.twist_pub.publish(command())
         deadline = time.time() + seconds
         while time.time() < deadline:
             self._check_flight('hover')
-            self.twist_pub.publish(self._xy_hold_command())
+            self.twist_pub.publish(command())
             rospy.sleep(max(0.0, min(0.1, deadline - time.time())))
 
     def disarm(self):
@@ -313,6 +288,7 @@ class Drone(object):
         """Take off, optionally holding fused room X/Y from before liftoff."""
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
+        self.wait_for_start(hold_xy=hold_xy)
         self._check_sensors()
         self._check_battery()
         if abs(self.height - self.ground_height) > 0.02:

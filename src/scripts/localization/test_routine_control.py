@@ -22,14 +22,12 @@ class RoutineControlTest(unittest.TestCase):
         self.ros.Timer = mock.Mock()
         self.ros.Duration = lambda seconds: seconds
         self.ros.is_shutdown = lambda: False
-        self.ros.wait_for_message = lambda *args, **kwargs: NS(mode='DISARMED')
         sys.modules['pidrone_pkg.msg'].Battery = NS
         sys.modules['geometry_msgs.msg'].Pose = lambda: Pose().pose.pose
         sys.modules['geometry_msgs.msg'].Twist = twist
         sys.modules['std_msgs.msg'].Bool = lambda value: NS(data=value)
         self.nodes = ModuleType('rosnode')
         self.nodes.get_node_names = mock.Mock(return_value=[])
-        self.nodes.rosnode_ping = lambda *args, **kwargs: True
         patch = mock.patch.dict(sys.modules, {'rosnode': self.nodes})
         patch.start()
         self.addCleanup(patch.stop)
@@ -214,39 +212,51 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
 
-    def test_startup_reuses_nodes_and_launches_missing_localization_and_mapper(self):
-        self.drone.mode = 'DISARMED'
-        running = ['/raspicam_node', '/vl53l1x',
-                   '/pid_controller', '/flight_controller_node', '/apriltag_detection']
-        self.nodes.get_node_names.side_effect = lambda: list(running)
-        commands = []
+    def advance_until(self, release_at=None):
+        started = self.fusion.now
+        self.drone.voltage = 16.
+        self.drone.battery_at = self.drone.mode_at = self.drone.height_at = started
 
-        def launch(command, **kwargs):
-            commands.append(command)
-            launch_file = next(part for part in command if part.endswith('.launch'))
-            name = '/' + os.path.basename(launch_file).replace('.launch', '')
-            running.append(name)
-            return NS(poll=lambda: None)
+        def sleep(seconds):
+            self.fusion.now += seconds
+            self.drone.battery_at = self.drone.mode_at = self.drone.height_at = self.fusion.now
+            if release_at is not None and self.fusion.now - started >= release_at:
+                self.drone._start_received(None)
+        self.globals['time'] = NS(time=lambda: self.fusion.now, sleep=sleep)
 
-        log = mock.MagicMock()
-        log.__enter__.return_value = NS(name='mock-routine.log')
-        with mock.patch.object(self.globals['subprocess'], 'Popen', side_effect=launch), \
-                mock.patch.object(self.globals['tempfile'], 'NamedTemporaryFile', return_value=log), \
-                mock.patch.dict(os.environ, {'PALS_UWB_PORT': '/dev/test-tag'}):
-            self.drone._start_missing_nodes()
-            self.drone._start_missing_nodes()
-        self.assertEqual(len(commands), 3)
-        self.assertTrue(any('apriltag_mapping.launch' in part for part in commands[2]))
-        self.assertIn('port:=/dev/test-tag', commands[0])
-        self.assertFalse(any('state_estimator' in part for command in commands for part in command))
+    def test_synchronized_start_posts_ready_and_ignores_an_earlier_start(self):
+        drone = self.drone
+        drone.mode = 'DISARMED'
+        drone._start_received(None)  # From a previous run: must not release this one.
+        self.advance_until(release_at=.5)
+        drone.wait_for_start()
+        ready = self.fusion.messages['/pidrone/routine/ready']
+        self.assertTrue(2 <= len(ready) <= 4)  # 5 Hz for 0.5 s
 
-    def test_startup_rejects_a_competing_legacy_state_publisher(self):
+    def test_no_start_or_mode_change_aborts_before_arming(self):
+        drone = self.drone
+        drone.mode = 'DISARMED'
+        self.advance_until()
+        with self.assertRaisesRegex(RuntimeError, 'No synchronized start within 30 s'):
+            drone.wait_for_start()
+        drone.mode = 'ARMED'
+        with self.assertRaisesRegex(RuntimeError, 'Mode changed to ARMED'):
+            drone.wait_for_start()
+        drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
+        drone.mode_pub.publish = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, 'No synchronized start'):
+            drone.takeoff()
+        drone.mode_pub.publish.assert_not_called()
+        drone.height_at = self.fusion.now - 2
+        with self.assertRaisesRegex(RuntimeError, 'Downward range is missing/stale'):
+            drone.wait_for_start()
+        drone.mode_pub.publish.assert_not_called()
+
+    def test_ready_rejects_a_competing_legacy_state_publisher(self):
         self.drone.mode = 'DISARMED'
         self.nodes.get_node_names.return_value = ['/state_estimator', '/fusion_localization']
-        with mock.patch.object(self.globals['subprocess'], 'Popen') as launch:
-            with self.assertRaisesRegex(RuntimeError, 'legacy /state_estimator'):
-                self.drone._start_missing_nodes()
-            launch.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'legacy /state_estimator'):
+            self.drone.ready()
 
 
 if __name__ == '__main__':

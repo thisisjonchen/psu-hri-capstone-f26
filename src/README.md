@@ -7,50 +7,58 @@ Here are some steps to make life with the DD24 a little simpler.
 ## Standard Operation + Control
 Assuming that the base environment is already set up on the DD24 by following the instructions [here](https://docs.duckietown.com/daffy/opmanual-dd24/preliminaries/environment-setup.html), feel free to continue.
 
-1. Turn the drone on
-2. Enable a mobile hotspot. This can be done on a Windows laptop or via a phone hotspot, but ensure the following. Ensure that both the control base station and the drone are on the same network:
-   1. Network name: **duckietown**
-   2. Network password: **quackquack**
-3. SSH onto the DD24 with the following command. Replace [drone] with drone1 or drone2.
-   ```
-   ssh duckie@[drone].local
-   ```
-4. Wait until the connection is established and you see a pop-up in the terminal for a password input.
-   1. Password: **quackquack**
-5. Run these commands in the terminal afterward:
-   ```
-   cd ~/catkin_ws/src/pidrone_pkg
-   git pull
-   rake start
-   ```
-6. Wait until the container starts. Then run:
-   ```
-   screen -wipe
-   screen -c pi.screenrc
-   ```
-7. Your terminal should have changed to show a variety of different controls. Use `'# to navigate, where # is the screen you want to get to. Each screen corresponds to a different node/component on the drone; for example, $1FC is the flight controller.
-8. Go through each screen (1-9) and ensure its processes are running. Then, proceed to the $1FC screen and run the flight_controller_node.py. 
-10. To control it, clone this repo on your laptop/base station and start the [dashboard server](#uwb--tof-localization), then open `http://localhost:8000`. The room map discovers anchor positions automatically after a drone connects; no layout file is loaded.
-    1. When the interface opens, you have an option of which drone you want to connect to. Simply select either Drone1 or Drone2, click connect, and you are good to go.
-11. Read all instructions carefully and be ready to disarm at all times.
-12. Congratulations, the drone is now ready to fly!
+### One-time setup (per laptop, then per drone)
+Both the laptop and the drones must be on the same hotspot (network **duckietown**, password **quackquack**). From the repository root on your laptop (macOS, Linux or Windows, Python 3.8+):
 
-Note: Everything done on the drone is through this `pidrone_pkg`. Add any custom scripts or code to `~/.../pidrone_pkg/scripts/PALS`.
+```
+python3 tools/pals.py ssh-setup   # creates ~/.ssh/pals_ed25519 and installs it; asks for the drone password once
+python3 tools/pals.py provision   # pins serial ports, pip install + catkin_make; does not start nodes
+```
+Use `--drone drone1` to target one drone. After provisioning, `ssh drone1` works without a password.
+
+### Every session
+1. Turn the drones on. Nothing starts at boot.
+2. Start the dashboard: `python3 tools/pals.py dashboard` (creates `.venv` and installs requirements the first time; opens `http://localhost:8000`).
+3. Place each drone disarmed, stationary and **facing map +Y**.
+4. Select Drone1 or Drone2 and click **Connect** (repeat for the other drone). Connect opens that drone's terminal in **Routines** and starts the `pidrone_pkg` container and the `pidrone` screen session with every node, including the flight controller; fusion aligns its heading now. The startup output appears in the terminal, then the terminal attaches to the session's `routine` window, which checks each node (`ok` or `MISSING`, with the window to inspect). Telemetry connects once rosbridge is up. Connecting again while nodes run changes nothing; **Disconnect** closes the terminal too (nodes and routines keep running).
+5. Pick a script, set each drone's arguments (default `--fly`), and click **Execute**. Each routine waits disarmed; the dashboard sends start releases after every selected drone reports fresh readiness and all launch requests succeed. A failed launch, disconnect, Stop or Disarm cancels a pending release. Ctrl-C in a terminal interrupts that drone's routine (it lands). Use <kbd>`</kbd> + number to switch screen windows (e.g. FC, UWB). Esc leaves the terminal so Space disarms all again.
+6. Read all instructions carefully and be ready to disarm at all times.
+
+To re-align after a drone is moved, face it along +Y and click **Align +Y**: only fusion restarts, and it is refused unless the drone is DISARMED and no routine is running. **Restart nodes** restarts everything (e.g. after updating code).
+
+A terminal's own toggle opens it without starting nodes. Each button's result appears under that drone's terminal header. Node output stays in the drone's screen windows inside the terminal (<kbd>`</kbd> <kbd>3</kbd> = SE/fusion, which logs `Startup heading aligned with map +Y`).
+
+Closing the tab or losing Wi-Fi only detaches a terminal; a running routine continues and lands itself.
+
+Synchronized start is a best-effort readiness barrier, not an identical takeoff
+timestamp or synchronization of later route stages. A routine started manually
+also waits for a dashboard release and times out after 30 seconds without one.
+For paired flight, connect both drones before arming and start the laptop
+`tools/peer_relay.py` separately. Distance control retains its 0.75 m target and
+the solo/paired choice made before arming; see [coordination](scripts/PALS/COORDINATION.md).
+
+### Updating code on the drones
+Push your changes to GitHub, then in each drone's terminal run `cd ~/catkin_ws/src/pidrone_pkg && git pull` and click **Restart nodes** (drones disarmed and facing +Y, since restarting re-aligns heading). Run `catkin_make` in `~/catkin_ws` first if messages or build files changed. Don't edit code on the drones.
+
+### Manual fallback
+`ssh duckie@[drone].local`, then `docker exec -it pidrone_pkg screen -x pidrone` to attach to the nodes (`bash ~/catkin_ws/src/pidrone_pkg/boot/pals-start.sh start` starts them). On an unprovisioned drone, `rake start` followed by `screen -c pi.screenrc` still works; the FC window now starts the flight controller automatically.
+
+Note: Everything done on the drone is through this `pidrone_pkg`. Add any custom scripts or code to `~/.../pidrone_pkg/scripts/PALS`; routines in `scripts/PALS/routines` appear in the dashboard's script list.
 
 ## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
-1. Follow the procedure above (Standard Operation + Control) **until Step 4**. You should be SSH'd and logged in.
+1. Use the drone's dashboard terminal, or `ssh duckie@[drone].local` (password **quackquack**).
 2. Go to the directory where we have the repo: `cd ~/catkin_ws/src/pidrone_pkg`
 3. You should have the branch you want to change to in mind. If you are unsure of the current branch of the drone, run `git branch --show-current`
 4. To change to the branch you want, do `git checkout -f [branch]`
 5. You are ready to go! Feel free to test as needed. If you need to modify any code, do so on your laptop/base station, push to the branch, then pull.
-6. Continue from **Step 5** in **Standard Operation + Control**.
+6. Restart the nodes while disarmed and facing +Y: `bash ~/catkin_ws/src/pidrone_pkg/boot/pals-start.sh restart`.
    
    
 ## Cloning the Repo
 If the DD24 does not have the repo cloned yet, here are instructions for doing so.
 
-1. Follow the procedure in **Standard Operation + Control**, **up to Step 4**. You should be SSH'd and logged in.
+1. `ssh duckie@[drone].local` (password **quackquack**).
 2. Run the following commands to clone the repo
    ```
    cd ~/catkin_ws && git clone https://github.com/thisisjonchen/psu-hri-capstone-f26.git
@@ -65,7 +73,7 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ```
 5. Create a symlink from our repo as the new `pidrone_pkg`
    ```
-   ln -s ~/catkin_ws/psu-hri-capstone-f26/packages/pidrone_pkg \
+   ln -s ~/catkin_ws/psu-hri-capstone-f26/src \
       ~/catkin_ws/src/pidrone_pkg
    ```
 6. Check the symlink works
@@ -73,7 +81,7 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ls -l ~/catkin_ws/src/pidrone_pkg
    readlink -f ~/catkin_ws/src/pidrone_pkg
    ```
-7. You are now ready to go. Take a look at **Changing Branches**. Otherwise, follow the rest of **Standard Operation + Control** from **Step 5**.
+7. You are now ready to go. Run the one-time setup in **Standard Operation + Control**.
 
 ## Camera Out of Focus
 
