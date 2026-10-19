@@ -68,6 +68,7 @@ def connect(drone, timeout=5):
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
     try:
         client.connect(host(drone), username=USER, key_filename=str(KEY), timeout=timeout,
+                       banner_timeout=timeout, auth_timeout=timeout,
                        allow_agent=False, look_for_keys=False)
     except paramiko.SSHException as error:
         client.close()
@@ -137,9 +138,17 @@ def run(drone, command, timeout=10):
         client = _clients.get(drone)
         if client is None or not client.get_transport() or not client.get_transport().is_active():
             client = _clients[drone] = connect(drone)
-    _, stdout, _ = client.exec_command(command, timeout=timeout)
-    output = stdout.read().decode('utf-8', 'replace')
-    return stdout.channel.recv_exit_status(), output
+    try:
+        _, stdout, _ = client.exec_command(command, timeout=timeout)
+        output = stdout.read().decode('utf-8', 'replace')
+        return stdout.channel.recv_exit_status(), output
+    except (OSError, paramiko.SSHException) as error:
+        client.close()
+        with _lock:
+            if _clients.get(drone) is client:
+                del _clients[drone]
+        # Do not retry here: a command may already have reached the drone.
+        raise RuntimeError('%s: SSH command failed: %s' % (drone, error)) from error
 
 
 def list_scripts(drone):
@@ -204,20 +213,32 @@ def execute(drone, script, args):
         raise RuntimeError('%s nodes are not started' % drone)
 
 
-def open_terminal(drone, cols, rows, start=False):
+def open_terminal(drone, cols, rows, start=False, active=lambda: True):
     """Attach to the drone's screen session; closing only detaches.
 
     With start (the Connect button), set up SSH and start the nodes here so their
     startup output is visible, then report the exit status as OSC 777.
     """
     client = setup_ssh(drone) if start else connect(drone)
-    channel = client.get_transport().open_session()
-    channel.get_pty(term='xterm-256color', width=cols, height=rows)
-    attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)
-    if start:
-        command = START + r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach
-    else:
-        command = ("until %s status; do [ -n \"$waited\" ] || echo 'Nodes not started: click Connect.'; "
-                   'waited=1; sleep 2; done; %s' % (START, attach))
-    channel.exec_command(command)
-    return client, channel
+    try:
+        channel = client.get_transport().open_session(timeout=5)
+        channel.settimeout(10)
+        channel.get_pty(term='xterm-256color', width=cols, height=rows)
+        attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)
+        if start:
+            command = START + r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach
+        else:
+            command = ("until %s status; do [ -n \"$waited\" ] || echo 'Nodes not started: click Connect.'; "
+                       'waited=1; sleep 2; done; %s' % (START, attach))
+        # SSH setup can take several seconds; honor a canceled browser connection
+        # before sending anything that starts nodes. Never stop nodes in cleanup.
+        if not active():
+            raise RuntimeError('Connection canceled')
+        channel.exec_command(command)
+        channel.settimeout(None)
+        return client, channel
+    except Exception as error:
+        client.close()
+        if isinstance(error, (OSError, paramiko.SSHException)):
+            raise RuntimeError('%s: terminal connection failed: %s' % (drone, error)) from error
+        raise

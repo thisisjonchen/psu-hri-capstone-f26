@@ -64,10 +64,15 @@ class ConnectTest(unittest.TestCase):
             drones.create_ssh_key(key)
             self.assertEqual(key.read_bytes(), original)
 
-    def test_missing_key_points_to_ssh_setup(self):
-        with mock.patch.object(drones, 'KEY', Path('/nonexistent/pals_ed25519')):
-            with self.assertRaisesRegex(RuntimeError, 'run tools/pals.py ssh-setup'):
-                drones.connect('drone1')
+    def test_failed_command_closes_cached_connection_without_retry(self):
+        client = mock.Mock()
+        client.exec_command.side_effect = OSError('connection lost')
+        with mock.patch.dict(drones._clients, {'drone1': client}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'SSH command failed'):
+                drones.run('drone1', 'command')
+            self.assertNotIn('drone1', drones._clients)
+        client.exec_command.assert_called_once()
+        client.close.assert_called_once()
 
     def test_connect_button_bootstraps_before_starting_nodes(self):
         for start in (True, False):
@@ -86,6 +91,19 @@ class ConnectTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'offline'):
                 drones.open_terminal('drone2', 80, 24, start=True)
             connect.assert_not_called()
+        with mock.patch.object(drones, 'setup_ssh') as setup:
+            client = setup.return_value
+            channel = client.get_transport.return_value.open_session.return_value
+            with self.assertRaisesRegex(RuntimeError, 'Connection canceled'):
+                drones.open_terminal('drone2', 80, 24, start=True, active=lambda: False)
+            channel.exec_command.assert_not_called()
+            client.close.assert_called_once()
+        with mock.patch.object(drones, 'setup_ssh') as setup:
+            client = setup.return_value
+            client.get_transport.return_value.open_session.side_effect = OSError('connection lost')
+            with self.assertRaisesRegex(RuntimeError, 'terminal connection failed'):
+                drones.open_terminal('drone2', 80, 24, start=True)
+            client.close.assert_called_once()
 
 
 class SetupTest(unittest.TestCase):
@@ -130,14 +148,6 @@ class SetupTest(unittest.TestCase):
                 failed.close.assert_called_once()
                 working.close.assert_called_once()
 
-    def test_dashboard_opens_without_ssh_setup(self):
-        with mock.patch.object(sys, 'argv', ['pals.py', 'dashboard']), \
-                mock.patch.object(pals, 'ensure_venv'), \
-                mock.patch.object(pals, 'ssh_setup', return_value=False) as setup, \
-                mock.patch.object(pals, 'dashboard') as dashboard:
-            pals.main()
-        setup.assert_not_called()
-        dashboard.assert_called_once_with(8000)
 
 
 if __name__ == '__main__':

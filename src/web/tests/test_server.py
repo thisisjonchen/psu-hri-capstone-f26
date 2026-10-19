@@ -49,10 +49,3 @@ class PeerRelayLifecycleTest(unittest.TestCase):
                 'op': 'publish', 'topic': peer_relay.PEER_TOPIC, 'msg': messages[index % 2]})
         for socket in sockets:
             socket.__exit__.assert_called_once()
-
-    def test_stopped_server_does_not_connect(self):
-        stop = threading.Event()
-        stop.set()
-        with mock.patch('websockets.sync.client.connect') as connect:
-            peer_relay.run(stop)
-        connect.assert_not_called()

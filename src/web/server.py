@@ -11,6 +11,7 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 from websockets.sync.server import serve
 
 ROOT = Path(__file__).resolve().parent
@@ -114,9 +115,13 @@ def terminal(websocket):
     start = parse_qs(url.query).get('start') == ['1']
     size = json.loads(websocket.recv())
     try:
-        client, channel = drones.open_terminal(drone, int(size['cols']), int(size['rows']), start)
+        client, channel = drones.open_terminal(drone, int(size['cols']), int(size['rows']), start,
+                                              active=lambda: websocket.state is State.OPEN)
     except (ValueError, RuntimeError) as error:
-        websocket.send('\r\n[%s]\r\n' % error)
+        try:
+            websocket.send('\r\n[%s]\r\n' % error)
+        except ConnectionClosed:
+            pass
         return
 
     def output():

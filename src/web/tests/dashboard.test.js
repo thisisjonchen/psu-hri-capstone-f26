@@ -558,16 +558,17 @@ test('startup retries retain their deadline and cannot restart after timeout or 
 
 test('terminal connection failure cancels startup but detaching a connected drone preserves telemetry', () => {
   const app = dashboard();
+  const output = [];
   const context = vm.createContext({
     document: { addEventListener() {} }, drones: app.drones,
     location: { hostname: 'localhost', port: '8000' },
-    WebSocket: class { close() {} }
+    WebSocket: class { static OPEN = 1; readyState = 1; close() { this.readyState = 3; } }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Terminal = vm.runInContext('RoutineTerminal', context);
   const pane = Object.create(Terminal.prototype);
-  Object.assign(pane, { id: 'drone1', socket: null, changed() {},
-    term: { reset() {}, write() {}, cols: 80, rows: 24 }, fit: { fit() {} } });
+  Object.assign(pane, { id: 'drone1', socket: null, enabled: true, changed() {},
+    term: { reset() {}, write(message) { output.push(message); }, cols: 80, rows: 24 }, fit: { fit() {} } });
   app.connectDrone('drone1');
   pane.attach(true);
   pane.socket.onclose();
@@ -577,6 +578,17 @@ test('terminal connection failure cancels startup but detaching a connected dron
   const drone = app.connect('drone1');
   const before = drone.publishers.mode.messages.length;
   pane.attach();
+  const old = pane.socket;
+  pane.attach();
+  const count = output.length;
+  old.onmessage({ data: 'stale startup result' });
+  assert.equal(output.length, count);
+  pane.socket.onmessage({ data: 'current terminal' });
+  assert.equal(output.at(-1), 'current terminal');
+  Object.assign(pane, { scripts: [], nodes: true, running: false });
+  assert.equal(pane.ready, true);
+  pane.socket.close();
+  assert.equal(pane.ready, false);
   pane.socket.onclose();
   assert.equal(drone.connected, true);
   assert.equal(drone.publishers.mode.messages.length, before);

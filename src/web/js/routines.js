@@ -66,7 +66,10 @@ class RoutineTerminal {
       '/terminal/' + this.id + (start ? '?start=1' : ''));
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => socket.send(JSON.stringify({ cols: this.term.cols, rows: this.term.rows }));
-    socket.onmessage = event => this.term.write(typeof event.data === 'string' ? event.data : new Uint8Array(event.data));
+    socket.onmessage = event => {
+      if (this.socket !== socket || !this.enabled) return;
+      this.term.write(typeof event.data === 'string' ? event.data : new Uint8Array(event.data));
+    };
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
@@ -111,7 +114,8 @@ class RoutineTerminal {
 
   get ready() {
     // The synchronized start reaches the routine over this drone's rosbridge.
-    return this.enabled && !!this.scripts && this.nodes && !this.running && !!this.socket &&
+    return this.enabled && !!this.scripts && this.nodes && !this.running &&
+      this.socket?.readyState === WebSocket.OPEN &&
       drones[this.id].connected;
   }
 
