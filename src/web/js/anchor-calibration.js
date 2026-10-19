@@ -15,6 +15,11 @@ class AnchorCalibration {
     this.requestEpoch = 0;
     this.requestError = null;
     this.awaitingStatus = false;
+    this.saveToken = null;
+    this.closeTimer = null;
+    document.getElementById('calibration-toggle').addEventListener('click', () => {
+      this.setOpen(document.getElementById('calibration-panel').hidden);
+    });
     this.remembered = [];
     try {
       const saved = JSON.parse(localStorage.getItem('uwb-anchor-corners'));
@@ -48,6 +53,29 @@ class AnchorCalibration {
     this.receivedAt = Date.now();
     this.refresh();
     if (fleetMap) fleetMap.updateCalibratedLayout(state.layout);
+    if (this.saveToken && state.stage === 'complete' && state.layout &&
+        state.layout.verified && state.layout.revision === this.saveToken) {
+      this.saveToken = null;
+      if (!document.getElementById('calibration-panel').hidden) {
+        document.getElementById('calibration-form').hidden = true;
+        document.getElementById('calibration-success').hidden = false;
+        this.closeTimer = setTimeout(() => {
+          this.setOpen(false);
+          document.getElementById('calibration-toggle').focus();
+        }, 1200);
+      }
+    }
+    if (state.stage === 'error') this.saveToken = null;
+  }
+
+  setOpen(open) {
+    clearTimeout(this.closeTimer);
+    this.closeTimer = null;
+    document.getElementById('calibration-panel').hidden = !open;
+    document.getElementById('calibration-toggle').setAttribute('aria-expanded', String(open));
+    document.getElementById('map-frame').classList.toggle('calibrating', open);
+    document.getElementById('calibration-form').hidden = false;
+    document.getElementById('calibration-success').hidden = true;
   }
 
   async poll() {
@@ -142,6 +170,7 @@ class AnchorCalibration {
     if (action === 'apply') {
       if (this.state.stage !== 'preview' || !this.state.token || !this.matchesPreview()) return;
       request.token = this.state.token;
+      this.saveToken = request.token;
     }
     this.pendingAction = action;
     this.requestEpoch++;
@@ -180,18 +209,18 @@ class AnchorCalibration {
     const labels = { scan: 'Scanning…', measure: 'Measuring…', apply: 'Saving…', cancel: 'Cancelling…' };
     const stages = { scanning: 'scan', measuring: 'measure', saving: 'apply' };
     const active = this.pendingAction || (state && state.busy && stages[state.stage]);
-    const defaults = { scan: '1. Scan anchors', measure: '2. Measure layout', apply: '3. Save layout', cancel: 'Cancel' };
+    const defaults = { scan: '1. Scan', measure: '2. Measure', apply: '3. Save', cancel: 'Cancel' };
     Object.keys(defaults).forEach(action => {
       document.getElementById('calibration-' + action).textContent = active === action ? labels[action] : defaults[action];
     });
     const selectionStatus = document.getElementById('calibration-selection');
-    selectionStatus.hidden = !state || state.boards.filter(board => board.active).length < 4;
-    selectionStatus.textContent = selectionStatus.hidden ? '' : this.selectionIssue() ||
-      'Four corners assigned. Confirm their physical locations before measuring.';
+    const issue = state && state.boards.filter(board => board.active).length >= 4 ? this.selectionIssue() : '';
+    selectionStatus.hidden = !issue;
+    selectionStatus.textContent = issue || '';
     document.getElementById('calibration-status').textContent = this.requestError || (!fresh
       ? (this.awaitingStatus ? 'Checking calibration status...'
         : state && (state.preview || state.dirty) ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
-        : 'Open the dashboard through the laptop server: http://localhost:8000.')
+        : 'Calibration server offline.')
       : this.pendingAction ? labels[this.pendingAction] : state.message);
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
@@ -199,7 +228,7 @@ class AnchorCalibration {
     // Present rows from top to bottom; the solver retains its counterclockwise order.
     preview.textContent = fresh && state.preview ? [3, 2, 0, 1]
       .map(index => state.preview.positions[index]).filter(Boolean).map((p, i) =>
-        'Corner ' + (i + 1) + ' (' + corners[i] + ') · ' + anchorLabel(p.id) +
+        corners[i] + ' · ' + anchorLabel(p.id) +
         ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ' m').join('\n') : '';
   }
 }

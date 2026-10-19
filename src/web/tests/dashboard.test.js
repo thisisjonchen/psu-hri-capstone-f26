@@ -46,26 +46,24 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
   }
-  for (const id of ['commandFeedback', 'fleetGrid', 'fleet-xyChart', 'controlsHeading', 'drone1-connectionStatus', 'drone2-connectionStatus', 'droneSelection',
-    'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend', 'map-sources',
+  for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
+    'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
     'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
-  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview', 'selection']) elements.set('calibration-' + name, element());
+  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
+  elements.get('calibration-panel').hidden = true;
+  elements.get('calibration-success').hidden = true;
   for (let i = 0; i < 4; i++) {
     elements.set('calibration-anchor-' + i, element());
   }
   for (const id of ['drone1', 'drone2']) {
-    for (const status of [elements.get(id + '-connectionStatus'), elements.get(id).querySelector('[data-field="connectionStatus"]')]) {
-      const icon = element(); icon.dataset.state = 'disconnected';
-      const subtitle = element(); subtitle.textContent = 'Disconnected';
-      status.querySelector = selector => selector === '[data-state-icon]' ? icon : subtitle;
-    }
+    const status = elements.get(id + '-connectionStatus');
+    const icon = element(), label = element(), action = element();
+    status.querySelector = selector => selector === '[data-state-icon]' ? icon : selector === '[data-connection-label]' ? label : selector === '[data-connection-action]' ? action : null;
   }
-  elements.get('droneSelection').value = 'drone1';
   elements.get('fleetGrid').dataset.count = '0';
   const document = {
     createElement: () => element(),
     getElementById: id => elements.get(id),
-    querySelector: () => elements.get('droneSelection'),
     addEventListener: (name, callback) => { listeners[name] = callback; },
     dispatchEvent: event => events.push(event)
   };
@@ -139,7 +137,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectSelected, currentTarget, awaitSyncStart, confirmSyncStart })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -379,9 +377,7 @@ test('each drone follows its reported position mode for keyboard movement', () =
 test('key release stops original recipients even after focus changes', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.elements.get('droneSelection').value = 'drone1';
   app.key('keydown', 'i');
-  app.elements.get('droneSelection').value = 'drone2';
   const input = app.element(); input.closest = () => input;
   app.key('keyup', 'i', input);
   assert.equal(last(a, 'twist').linear.y, 0);
@@ -391,10 +387,9 @@ test('key release stops original recipients even after focus changes', () => {
   assert.equal(b.publishers.twist.messages.length, sent);
 });
 
-test('Space disarms all despite individual selection and form focus', () => {
+test('Space disarms all despite form focus', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.elements.get('droneSelection').value = 'drone1';
   const terminal = app.element(); terminal.closest = selector => selector === '.script-terminal' ? terminal : null;
   app.key('keydown', ' ', terminal);
   assert.equal(last(a, 'mode'), undefined);
@@ -404,11 +399,10 @@ test('Space disarms all despite individual selection and form focus', () => {
   assert.equal(last(b, 'mode').mode, 'DISARMED');
 });
 
-test('connection selection leaves shared targeting intact and window blur stops movement', () => {
+test('shared targeting stays intact and window blur stops movement', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   app.key('keydown', 'i');
-  app.elements.get('droneSelection').value = 'drone2';
   assert.equal(app.currentTarget(), 'both');
   app.listeners.blur();
   assert.equal(last(a, 'twist').linear.y, 0);
@@ -433,11 +427,11 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   assert.equal(app.timers.size, 1);
   assert.equal(b.connected, true);
   assert.equal(a.field('camera').src, 'nocamera.svg');
-  assert.equal(a.field('detection').textContent, 'Drone Offline');
+  assert.equal(a.field('detection').textContent, 'No tag data');
   app.connect('drone1');
   oldRange.receive({ ...stamp(500), range: 9 });
   oldTags.receive(tags([0], ['PICKUP']));
-  assert.equal(a.field('detection').textContent, 'Drone Offline');
+  assert.equal(a.field('detection').textContent, 'No tag data');
   oldRos.events.close();
   assert.equal(a.connected, true);
   assert.equal(a.series.range.length, 0);
@@ -456,22 +450,16 @@ test('unexpected close or error stops heartbeats and clears publishers', () => {
   assert.equal(app.timers.size, 0);
   assert.equal(Object.keys(a.publishers).length, 0);
   assert.equal(Object.keys(b.publishers).length, 0);
-  assert.equal(app.elements.get('drone2-connectionStatus').querySelector('[data-connection-text]').textContent, 'Connection error');
+  assert.equal(app.elements.get('drone2-connectionStatus').title, 'Connection error');
+  assert.equal(app.elements.get('drone2-connectionStatus').querySelector('[data-connection-label]').textContent, 'Error');
 });
 
-test('UKF analysis and bounded streams stay independent', () => {
+test('bounded height streams stay independent', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.receive(a, '/pidrone/ukf_stats', { ...stamp(100), error: 0.02, stddev: 0.03 });
-  a.toggleAnalysis(app.element());
-  assert.equal(a.heightChart.options.scales.yAxes[0].ticks.min, undefined);
-  assert.equal(a.heightChart.options.scales.yAxes[0].ticks.max, undefined);
-  assert.equal(a.heightChart.data.datasets[0].data[0].y, 0.02);
-  assert.equal(b.analysis, false);
   for (let secs = 102; secs < 115; secs++) app.receive(a, '/pidrone/range', { ...stamp(secs), range: secs / 100 });
   assert.ok(a.series.range.length <= 6);
   assert.equal(b.series.range.length, 0);
-  a.toggleAnalysis(app.element());
   assert.equal(a.heightChart.data.datasets[0].data.at(-1).y, 1.14);
   assert.equal(a.heightChart.options.scales.yAxes[0].ticks.min, 0);
   assert.equal(a.heightChart.options.scales.yAxes[0].ticks.max, 0.6);
@@ -479,28 +467,119 @@ test('UKF analysis and bounded streams stay independent', () => {
 
 test('connecting the other drone preserves its partner and automatically targets both', () => {
   const app = dashboard();
-  app.connectSelected();
+  app.listeners.click({ target: { closest: () => ({ dataset: { connectionToggle: 'drone1' } }) } });
   assert.deepEqual(app.events.map(event => [event.type, event.detail]), [['drone-connect', 'drone1']]);
   // Connect starts the nodes, so a refused rosbridge retries instead of failing.
   app.drones.drone1.ros.events.error(new Error('starting'));
-  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-text]').textContent, 'Waiting for nodes…');
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-state-icon]').title, 'Waiting for nodes…');
+  const deadline = app.drones.drone1.waitUntil;
+  app.connectDrone('drone1');
+  assert.equal(app.events.length, 1);
+  assert.equal(app.drones.drone1.waitUntil, deadline);
   app.retries.pop()();
   const firstRos = app.drones.drone1.ros;
   assert.equal(app.drones.drone2.ros, null);
+  assert.equal(app.elements.get('drone1-connectionToggle').textContent, 'Cancel connection');
   firstRos.open();
+  assert.equal(app.elements.get('drone1-connectionToggle').hidden, true);
+  assert.equal(app.drones.drone1.field('telemetry').hidden, false);
+  assert.equal(app.elements.get('drone1-connectionStatus').disabled, false);
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-action]').textContent, 'Disconnect');
   assert.equal(app.currentTarget(), 'drone1');
-  app.elements.get('droneSelection').value = 'drone2';
-  app.connectSelected();
+  app.listeners.click({ target: { closest: () => ({ dataset: { connectionToggle: 'drone2' } }) } });
   assert.equal(app.drones.drone1.ros, firstRos);
   app.drones.drone2.ros.open();
   assert.equal(app.elements.get('fleetGrid').dataset.count, '2');
   assert.equal(app.currentTarget(), 'both');
   const secondRos = app.drones.drone2.ros;
-  app.elements.get('droneSelection').value = 'drone1';
-  app.connectSelected();
+  app.connectDrone('drone1');
   assert.equal(app.drones.drone1.ros, firstRos);
   assert.equal(app.drones.drone2.ros, secondRos);
   assert.equal(app.currentTarget(), 'both');
+  app.listeners.click({ target: { closest: () => ({ dataset: { connectionToggle: 'drone1' } }) } });
+  assert.equal(app.drones.drone1.ros, null);
+  assert.equal(app.drones.drone2.ros, secondRos);
+  assert.equal(app.elements.get('drone1-connectionToggle').textContent, 'Connect');
+  assert.equal(app.elements.get('drone1-connectionToggle').hidden, false);
+  assert.equal(app.drones.drone1.field('telemetry').hidden, true);
+  assert.equal(app.elements.get('drone1-connectionStatus').disabled, true);
+  assert.equal(app.events.at(-1).type, 'drone-disconnect');
+});
+
+test('startup deadline stops a hanging socket without affecting a connected partner', () => {
+  const app = dashboard();
+  const partner = app.connect('drone2');
+  const before = partner.publishers.mode.messages.length;
+  app.connectDrone('drone1');
+  const drone = app.drones.drone1;
+  const stalled = drone.ros;
+  app.advanceTime(90000);
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(drone.ros, null);
+  assert.equal(drone.waitUntil, 0);
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-state-icon]').title, 'Connection timed out');
+  assert.equal(app.events.at(-1).type, 'drone-connect-failed');
+  stalled.open();
+  assert.equal(drone.connected, false);
+  assert.equal(partner.connected, true);
+  assert.equal(partner.publishers.mode.messages.length, before);
+  app.connectDrone('drone1');
+  assert.notEqual(drone.ros, stalled);
+  drone.ros.open();
+  assert.equal(drone.connected, true);
+});
+
+test('startup retries retain their deadline and cannot restart after timeout or cancellation', () => {
+  const app = dashboard();
+  const drone = app.drones.drone1;
+  app.connectDrone('drone1');
+  const deadline = drone.waitUntil;
+  for (let i = 0; i < 3; i++) {
+    drone.ros.events.error(new Error('unreachable'));
+    app.advanceTime(2000);
+    app.retries.pop()();
+    assert.equal(drone.waitUntil, deadline);
+  }
+  drone.ros.events.error(new Error('unreachable'));
+  const retry = app.retries.pop();
+  app.advanceTime(84000);
+  retry();
+  assert.equal(drone.ros, null);
+  assert.equal(drone.waitUntil, 0);
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-state-icon]').title, 'Connection timed out');
+  app.connectDrone('drone1');
+  drone.ros.events.error(new Error('unreachable'));
+  const cancelled = app.retries.pop();
+  drone.disconnect();
+  cancelled();
+  assert.equal(drone.ros, null);
+  assert.equal(app.timers.size, 0);
+});
+
+test('terminal connection failure cancels startup but detaching a connected drone preserves telemetry', () => {
+  const app = dashboard();
+  const context = vm.createContext({
+    document: { addEventListener() {} }, drones: app.drones,
+    location: { hostname: 'localhost', port: '8000' },
+    WebSocket: class { close() {} }
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
+  const Terminal = vm.runInContext('RoutineTerminal', context);
+  const pane = Object.create(Terminal.prototype);
+  Object.assign(pane, { id: 'drone1', socket: null, changed() {},
+    term: { reset() {}, write() {}, cols: 80, rows: 24 }, fit: { fit() {} } });
+  app.connectDrone('drone1');
+  pane.attach(true);
+  pane.socket.onclose();
+  assert.equal(app.drones.drone1.ros, null);
+  assert.equal(app.drones.drone1.waitUntil, 0);
+  assert.equal(app.events.at(-1).type, 'drone-connect-failed');
+  const drone = app.connect('drone1');
+  const before = drone.publishers.mode.messages.length;
+  pane.attach();
+  pane.socket.onclose();
+  assert.equal(drone.connected, true);
+  assert.equal(drone.publishers.mode.messages.length, before);
 });
 
 test('a dropped partner stops movement until a fresh key press', () => {
@@ -821,18 +900,19 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   for (const message of [tags([], [], false), tags([-1], ['UNKNOWN']), tags([0], []), tags([0], ['']), {}]) {
     app.receive(a, topic, detected);
     app.receive(a, topic, message);
-    assert.equal(a.field('detection').textContent, 'Drone Offline');
+    assert.equal(a.field('detection').textContent, 'No tag data');
   }
   app.receive(a, topic, detected);
   app.advanceTime(1600);
   app.receive(b, topic, tags([1], ['DROP_OFF']));
   for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(a.field('detection').textContent, 'Drone Offline');
+  assert.equal(a.field('detection').textContent, 'No tag data');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
 test('scan, assignment, measurement and saving work independently of drones', async () => {
   const app = dashboard({ discover: false });
+  app.elements.get('calibration-toggle').listeners.click();
   const boards = ['4d12', '980C', '9781', 'CA83'].map((id, i) => ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
   const state = { stage: 'idle', message: 'Select anchors', boards: [], busy: false, preview: null, token: null };
   const status = () => app.anchorCalibration.update({ ...state });
@@ -860,12 +940,29 @@ test('scan, assignment, measurement and saving work independently of drones', as
   app.receive(drone, '/pidrone/mode', { mode: 'ARMED' });
   await app.anchorCalibration.request('apply');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'reviewed-token' });
+  assert.equal(app.elements.get('calibration-panel').hidden, false);
+  assert.equal(app.elements.get('calibration-success').hidden, true);
   status();
   app.advanceTime(1600);
   app.anchorCalibration.refresh();
   assert.equal(app.elements.get('calibration-apply').disabled, true);
   app.anchorCalibration.request('apply');
   assert.equal(app.calibrationRequests.length, 3);
+  Object.assign(state, { stage: 'complete', preview: null, token: null,
+    layout: { revision: 'reviewed-token', frame: 'map', verified: true, positions: state.preview.positions } });
+  status();
+  assert.equal(app.elements.get('calibration-success').hidden, false);
+  assert.equal(app.elements.get('calibration-panel').hidden, false);
+  const close = app.retries.at(-1);
+  status();
+  assert.equal(app.retries.at(-1), close);
+  close();
+  assert.equal(app.elements.get('calibration-panel').hidden, true);
+  assert.equal(app.elements.get('calibration-toggle')['aria-expanded'], 'false');
+  app.elements.get('calibration-toggle').listeners.click();
+  status();
+  assert.equal(app.elements.get('calibration-panel').hidden, false);
+  assert.equal(app.elements.get('calibration-success').hidden, true);
 });
 
 test('room setup works without drones and reuses saved corners without a scan', async () => {
@@ -879,7 +976,7 @@ test('room setup works without drones and reuses saved corners without a scan', 
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('calibration-measure').disabled, false);
   assert.equal(app.fleetMap.layoutUsable, false);
-  assert.match(app.elements.get('room-status').textContent, /Awaiting verification/);
+  assert.equal(app.elements.get('room-status').hidden, true);
   await app.anchorCalibration.request('measure');
   assert.deepEqual(app.calibrationRequests, [{ action: 'measure', anchors: boards.map(b => ({ ble: b.ble })) }]);
   const drone = app.connect('drone2');
@@ -999,14 +1096,15 @@ test('layout loss or replacement cancels an in-progress drag without restoring o
 test('tap selection, overlapping targets, and keyboard adjustment work without coordinate fields', () => {
   const app = dashboard(), map = app.fleetMap;
   app.connect('drone1'); app.connect('drone2');
-  app.elements.get('droneSelection').value = 'drone2';
+  map.previewTarget('drone1', 1, 2);
+  map.previewTarget('drone2', 2, 2);
+  map.startTargetDrag(mapPointer(map, 2, 2));
+  map.finishTargetDrag(mapPointer(map, 2, 2));
+  map.previewTarget('drone2', 1, 2);
   map.startTargetDrag(mapPointer(map, 1, 2));
   map.finishTargetDrag(mapPointer(map, 1, 2));
   assert.equal(map.selectedTarget, 'drone2');
   assert.equal(map.targets.drone2.y, 2);
-  map.previewTarget('drone1', 1, 2);
-  map.startTargetDrag(mapPointer(map, 1, 2));
-  map.finishTargetDrag(mapPointer(map, 1, 2));
   assert.equal(map.selectedTarget, 'drone2', 'overlapping markers follow the existing selection');
   let prevented = false, stopped = false;
   map.adjustTarget({ key: 'ArrowRight', shiftKey: true,

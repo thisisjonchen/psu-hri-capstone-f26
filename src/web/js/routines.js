@@ -2,17 +2,12 @@
 
 // Each terminal attaches to its drone's `pidrone` screen session through the laptop
 // server. Connect opens it in start mode: the nodes start in the terminal, so their
-// startup output is visible. Closing or toggling off only detaches; routines keep
-// running on the drone.
+// startup output is visible. Disconnect detaches; routines keep running on the drone.
 class RoutineTerminal {
   constructor(id, changed) {
     this.id = id;
     this.changed = changed;
     this.root = document.querySelector('[data-terminal="' + id + '"]');
-    this.toggleButton = this.root.querySelector('[data-field="toggle"]');
-    this.args = this.root.querySelector('[data-field="args"]');
-    this.stateText = this.root.querySelector('[data-field="state"]');
-    this.resultText = this.root.querySelector('[data-field="result"]');
     this.enabled = false;
     this.term = null;
     this.fit = null;
@@ -20,20 +15,14 @@ class RoutineTerminal {
     this.scripts = null;
     this.nodes = false;
     this.running = false;
-    this.error = null;
-    this.result = '';
     this.polling = false;
-    this.toggleButton.addEventListener('click', () => this.setEnabled(!this.enabled));
   }
 
   setEnabled(enabled, start = false) {
     this.enabled = enabled;
-    this.toggleButton.setAttribute('aria-pressed', String(enabled));
     if (enabled) this.attach(start);
     else if (this.socket) this.socket.close();
     this.scripts = null;
-    this.error = null;
-    this.result = '';
     this.poll();
     this.changed();
   }
@@ -68,7 +57,8 @@ class RoutineTerminal {
       this.term.parser.registerOscHandler(777, status => { this.started(status === '0'); return true; });
       this.term.onData(input => this.send({ input }));
       this.term.onResize(({ cols, rows }) => this.send({ cols, rows }));
-      window.addEventListener('resize', () => this.fit.fit());
+      this.resizeObserver = new ResizeObserver(() => this.fit.fit());
+      this.resizeObserver.observe(this.root.querySelector('[data-field="terminal"]'));
     }
     this.term.reset();
     this.fit.fit();
@@ -80,6 +70,8 @@ class RoutineTerminal {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      const drone = drones[this.id];
+      if (!drone.connected && drone.waitUntil) drone.failConnection('Connection error');
       this.term.write('\r\n\x1b[2m[detached; anything running on ' + this.id + ' keeps running]\x1b[0m\r\n');
       this.changed();
     };
@@ -88,8 +80,7 @@ class RoutineTerminal {
 
   started(ok) {
     this.nodes = ok;
-    this.result = ok ? 'Nodes started; the routine window lists each node.' : 'Nodes failed to start; see the terminal.';
-    if (!ok) drones[this.id].disconnect('Nodes failed to start');
+    if (!ok) drones[this.id].failConnection('Nodes failed to start');
     this.changed();
   }
 
@@ -100,17 +91,18 @@ class RoutineTerminal {
   async poll() {
     if (!this.enabled || this.polling) return;
     this.polling = true;
+    const socket = this.socket;
     try {
       const response = await fetch('/api/routine?drone=' + this.id);
       const body = await response.json();
+      if (!this.enabled || this.socket !== socket) return;
       if (!response.ok) throw new Error(body.error || response.statusText);
       this.scripts = body.scripts;
       this.nodes = body.nodes;
       this.running = body.running;
-      this.error = null;
-    } catch (error) {
+    } catch (_) {
+      if (!this.enabled || this.socket !== socket) return;
       this.scripts = null;
-      this.error = error.message;
     } finally {
       this.polling = false;
       this.changed();
@@ -123,13 +115,8 @@ class RoutineTerminal {
       drones[this.id].connected;
   }
 
-  render() {
-    const state = !this.enabled ? 'Off' : this.error ? 'Offline: ' + this.error
-      : !this.scripts ? 'Connecting…' : !this.nodes ? 'Nodes stopped' : this.running ? 'Running a routine'
-      : !this.socket ? 'Detached' : 'Idle';
-    this.stateText.textContent = state;
-    this.stateText.dataset.state = !this.enabled ? 'off' : this.error ? 'error' : this.running ? 'running' : 'idle';
-    this.resultText.textContent = this.enabled ? this.result : '';
+  report(message) {
+    if (this.term && message) this.term.write('\r\n[' + message + ']\r\n');
   }
 
   async post(path, body) {
@@ -155,8 +142,8 @@ class RoutineTerminal {
     return result.output;
   }
 
-  async execute(script) {
-    await this.post('/api/execute', { script, args: this.args.value.trim() });
+  async execute(script, args) {
+    await this.post('/api/execute', { script, args });
     this.running = true;
     return 'Started ' + script;
   }
@@ -165,10 +152,10 @@ class RoutineTerminal {
 class RoutineRunner {
   constructor() {
     this.select = document.getElementById('routine-script');
+    this.args = document.getElementById('routine-args');
     this.button = document.getElementById('routine-execute');
     this.restartButton = document.getElementById('nodes-restart');
     this.alignButton = document.getElementById('nodes-align');
-    this.status = document.getElementById('routine-status');
     this.terminals = ['drone1', 'drone2'].map(id => new RoutineTerminal(id, () => this.render()));
     this.button.addEventListener('click', () => this.execute());
     this.restartButton.addEventListener('click', () => this.nodeAction('restart'));
@@ -178,6 +165,12 @@ class RoutineRunner {
     const terminal = id => this.terminals.find(candidate => candidate.id === id);
     document.addEventListener('drone-connect', event => terminal(event.detail).connectDrone());
     document.addEventListener('drone-disconnect', event => terminal(event.detail).setEnabled(false));
+    document.addEventListener('drone-connect-failed', event => {
+      const pane = terminal(event.detail.id);
+      pane.setEnabled(false);
+      pane.report(event.detail.message);
+      this.render();
+    });
     setInterval(() => this.terminals.forEach(terminal => terminal.poll()), 2000);
     this.render();
   }
@@ -187,52 +180,44 @@ class RoutineRunner {
   }
 
   render() {
-    this.terminals.forEach(terminal => terminal.render());
     const lists = this.active.filter(terminal => terminal.scripts).map(terminal => terminal.scripts);
     // Offer only scripts every enabled drone has, so Execute runs the same file everywhere.
     const scripts = lists.length ? lists[0].filter(name => lists.every(list => list.includes(name))) : [];
     const selected = this.select.value;
     if (scripts.join() !== Array.from(this.select.options, option => option.value).filter(Boolean).join()) {
       const options = scripts.map(name => new Option(name, name));
-      options.unshift(new Option(scripts.length ? 'Select a script' : 'Enable a drone terminal', ''));
+      options.unshift(new Option(scripts.length ? 'Select routine' : 'Connect a drone', ''));
       this.select.replaceChildren(...options);
       this.select.value = scripts.includes(selected) ? selected : '';
     }
-    const differ = lists.length > 1 && lists.some(list => list.join() !== lists[0].join());
     const waiting = this.active.filter(terminal => !terminal.ready).map(terminal => terminal.id);
     const loaded = this.active.length > 0 && this.active.every(terminal => terminal.scripts);
     this.button.disabled = this.busy || !this.select.value || !this.active.length || waiting.length > 0;
     this.restartButton.disabled = this.alignButton.disabled = this.busy || !loaded ||
       !this.active.every(terminal => terminal.nodes && !terminal.running);
-    if (!this.busy) {
-      this.status.textContent = differ ? 'Drones have different routine files; check that both are on the same branch.'
-        : waiting.length ? 'Waiting for ' + waiting.join(' and ') + ' (must be connected, attached and idle).' : '';
-    }
   }
 
   async run(label, targets, action) {
     this.busy = true;
-    this.status.textContent = label + ' on ' + targets.map(terminal => terminal.id).join(' and ') + '…';
+    targets.forEach(terminal => terminal.report(label + '…'));
     this.render();
     const results = await Promise.allSettled(targets.map(action));
     this.busy = false;
     results.forEach((result, index) => {
-      targets[index].result = result.status === 'fulfilled' ? result.value : 'Failed: ' + result.reason.message;
+      targets[index].report(result.status === 'fulfilled' ? result.value : 'Failed: ' + result.reason.message);
     });
-    const failed = results.map((result, index) => result.status === 'rejected'
-      ? targets[index].id + ': ' + result.reason.message : null).filter(Boolean);
-    this.status.textContent = failed.length ? label + ' failed — ' + failed.join('; ') : label + ' done.';
     this.render();
     return results;
   }
 
   async execute() {
     const script = this.select.value;
+    const args = this.args.value.trim();
     const targets = this.active;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
     const stages = script === 'prototype-1-forward.py' ? ['forward', 'land'] : [];
     awaitSyncStart(targets.map(terminal => terminal.id), stages);
-    const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script));
+    const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));
     if (results.every(result => result.status === 'fulfilled')) confirmSyncStart();
     else awaitSyncStart(null);
   }
