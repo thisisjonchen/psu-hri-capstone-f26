@@ -56,6 +56,7 @@ class Drone(object):
         # The dashboard releases every drone of one Execute together once all are ready.
         self.start_at = None
         self.routine_run = None
+        self.routine_plan = None
         self.stage_release = None
         self.waiting_for_start = False
         self.ready_pub = rospy.Publisher('/pidrone/routine/ready', Empty, queue_size=1)
@@ -83,6 +84,7 @@ class Drone(object):
             return
         if stage == 'start' and self.waiting_for_start and self.mode == 'DISARMED':
             self.routine_run = run
+            self.routine_plan = release.get('plan')
         elif run == self.routine_run:
             self.stage_release = (run, stage)
 
@@ -215,6 +217,7 @@ class Drone(object):
 
     def wait_for_start(self, timeout=START_TIMEOUT_S, hold_xy=False, require_run=False):
         self.routine_run = self.stage_release = None
+        self.routine_plan = None
         self.waiting_for_start = True
         try:
             self._wait_for_start(timeout, hold_xy, require_run)
@@ -248,7 +251,7 @@ class Drone(object):
             time.sleep(0.02)
         raise RuntimeError('No synchronized start within {:.0f} s; not taking off'.format(timeout))
 
-    def wait_for_stage(self, stage, timeout=30.0):
+    def wait_for_stage(self, stage, timeout=30.0, check=None):
         """Hold X/Y until every Execute participant reaches this flight stage."""
         if self.routine_run is None or self.xy_anchor is None:
             raise RuntimeError('Stage synchronization requires a dashboard start and X/Y hold')
@@ -258,6 +261,8 @@ class Drone(object):
         while time.time() < deadline:
             if rospy.is_shutdown():
                 raise RuntimeError('ROS shut down while waiting for ' + stage)
+            if check is not None:
+                check()
             self._check_flight('synchronized ' + stage)
             self.twist_pub.publish(self._xy_hold_command())
             # Keep holding through supported gaps, but do not report ready on old fixes.
@@ -334,7 +339,7 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, synchronized_stages=False):
+    def takeoff(self, hold_xy=False, synchronized_stages=False, preflight=None, check=None):
         """Take off, optionally holding fused room X/Y from before liftoff."""
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
@@ -346,6 +351,8 @@ class Drone(object):
         if self.voltage < self.MIN_START_V:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
+        if preflight is not None:
+            preflight()
         self._set_mode('ARMED')
         self.target_height = self.takeoff_height
         rospy.sleep(1.0)
@@ -354,10 +361,14 @@ class Drone(object):
         self.twist_pub.publish(self._xy_hold_command())
         if hold_xy:
             self.lock_xy()
+        if check is not None:
+            check()
         self._set_mode('FLYING')
         deadline = time.time() + 10.0
         settled_since = None
         while time.time() < deadline:
+            if check is not None:
+                check()
             self._check_flight('takeoff')
             if hold_xy:
                 self.twist_pub.publish(self._xy_hold_command())
@@ -371,7 +382,8 @@ class Drone(object):
             rospy.sleep(0.1)
         raise RuntimeError('Takeoff altitude did not settle within 10 seconds')
 
-    def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0):
+    def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,
+             room_target=None, check=None):
         """Move relative to the drone: x right, y forward, z up (meters).
 
         Horizontal distance and heading come from the UWB/IMU room pose.
@@ -380,9 +392,15 @@ class Drone(object):
             raise RuntimeError('Drone must be flying before moving')
         if any(math.isnan(v) or math.isinf(v) or v <= 0 for v in (speed_limit, timeout)):
             raise ValueError('Movement speed and timeout must be finite and positive')
-        if x == 0 and y == 0 and z == 0:
+        if x == 0 and y == 0 and z == 0 and room_target is None:
             return
         horizontal = math.hypot(x, y)
+        if room_target is not None:
+            msg = self._hold_pose()
+            if msg.header.frame_id != room_target[2]:
+                raise RuntimeError('Waypoint frame does not match fused position')
+            p = msg.pose.pose.position
+            horizontal = math.hypot(room_target[0] - p.x, room_target[1] - p.y)
         if horizontal and self.xy_anchor is not None:
             raise ValueError('Unlock X/Y before commanding horizontal movement')
         self._check_sensors()
@@ -396,6 +414,9 @@ class Drone(object):
             yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
             displacement = rotate((x, y), yaw)
             target_xy = displacement + start_xy
+            if room_target is not None:
+                target_xy = rotate(room_target[:2], 0)
+                displacement = target_xy - start_xy
             self.position_mode_pub.publish(Bool(False))
         if z:
             self._set_altitude(target_z)
@@ -408,6 +429,8 @@ class Drone(object):
         settled_since = None
         try:
             while time.time() < deadline:
+                if check is not None:
+                    check()
                 self._check_flight('movement')
                 now = time.time()
                 commanded_distance += last_command_speed * (now - last_command_at)
@@ -460,11 +483,18 @@ class Drone(object):
         finally:
             self.twist_pub.publish(self._xy_hold_command())
 
-    def move_to_altitude(self, height):
+    def move_to_altitude(self, height, check=None):
         """Move to an absolute downward-range height in meters."""
         if self.height is None:
             raise RuntimeError('Downward range has not been received')
-        self.move(z=height - self.height)
+        self.move(z=height - self.height, check=check)
+
+    def move_to(self, x, y, frame, speed_limit=0.06, timeout=30.0, check=None):
+        """Move to a fixed room XY waypoint, retaining the existing height target."""
+        if not frame or any(math.isnan(v) or math.isinf(v) for v in (x, y)):
+            raise ValueError('Waypoint requires a frame and finite coordinates')
+        self.move(speed_limit=speed_limit, timeout=timeout,
+                  room_target=(x, y, frame), check=check)
 
     def move_forward(self, meters, speed_limit=0.15, timeout=15.0):
         if meters <= 0:

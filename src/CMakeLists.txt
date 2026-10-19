@@ -55,6 +55,7 @@ add_message_files(
   UkfStats.msg
   TagDetection.msg
   TagMap.msg
+  TagWaypointMap.msg
   AnchorLayout.msg
   PeerState.msg
 

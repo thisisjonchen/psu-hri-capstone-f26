@@ -121,6 +121,33 @@ disarmed, stationary and facing map +Y; ongoing yaw drift is still possible.
 Synchronize laptop/drone clocks. The relay currently expects odometry's body frame
 to be `pidrone_body`.
 
+## AprilTag path demo
+
+Select `prototype-1-apriltag.py` and use either:
+
+```text
+--fly --drones single --tags 1,2,3
+--fly --drones both --tags 1,2,3
+```
+
+Single mode requires exactly one connected drone (either ID); both mode requires
+both. Map the fixed floor tags with calibrated cameras first. Every requested tag
+must have a confirmed observation within 120 seconds when the flight starts.
+Both drones use the same frozen tag coordinates, preserving their starting
+side-by-side direction around the tag centerline at the configured nominal gap.
+Place the pair at that gap before Run; waypoints require 0.15 m clearance inside
+the anchor outline. This does not check obstacles along the segments.
+
+The routine climbs to 0.6 m, moves at up to 0.06 m/s, confirms each tag with a
+new camera frame at arrival, and holds for one second. Tags must be visible from
+each drone's offset waypoint; failure to see one within five seconds attempts
+landing. Each waypoint and final landing use synchronized stage releases.
+A changed room reference aborts the route. This is an unloaded demo.
+
+Rebuild `pidrone_pkg` with `catkin_make` on the drones before use: the new
+`TagWaypointMap` message carries per-tag observation times and room generation.
+The existing `TagMap` display topic and fusion tuning are unchanged.
+
 ## Peer telemetry relay
 
 The dashboard server manages the relay and waits for both ROS connections. No

@@ -137,7 +137,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart, makeAprilTagPlan })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -1163,4 +1163,68 @@ test('mapped AprilTags follow changed positions across drones and clear on gener
   assert.equal(app.fleetMap.mappedTags().length, 2); // Drone 2's independent map remains.
   b.disconnect();
   assert.equal(app.fleetMap.mappedTags().length, 0);
+});
+
+test('tag route planning requires per-tag age, matching maps, and freezes the same plan for both drones', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  for (const [i, drone] of [a, b].entries()) {
+    app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+    app.receive(drone, '/pidrone/localization/generation', { data: 7 });
+    app.receive(drone, '/pidrone/localization/fused', { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
+      pose: { pose: { position: { x: 1 + i * .75, y: 2, z: .05 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } });
+  }
+  const report = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' }, generation: 7,
+    tag_ids: [1, 2], zones: ['', ''], positions: [{ x: 1.5, y: 3, z: 0 }, { x: 1.5, y: 4, z: 0 }],
+    sample_counts: [3, 3], observed_at: [{ secs: 99, nsecs: 0 }, { secs: 99, nsecs: 0 }] };
+  app.receive(a, '/pidrone/apriltag/waypoints', {map: report, generation: report.generation, observed_at: report.observed_at});
+  const plan = app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]);
+  app.awaitSyncStart(['drone1', 'drone2'], ['tag-0', 'tag-1', 'land'], plan);
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/routine/ready', {});
+  app.confirmSyncStart();
+  assert.deepEqual(JSON.parse(last(a, 'stageRelease').data).plan, JSON.parse(last(b, 'stageRelease').data).plan);
+  assert.equal(JSON.parse(last(a, 'stageRelease').data).plan.points[0].stamp, 99);
+  assert.throws(() => app.makeAprilTagPlan(['drone1'], [1, 2]), /Connect only/);
+  app.fleetMap.waypointReports.drone1.tags[0].observedAt = undefined;
+  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
+  app.fleetMap.waypointReports.drone1.tags[0].observedAt = 99;
+  app.fleetMap.waypointReports.drone1.stamp = 250; // New snapshot cannot freshen old tag observations.
+  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
+  app.fleetMap.waypointReports.drone1.stamp = 100;
+  app.fleetMap.waypointReports.drone1.generation = 6;
+  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
+});
+
+test('AprilTag routine mode controls participant count and sets one synchronized stage per tag', async () => {
+  let released, error, sends = [];
+  const context = vm.createContext({ document: { addEventListener() {} },
+    makeAprilTagPlan(ids, tags) { return { ids, tags }; },
+    awaitSyncStart(ids, stages, plan) { released = { ids, stages, plan }; },
+    confirmSyncStart() {}, feedback(message) { error = message; } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
+  const Runner = vm.runInContext('RoutineRunner', context);
+  for (const mode of ['single', 'both']) {
+    const runner = Object.create(Runner.prototype);
+    Object.assign(runner, { select: { value: 'prototype-1-apriltag.py' },
+      args: { value: '--fly --drones ' + mode + ' --tags 1,2' },
+      terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: true, ready: true,
+        execute() { sends.push(id); } })),
+      async run(label, targets, action) { return Promise.allSettled(targets.map(action)); } });
+    if (mode === 'single') {
+      await runner.execute();
+      assert.match(error, /exactly one/);
+      assert.equal(sends.length, 0);
+      runner.terminals[0].enabled = false; // Single works with Drone 2 as well.
+    }
+    await runner.execute();
+    assert.deepEqual(Array.from(released.stages), ['tag-0', 'tag-1', 'land']);
+    assert.equal(sends.length, mode === 'single' ? 1 : 2);
+    sends = [];
+    if (mode === 'both') {
+      runner.terminals[1].enabled = false;
+      await runner.execute();
+      assert.match(error, /both drones/);
+      assert.equal(sends.length, 0);
+    }
+  }
 });

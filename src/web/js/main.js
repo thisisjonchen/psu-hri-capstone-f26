@@ -30,6 +30,7 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
+    this.waypointReports = {};
     this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
@@ -204,6 +205,7 @@ class FleetMap {
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           this.tagReports = {};
+          this.waypointReports = {};
         }
         this.room = candidate;
         this.targets = {};
@@ -285,7 +287,7 @@ class FleetMap {
     ctx.restore();
   }
 
-  updateTagMap(id, message) {
+  updateTagMap(id, message, navigation = false) {
     const header = message.header || {};
     const stamp = header.stamp && header.stamp.secs + header.stamp.nsecs / 1e9;
     const tags = message.tag_ids, zones = message.zones;
@@ -299,11 +301,15 @@ class FleetMap {
         !zones.every(zone => typeof zone === 'string') ||
         !counts.every(count => Number.isInteger(count) && count > 0) ||
         !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
-    if (this.tagReports[id] && stamp <= this.tagReports[id].stamp) return;
-    const previous = this.tagReports[id];
-    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => {
+    if (navigation && (!Number.isInteger(message.generation) || !Array.isArray(message.observed_at) ||
+        message.observed_at.length !== tags.length)) return;
+    const reports = navigation ? this.waypointReports : this.tagReports;
+    if (reports[id] && stamp <= reports[id].stamp) return;
+    const previous = reports[id];
+    reports[id] = { frame, stamp, receivedAt: Date.now(), generation: message.generation, tags: tags.map((tag, i) => {
+      const observed = message.observed_at && message.observed_at[i];
       const value = { id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
-        z: points[i].z, count: counts[i] };
+        z: points[i].z, count: counts[i], observedAt: observed && observed.secs + observed.nsecs / 1e9 };
       const old = previous && previous.frame === frame && previous.tags.find(p => p.id === tag);
       // A snapshot can update another tag while retaining this cached position.
       // Track changes locally; ROS clocks on the two drones need not agree.
@@ -311,7 +317,7 @@ class FleetMap {
       value.revision = unchanged ? old.revision : ++this.tagRevision;
       return value;
     }) };
-    this.render();
+    if (!navigation) this.render();
   }
 
   mappedTags() {
@@ -590,6 +596,7 @@ class FleetMap {
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     delete this.tagReports[id];
+    delete this.waypointReports[id];
     this.refreshAnchors();
   }
 }
@@ -907,6 +914,10 @@ class DroneSession {
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
+    subscribe('/pidrone/apriltag/waypoints', 'pidrone_pkg/TagWaypointMap', message => {
+      if (message.map) fleetMap.updateTagMap(this.id, { ...message.map,
+        observed_at: message.observed_at, generation: message.generation }, true);
+    });
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message));
     subscribe('/pidrone/localization/generation', 'std_msgs/UInt32', message => {
       if (!Number.isInteger(message.data)) return;
@@ -919,6 +930,7 @@ class DroneSession {
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         delete fleetMap.tagReports[this.id];
+        delete fleetMap.waypointReports[this.id];
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;
@@ -1168,9 +1180,47 @@ function connectDrone(id) {
 let syncStart = null;
 let routineFlight = null;
 let routineSerial = 0;
-function awaitSyncStart(ids, stages = []) {
+function makeAprilTagPlan(ids, tags) {
+  const room = fleetMap.room;
+  if (!room || !fleetMap.layoutUsable) throw new Error('A verified room map is required.');
+  if (Object.values(drones).filter(drone => drone.connected).length !== ids.length) {
+    throw new Error('Connect only the drone(s) selected for this demo before takeoff.');
+  }
+  const plan = { ids: ids.slice(), tag_ids: tags.slice(), frame: room.frame,
+    anchors: room.anchors.map(a => ({ ...a })), generations: {}, starts: {}, points: [] };
+  for (const id of ids) {
+    const drone = drones[id];
+    if (!drone.connected || !drone.fusedPose || drone.fusedReceivedAt === null ||
+        Date.now() - drone.fusedReceivedAt > 500 || !fleetMap.hasMatchingReport(id) ||
+        !Number.isInteger(drone.fusionGeneration) || drone.field('flightMode').textContent !== 'DISARMED') {
+      throw new Error(id + ' needs fresh localization in the shared room and DISARMED mode.');
+    }
+    const p = drone.fusedPose.pose.pose.position;
+    plan.starts[id] = [p.x, p.y];
+    plan.generations[id] = drone.fusionGeneration;
+  }
+  for (const id of tags) {
+    const observations = ids.flatMap(name => {
+      const report = fleetMap.waypointReports[name], drone = drones[name];
+      if (!report || report.frame !== plan.frame || report.generation !== drone.fusionGeneration) return [];
+      const now = Math.max(drone.fusedStamp + (Date.now() - drone.fusedReceivedAt) / 1000,
+        report.stamp + (Date.now() - report.receivedAt) / 1000);
+      return report.tags.filter(tag => tag.id === id && tag.count >= 3 && Number.isFinite(tag.observedAt) &&
+        tag.observedAt > 0 && now - tag.observedAt >= 0 && now - tag.observedAt <= 120);
+    });
+    if (!observations.length) throw new Error('Tag ' + id + ' needs a confirmed observation within the last 120 seconds.');
+    if (observations.some(tag => Math.hypot(tag.x - observations[0].x, tag.y - observations[0].y) > .15)) {
+      throw new Error('Drones disagree on the position of tag ' + id + '.');
+    }
+    const tag = observations.sort((a, b) => b.observedAt - a.observedAt)[0];
+    plan.points.push({ id, x: tag.x, y: tag.y, stamp: tag.observedAt });
+  }
+  return plan;
+}
+
+function awaitSyncStart(ids, stages = [], plan = null) {
   routineFlight = null;
-  syncStart = ids && { ids: ids.slice(), stages: stages.slice(), dispatched: false,
+  syncStart = ids && { ids: ids.slice(), stages: stages.slice(), plan, dispatched: false,
     run: Date.now().toString(36) + '-' + (++routineSerial), expires: Date.now() + 120000 };
   if (ids) ids.forEach(id => { drones[id].routineReadyAt = null; });
 }
@@ -1185,13 +1235,27 @@ function releaseSyncStart() {
       Date.now() - drone.routineReadyAt >= 0 && Date.now() - drone.routineReadyAt <= 500 &&
       drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
       Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
+  if (syncStart.plan) {
+    // Recheck just before release; readiness can take a while. Keep the original
+    // frozen coordinates rather than adopting a different path while waiting.
+    try {
+      const current = makeAprilTagPlan(syncStart.ids, syncStart.plan.tag_ids);
+      if (current.ids.some(id => current.generations[id] !== syncStart.plan.generations[id] ||
+          Math.hypot(...current.starts[id].map((v, i) => v - syncStart.plan.starts[id][i])) > .06) ||
+          current.points.some((p, i) => Math.hypot(p.x - syncStart.plan.points[i].x, p.y - syncStart.plan.points[i].y) > .06) ||
+          syncStart.plan.points.some(p => group.some(d => d.fusedStamp - p.stamp > 120))) {
+        throw new Error('Tag route changed while waiting; run again after checking the map.');
+      }
+    } catch (error) { awaitSyncStart(null); feedback(error.message); return; }
+  }
   publishCoordinationSelection();
   const run = syncStart.run;
+  const plan = syncStart.plan;
   if (syncStart.stages.length) {
     routineFlight = { ids: syncStart.ids, run, stages: syncStart.stages, ready: {} };
   }
   syncStart = null;
-  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run, stage: 'start' }) }));
+  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run, stage: 'start', ...(plan ? { plan } : {}) }) }));
   group.forEach(drone => drone.publish('routineStart', {}));
   feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
 }

@@ -50,18 +50,19 @@ class AprilTagGeometryTests(unittest.TestCase):
 class AprilTagMappingTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
-        self.maps = []
+        self.maps, self.waypoints = [], []
         ros = ModuleType('rospy')
         ros.get_param = lambda name, default: default
-        ros.Time = NS(now=lambda: Stamp(self.now))
+        ros.Time = NS(now=lambda: Stamp(self.now), from_sec=Stamp)
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
-        ros.Publisher = lambda *args, **kwargs: NS(
-            publish=lambda msg: self.maps.append(copy.deepcopy(msg)))
+        ros.Publisher = lambda topic, *args, **kwargs: NS(
+            publish=lambda msg: (self.waypoints if topic.endswith('/waypoints') else self.maps).append(copy.deepcopy(msg)))
         modules = {'rospy': ros}
         for package, messages in [
                 ('geometry_msgs', {'Point': NS, 'PoseWithCovarianceStamped': Pose}),
                 ('pidrone_pkg', {'TagDetection': NS, 'TagMap': lambda: NS(
-                    header=NS(), tag_ids=[], zones=[], positions=[], sample_counts=[])}),
+                    header=NS(), tag_ids=[], zones=[], positions=[], sample_counts=[]),
+                    'TagWaypointMap': lambda: NS(observed_at=[])}),
                 ('sensor_msgs', {'CameraInfo': NS}),
                 ('std_msgs', {'Bool': NS, 'UInt32': NS})]:
             modules[package] = ModuleType(package)
@@ -102,6 +103,8 @@ class AprilTagMappingTests(unittest.TestCase):
         result = self.maps[-1]
         self.assertEqual(result.header.frame_id, 'map')
         self.assertEqual(result.sample_counts, [3])
+        self.assertAlmostEqual(self.waypoints[-1].observed_at[0].to_sec(), 100.1)
+        self.assertEqual(self.waypoints[-1].generation, 1)
         point = result.positions[0]
         np.testing.assert_allclose((point.x, point.y, point.z),
                                    (1, 2 + 1/math.sqrt(3), 0), atol=1e-7)
@@ -176,8 +179,11 @@ class AprilTagMappingTests(unittest.TestCase):
             sample()
         self.assertAlmostEqual(mapped_x(), 1)
         self.assertEqual(self.maps[-1].sample_counts, [3])
-        sample(10)  # A lone outlier must not move the marker.
+        confirmed_at = self.waypoints[-1].observed_at[0].to_sec()
+        sample(10)  # A lone outlier must not move or freshen the marker.
         self.assertAlmostEqual(mapped_x(), 1)
+        self.node.publish_map()  # Another tag could cause a snapshot publication.
+        self.assertEqual(self.waypoints[-1].observed_at[0].to_sec(), confirmed_at)
         for _ in range(3):
             sample()
         self.assertAlmostEqual(mapped_x(), 1)

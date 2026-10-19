@@ -264,6 +264,10 @@ class RoutineControlTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Downward range is missing/stale'):
             drone.wait_for_start()
         drone.mode_pub.publish.assert_not_called()
+        self.advance_until(release_at=.01)
+        with self.assertRaisesRegex(RuntimeError, 'bad waypoint plan'):
+            drone.takeoff(preflight=mock.Mock(side_effect=RuntimeError('bad waypoint plan')))
+        drone.mode_pub.publish.assert_not_called()
 
     def test_stage_wait_holds_position_and_requires_the_current_run_release(self):
         drone = self.drone
@@ -321,6 +325,122 @@ class RoutineControlTest(unittest.TestCase):
         self.nodes.get_node_names.return_value = ['/state_estimator', '/fusion_localization']
         with self.assertRaisesRegex(RuntimeError, 'legacy /state_estimator'):
             self.drone.ready()
+
+    def test_absolute_waypoint_keeps_room_target_and_checks_reference_during_motion(self):
+        drone = self.drone
+        drone.mode, drone.height = 'FLYING', .5
+        drone.battery_at = self.fusion.now
+        pose = copy.deepcopy(drone.fused_pose)
+        pose.pose.pose.orientation.x, pose.pose.pose.orientation.y, pose.pose.pose.orientation.z, pose.pose.pose.orientation.w = quaternion(yaw=math.pi / 2)
+        drone._fused_received(pose)
+        commands = []
+        def tick(seconds):
+            command = self.fusion.messages['/pidrone/desired/twist'][-1]
+            commands.append((command.linear.x, command.linear.y))
+            pose.pose.pose.position.y += .1
+            drone._fused_received(pose)
+        self.ros.sleep = tick
+        check = mock.Mock()
+        drone.move_to(1, 2.2, 'map', check=check)
+        self.assertTrue(all(x > 0 and abs(y) < 1e-8 for x, y in commands))
+        self.assertGreaterEqual(check.call_count, 2)
+        with self.assertRaisesRegex(RuntimeError, 'Waypoint frame'):
+            drone.move_to(1, 2.2, 'other')
+        with self.assertRaisesRegex(RuntimeError, 'room changed'):
+            drone.move_to(1, 3, 'map', check=mock.Mock(side_effect=RuntimeError('room changed')))
+        final = self.fusion.messages['/pidrone/desired/twist'][-1]
+        self.assertEqual((final.linear.x, final.linear.y), (0, 0))
+
+    def test_tag_path_freezes_distinct_targets_and_rejects_stale_or_changed_map(self):
+        sys.modules['pidrone_pkg.msg'].TagDetection = NS
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'apriltag_path.py')
+        namespace = runpy.run_path(script)
+        cls = namespace['AprilTagPath']
+        cls.prepare.__globals__['time'] = NS(time=lambda: self.fusion.now)
+        anchors = [dict(name=str(i), x=x, y=y, z=2.) for i, (x, y) in
+                   enumerate([(0., 0.), (3., 0.), (3., 6.), (0., 6.)])]
+        self.drone.routine_plan = dict(ids=['drone1', 'drone2'], tag_ids=[1, 2], frame='map',
+            generations={'drone1': 7, 'drone2': 7}, anchors=anchors,
+            starts={'drone1': [1., 2.], 'drone2': [1.75, 2.]},
+            points=[dict(id=1, x=1.5, y=3., stamp=100.), dict(id=2, x=1.5, y=4., stamp=100.)])
+        settings = dict(enabled=True, min_distance=.6, max_distance=.9, nominal_separation_m=.75,
+                        drone_id='drone1')
+        self.fusion.params['/pidrone/coordination'] = settings
+        with mock.patch.dict(os.environ, {'ROS_MASTER_URI': 'http://drone1.local:11311'}):
+            path = cls(self.drone, [1, 2], 'both')
+        path._generation(NS(data=7))
+        path._layout(NS(header=NS(frame_id='map', stamp=Stamp(100.)), anchor_ids=[a['name'] for a in anchors],
+                        positions=[NS(x=a['x'], y=a['y'], z=a['z']) for a in anchors]))
+        path._detection(NS(header=NS(stamp=Stamp(100.)), camera_online=True, tag_ids=[1]))
+        path.prepare()
+        self.assertEqual(path.targets, [(1.125, 3.), (1.125, 4.)])
+        path.own = settings['drone_id'] = 'drone2'
+        self.drone.fused_pose.pose.pose.position.x = 1.75
+        path.prepare()
+        self.assertEqual(path.targets, [(1.875, 3.), (1.875, 4.)])
+        path.mode = 'single'
+        with self.assertRaisesRegex(RuntimeError, 'participants'):
+            path.prepare()
+        self.drone.routine_plan['ids'] = ['drone2']
+        path.prepare()
+        self.assertEqual(path.targets, [(1.5, 3.), (1.5, 4.)])
+        self.drone.routine_plan['points'][0]['stamp'] = -30.
+        with self.assertRaisesRegex(RuntimeError, 'stale'):
+            path.prepare()
+        self.drone.routine_plan['points'][0]['stamp'] = 100.
+        self.drone.routine_plan['points'][0]['x'] = .01
+        with self.assertRaisesRegex(RuntimeError, 'boundary'):
+            path.prepare()
+        path._generation(NS(data=8))
+        with self.assertRaisesRegex(RuntimeError, 'reference changed'):
+            path.check()
+
+    def test_apriltag_routine_sequences_checkpoints_and_lands_if_confirmation_fails(self):
+        control, path_module = ModuleType('drone_controller'), ModuleType('apriltag_path')
+        control.Drone, path_module.AprilTagPath = mock.Mock(), mock.Mock()
+        path_module.tag_ids = lambda text: [int(i) for i in text.split(',')]
+        drone, route = control.Drone.return_value, path_module.AprilTagPath.return_value
+        drone.mode = 'FLYING'
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'prototype-1-apriltag.py')
+        with mock.patch.dict(sys.modules, {'drone_controller': control, 'apriltag_path': path_module}), \
+                mock.patch.object(sys, 'argv', [script, '--fly', '--drones', 'both', '--tags', '1,2']):
+            main = runpy.run_path(script)['main']
+            main()
+            drone.takeoff.assert_called_once_with(hold_xy=True, synchronized_stages=True,
+                                                  preflight=route.prepare, check=route.check)
+            self.assertEqual(route.visit.call_args_list, [mock.call(0), mock.call(1)])
+            self.assertEqual([call.args[0] for call in drone.wait_for_stage.call_args_list], ['tag-0', 'tag-1', 'land'])
+            drone.reset_mock()
+            route.visit.side_effect = RuntimeError('tag not visible')
+            with self.assertRaisesRegex(RuntimeError, 'tag not visible'):
+                main()
+            drone.land.assert_called_once_with(hold_xy=True)
+            drone.wait_for_stage.assert_called_once_with('tag-0', check=route.check)
+
+    def test_tag_checkpoint_requires_a_new_visible_frame_and_times_out_in_hold(self):
+        sys.modules['pidrone_pkg.msg'].TagDetection = NS
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'apriltag_path.py')
+        cls = runpy.run_path(script)['AprilTagPath']
+        cls.visit.__globals__['time'] = NS(time=lambda: self.fusion.now)
+        path = cls.__new__(cls)
+        path.drone, path.check = mock.Mock(), mock.Mock()
+        path.plan, path.targets, path.ids = {'frame': 'map'}, [(1., 3.)], [4]
+        path.drone._hold_pose.return_value = self.drone.fused_pose
+        def hover(seconds):
+            self.fusion.now += seconds
+            self.fusion.ros_now += seconds
+        path.drone.hover.side_effect = hover
+        path.detection = NS(camera_online=True, tag_ids=[4], header=NS(stamp=Stamp(self.fusion.ros_now)))
+        with self.assertRaisesRegex(RuntimeError, 'not visible'):
+            path.visit(0)  # A tag visible before arrival cannot confirm a checkpoint.
+        path.drone.lock_xy.assert_called_once()
+        path.drone.reset_mock()
+        def fresh(seconds):
+            hover(seconds)
+            path.detection.header.stamp = Stamp(self.fusion.ros_now)
+        path.drone.hover.side_effect = fresh
+        path.visit(0)
+        self.assertEqual(path.drone.hover.call_args_list, [mock.call(.1), mock.call(1.)])
 
 
 if __name__ == '__main__':
