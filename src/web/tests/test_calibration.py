@@ -140,6 +140,27 @@ class CoordinatorTest(unittest.TestCase):
 
 
 class JournalTest(unittest.TestCase):
+    def test_windows_lock_contention_leaves_saved_layout_untouched(self):
+        windows = NS(LK_NBLCK=2, locking=mock.Mock())
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'Room café' / 'calibration.json'
+            # Replace only this module's os reference; pathlib still uses the host OS.
+            with mock.patch('calibration.calibration_service.os', mock.Mock(wraps=os, name='os')) as platform, \
+                    mock.patch.dict(sys.modules, {'msvcrt': windows}):
+                platform.name = 'nt'
+                journal = CalibrationJournal(path)
+                try:
+                    windows.locking.assert_called_once_with(journal.lock_file.fileno(), windows.LK_NBLCK, 1)
+                    journal.save({'label': 'Room café'})
+                    saved = path.read_bytes()
+                    windows.locking.side_effect = OSError('already locked')
+                    with self.assertRaisesRegex(ValueError, 'Another laptop calibration service'):
+                        CalibrationJournal(path)
+                    self.assertEqual(path.read_bytes(), saved)
+                finally:
+                    journal.close()
+                self.assertTrue(journal.lock_file.closed)
+
     def test_invalid_state_releases_lock_for_recovery(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / 'calibration.json'

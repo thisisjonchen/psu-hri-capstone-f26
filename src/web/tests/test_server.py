@@ -1,5 +1,6 @@
 """Hardware-free checks for the laptop dashboard server."""
 import mimetypes
+import subprocess
 import sys
 import threading
 import unittest
@@ -12,6 +13,20 @@ import peer_relay
 
 
 class StaticFilesTest(unittest.TestCase):
+    def test_server_import_does_not_require_drone_serial_modules(self):
+        result = subprocess.run([sys.executable, '-c', '''
+import importlib.abc
+import sys
+class NoDroneSerial(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('serial', 'fcntl', 'termios'):
+            raise ModuleNotFoundError('Unavailable on laptop: ' + fullname)
+sys.meta_path.insert(0, NoDroneSerial())
+import server
+'''], cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_browser_assets_override_incorrect_system_mime_types(self):
         handler = DashboardHandler.__new__(DashboardHandler)
         with mock.patch.dict(mimetypes.types_map, {'.js': 'text/plain', '.css': 'text/plain',
@@ -43,6 +58,9 @@ class PeerRelayLifecycleTest(unittest.TestCase):
             with mock.patch.object(stop, 'wait', side_effect=wait):
                 peer_relay.run(stop)
         self.assertEqual(connect.call_count, 6)
+        for call in connect.call_args_list:
+            self.assertIn('proxy', call.kwargs)
+            self.assertIsNone(call.kwargs['proxy'])
         clients[0].send.assert_not_called()
         for index, client in enumerate(clients[1:]):
             client.send.assert_called_once_with({
