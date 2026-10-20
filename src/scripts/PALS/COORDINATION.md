@@ -109,8 +109,12 @@ The setting is shared by dashboard tabs and resets to on when the laptop server 
 Dashboard Execute now waits for fresh readiness from every selected routine before
 sending its start releases. This is independent of the distance guard and does not
 start the peer relay. Launch failure, disconnect, Stop or Disarm cancels a pending
-release. `prototype-1-forward.py` additionally waits for all Execute participants
-before forward movement and landing. Stage messages on `/pidrone/routine/stage_ready`
+release. `prototype-1-forward.py` shares only this initial start. Each drone begins
+forward movement one second after its own FLYING confirmation, without waiting for
+a height threshold or its partner, and lands when its move finishes. The altitude
+target remains 0.25 m. Timing is subject to controller and network scheduling.
+The AprilTag routine still synchronizes waypoint stages.
+Stage messages on `/pidrone/routine/stage_ready`
 and `/pidrone/routine/stage_release` use `std_msgs/String` JSON with `run` and `stage`;
 the dashboard assigns a fresh run ID at start and checks readiness age and FLYING mode.
 The existing Empty start/ready topics remain unchanged. Waiting drones hold X/Y and

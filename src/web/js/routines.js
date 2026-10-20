@@ -237,7 +237,7 @@ class RoutineRunner {
     const args = this.args.value.trim();
     const targets = this.active;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
-    let stages = script === 'prototype-1-forward.py' ? ['forward', 'land'] : [], plan = null;
+    let stages = [], plan = null;
     if (script === 'prototype-1-apriltag.py') {
       try {
         const options = aprilTagOptions(args);

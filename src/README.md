@@ -24,7 +24,7 @@ Assuming that the base environment is already set up on the DD24 by following th
 4. Place each drone disarmed, stationary, and facing the top of the map (+Y).
 5. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
 6. For paired flight, connect both drones before arming. The dashboard server automatically relays peer telemetry once both ROS connections are available.
-7. Under **Routines**, select a script, enter its arguments, and click **Execute**. For `prototype-1-forward.py`, use `--fly --distance 0.25` on both drones to take off, move forward 0.25 m, and begin landing together. See [coordination](scripts/PALS/COORDINATION.md) for paired-flight details.
+7. Under **Routines**, select a script, enter its arguments, and click **Execute**. For `prototype-1-forward.py`, use `--fly --distance 0.25`: both start together, then each climbs for one second after FLYING is confirmed, moves forward 0.25 m, and lands independently. See [coordination](scripts/PALS/COORDINATION.md) for paired-flight details.
 8. Read all instructions carefully and be ready to disarm at all times. Press Esc to leave a terminal, then Space to disarm all connected drones.
 
 Use **Restart nodes** after updating code, or **Align +Y** to re-align heading. Keep the drones disarmed, stationary, and facing +Y for either action.

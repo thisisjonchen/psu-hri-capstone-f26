@@ -301,18 +301,19 @@ class RoutineControlTest(unittest.TestCase):
             drone.takeoff(preflight=mock.Mock(side_effect=RuntimeError('bad waypoint plan')))
         drone.mode_pub.publish.assert_not_called()
 
-    def test_takeoff_can_continue_at_height_without_changing_altitude_target(self):
+    def test_takeoff_can_continue_after_one_second_without_changing_altitude_target(self):
         drone = self.drone
         drone.wait_for_start = mock.Mock()
         self.globals['Mode'] = lambda name: NS(mode=name)
         drone.mode_pub.publish = drone._mode_received
-        for threshold in (.20, None):
-            with self.subTest(continue_height=threshold):
+        for delay in (1.0, None):
+            with self.subTest(continue_after=delay):
                 drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
                 drone.voltage = 16.
                 drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
-                heights = iter([.19, .21, .32] + [.25] * 15)
+                heights = iter([.10] * 20 if delay else [.19, .21, .32] + [.25] * 15)
                 observed = []
+                flying_seconds = [0.]
 
                 def tick(seconds):
                     self.fusion.now += seconds
@@ -322,16 +323,18 @@ class RoutineControlTest(unittest.TestCase):
                     pose.header.stamp = Stamp(self.fusion.ros_now)
                     drone._fused_received(pose)
                     if drone.mode == 'FLYING':
+                        flying_seconds[0] += seconds
                         drone.height = next(heights)
                         observed.append(drone.height)
 
                 self.ros.sleep = tick
-                drone.takeoff(hold_xy=True, continue_height=threshold)
+                drone.takeoff(hold_xy=True, continue_after=delay)
                 self.assertEqual(drone.target_height, .25)
                 self.assertEqual(drone.mode, 'FLYING')
                 self.assertEqual(drone.xy_anchor, (1, 2))
-                if threshold is not None:
-                    self.assertEqual(observed, [.19, .21])
+                if delay is not None:
+                    self.assertAlmostEqual(flying_seconds[0], 1.0)
+                    self.assertEqual(drone.height, .10, 'do not wait for the old 0.20 m threshold')
                 else:
                     self.assertEqual(drone.height, .25)
                     self.assertGreaterEqual(observed.count(.25), 11)
@@ -364,7 +367,7 @@ class RoutineControlTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Flight mode changed'):
             drone.wait_for_stage('land')
 
-    def test_prototype_sequences_stages_and_lands_on_movement_failure(self):
+    def test_prototype_moves_after_timed_takeoff_and_lands_without_stage_waits(self):
         module = ModuleType('drone_controller')
         module.Drone = mock.Mock()
         drone = module.Drone.return_value
@@ -376,18 +379,18 @@ class RoutineControlTest(unittest.TestCase):
             main = runpy.run_path(script)['main']
             main()
             self.assertEqual([call[0] for call in drone.mock_calls],
-                             ['ready', 'takeoff', 'wait_for_stage', 'unlock_xy',
-                              'move_forward', 'lock_xy', 'wait_for_stage', 'land'])
-            self.assertEqual(drone.wait_for_stage.call_args_list, [mock.call('forward'), mock.call('land')])
+                             ['ready', 'takeoff', 'unlock_xy',
+                              'move_forward', 'lock_xy', 'land'])
+            drone.wait_for_stage.assert_not_called()
             drone.takeoff.assert_called_once_with(
-                hold_xy=True, synchronized_stages=True, continue_height=.20)
+                hold_xy=True, continue_after=1.0)
             drone.move_forward.assert_called_once_with(.3, speed_limit=.5, timeout=15.)
             drone.reset_mock()
             drone.move_forward.side_effect = RuntimeError('movement failed')
             with self.assertRaisesRegex(RuntimeError, 'movement failed'):
                 main()
             drone.land.assert_called_once_with(hold_xy=True)
-            drone.wait_for_stage.assert_called_once_with('forward')
+            drone.wait_for_stage.assert_not_called()
 
     def test_ready_uses_current_ground_height_and_rejects_legacy_publisher(self):
         self.drone.mode = 'DISARMED'

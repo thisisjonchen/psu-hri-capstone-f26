@@ -1307,7 +1307,7 @@ test('tag route planning requires per-tag age, matching maps, and freezes the sa
   assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
 });
 
-test('AprilTag routine mode controls participant count and sets one synchronized stage per tag', async () => {
+test('forward shares only the start while AprilTag synchronizes each waypoint', async () => {
   let released, error, sends = [];
   const context = vm.createContext({ document: { addEventListener() {} },
     makeAprilTagPlan(ids, tags) { return { ids, tags }; },
@@ -1315,10 +1315,10 @@ test('AprilTag routine mode controls participant count and sets one synchronized
     confirmSyncStart() {}, feedback(message) { error = message; } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Runner = vm.runInContext('RoutineRunner', context);
-  for (const mode of ['single', 'both']) {
+  for (const mode of ['forward', 'single', 'both']) {
     const runner = Object.create(Runner.prototype);
-    Object.assign(runner, { select: { value: 'prototype-1-apriltag.py' },
-      args: { value: '--fly --drones ' + mode + ' --tags 1,2' },
+    Object.assign(runner, { select: { value: mode === 'forward' ? 'prototype-1-forward.py' : 'prototype-1-apriltag.py' },
+      args: { value: mode === 'forward' ? '--fly --distance .3' : '--fly --drones ' + mode + ' --tags 1,2' },
       terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: true, ready: true,
         execute() { sends.push(id); } })),
       async run(label, targets, action) { return Promise.allSettled(targets.map(action)); } });
@@ -1329,7 +1329,8 @@ test('AprilTag routine mode controls participant count and sets one synchronized
       runner.terminals[0].enabled = false; // Single works with Drone 2 as well.
     }
     await runner.execute();
-    assert.deepEqual(Array.from(released.stages), ['tag-0', 'tag-1', 'land']);
+    assert.deepEqual(Array.from(released.stages), mode === 'forward' ? [] : ['tag-0', 'tag-1', 'land']);
+    assert.deepEqual(Array.from(released.ids), mode === 'single' ? ['drone2'] : ['drone1', 'drone2']);
     assert.equal(sends.length, mode === 'single' ? 1 : 2);
     sends = [];
     if (mode === 'both') {

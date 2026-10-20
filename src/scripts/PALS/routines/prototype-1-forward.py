@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Take off together, move forward by --distance meters, then begin landing together."""
+"""Start together, climb for one second, then move forward and land independently."""
 
 import argparse
 import math
@@ -27,14 +27,12 @@ def main():
     drone = Drone()
     drone.ready()
     try:
-        drone.takeoff(hold_xy=True, synchronized_stages=True, continue_height=0.20)
-        drone.wait_for_stage('forward')
+        drone.takeoff(hold_xy=True, continue_after=1.0)
         drone.unlock_xy()
         rospy.loginfo('Moving forward %.2f m', args.distance)
         drone.move_forward(args.distance, speed_limit=0.5,
                            timeout=max(15.0, 20 * args.distance + 5.0))
         drone.lock_xy()
-        drone.wait_for_stage('land')
     finally:
         # On failure, use the existing landing recovery without waiting for a peer.
         if drone.mode == 'FLYING':
