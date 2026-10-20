@@ -177,8 +177,6 @@ class Drone(object):
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
         publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
                       self.position_mode_pub, self.heartbeat_pub)
-        ground_candidate = None
-        candidate_at = 0
         reason = 'Waiting for flight nodes'
         reported_reason = None
         last_report = 0
@@ -195,18 +193,12 @@ class Drone(object):
                 self._check_battery()
                 if self.height > 0.12:
                     raise RuntimeError('Waiting for ground height <= 0.12 m (received: {:.3f})'.format(self.height))
-                now = time.time()
-                if ground_candidate is None or abs(self.height - ground_candidate) > 0.01:
-                    ground_candidate, candidate_at = self.height, now
-                elif now - candidate_at >= 0.5:
-                    if self.voltage < self.MIN_START_V:
-                        raise ValueError('Battery voltage is too low to start ({:.1f} V)'.format(self.voltage))
-                    self.ground_height = self.height
-                    rospy.loginfo('Flight nodes ready; ground height %.3f m', self.height)
-                    return
-                reason = 'Waiting for steady ground height'
+                if self.voltage < self.MIN_START_V:
+                    raise ValueError('Battery voltage is too low to start ({:.1f} V)'.format(self.voltage))
+                self.ground_height = self.height
+                rospy.loginfo('Flight nodes ready; ground height %.3f m', self.ground_height)
+                return
             except RuntimeError as error:
-                ground_candidate = None
                 reason = str(error)
             if reason != reported_reason or time.time() - last_report >= 5.0:
                 rospy.loginfo('%s', reason)

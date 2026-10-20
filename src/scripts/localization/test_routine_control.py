@@ -320,11 +320,24 @@ class RoutineControlTest(unittest.TestCase):
             drone.land.assert_called_once_with(hold_xy=True)
             drone.wait_for_stage.assert_called_once_with('forward')
 
-    def test_ready_rejects_a_competing_legacy_state_publisher(self):
+    def test_ready_uses_current_ground_height_and_rejects_legacy_publisher(self):
         self.drone.mode = 'DISARMED'
         self.nodes.get_node_names.return_value = ['/state_estimator', '/fusion_localization']
         with self.assertRaisesRegex(RuntimeError, 'legacy /state_estimator'):
             self.drone.ready()
+        self.nodes.get_node_names.return_value = ['/fusion_localization']
+        drone = self.drone
+        for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub,
+                          drone.position_mode_pub, drone.heartbeat_pub):
+            publisher.get_num_connections = lambda: 1
+        drone.voltage, drone.battery_at = 16, self.fusion.now
+        self.globals['time'].sleep = mock.Mock(side_effect=AssertionError('Unexpected readiness wait'))
+        for height in (.065, .04, .063):
+            drone.height = height
+            drone.ready()
+            self.assertEqual(drone.ground_height, height)
+        self.globals['time'].sleep.assert_not_called()
+        self.assertEqual(self.fusion.messages['/pidrone/desired/mode'], [])
 
     def test_absolute_waypoint_keeps_room_target_and_checks_reference_during_motion(self):
         drone = self.drone
