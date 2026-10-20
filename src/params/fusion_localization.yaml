@@ -1,4 +1,5 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
+# Floor tag 5, printed top toward +Y, corrects yaw in all modes when visible.
 # Experimental: sensor replay has not established a flight benefit.
 # Enabled for a controlled flight trial; startup bias is required before use.
 use_imu_acceleration: true

@@ -7,6 +7,8 @@
   <group ns="$(arg namespace)">
     <node pkg="pidrone_pkg" type="fusion_localization_node" name="fusion_localization" output="screen">
       <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
+      <!-- Use the mapper's camera mounting. -->
+      <rosparam command="load" file="$(find pidrone_pkg)/params/apriltag_mapping.yaml" ns="tag_camera"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="tof_offset_z" value="$(arg tof_offset_z)"/>

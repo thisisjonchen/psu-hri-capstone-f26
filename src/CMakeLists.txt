@@ -54,6 +54,7 @@ add_message_files(
   StateGroundTruth.msg
   UkfStats.msg
   TagDetection.msg
+  TagCorners.msg
   TagMap.msg
   TagWaypointMap.msg
   AnchorLayout.msg

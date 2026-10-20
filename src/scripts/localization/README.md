@@ -124,12 +124,23 @@ ROS node. Once fresh disarmed-mode and IMU data arrive, the node automatically s
 `/fusion_localization/room_yaw_offset` for inspection. Room position is unavailable
 until this startup alignment completes and UWB localization is ready.
 
-Alignment happens once per node start. Subsequent turns, disarming, and UWB gaps
-keep that offset. While disarmed and facing +Y, click **Align +Y** to restart fusion
-and align again. No routine or
-class calibration call is needed; the old manual launch/environment offset is
-removed. ToF still supplies height, and UWB still corrects room X/Y. This startup
-alignment does not correct ongoing IMU yaw drift.
+**Floor tag 5 corrects yaw in every mode, including flight.** Keep it fixed and
+flat, with the top of the standard
+[printed tag](https://github.com/AprilRobotics/apriltag-imgs/blob/master/tag36h11/tag36_11_00005.png)
+pointing toward map +Y. Fusion uses camera calibration, the mounting angles in
+`apriltag_mapping.yaml`, and IMU samples matched to the image time.
+
+Correction requires three consistent, fresh observations and is limited to
+**2 degrees/second** (at most 0.2 degrees per observation). Losing the tag keeps
+the last offset; hold targets and UWB position stay unchanged. This corrects
+estimated heading, not a commanded yaw angle. The limits are not flight-validated.
+
+Rebuild with `catkin_make` for the new `TagCorners` message, then restart the
+detector and fusion while disarmed. The existing facing-+Y startup alignment
+remains the fallback. **Align +Y** restarts fusion to repeat that alignment.
+Check `tag_yaw_status`, `tag_yaw_stamp`, and `room_yaw_offset` in fusion diagnostics.
+The detector sends fresh corners on `/pidrone/apriltag/reference_corners`;
+the existing detections topic is unchanged.
 
 The node also measures acceleration bias once, over at least two seconds of
 stationary, disarmed IMU samples. Keep the drone still until it logs

@@ -47,6 +47,24 @@ def state():
 
 
 class FusionMathTest(unittest.TestCase):
+    def test_yaw_correction_preserves_room_state_and_sensor_age(self):
+        f = PlanarFusion(yaw_offset=.3)
+        f.predict(10)
+        f.update_uwb((1, 2), np.eye(2)*.01, 10)
+        f.update_acceleration((.1, -.2), 10)
+        f.update_flow((.1, .1), .01, 10)
+        f.predict(10.1)
+        room, velocity, covariance, odom = f.room.copy(), f.room_velocity.copy(), f.covariance.copy(), f.odom.copy()
+        flow = f.flow_velocity.copy()
+        f.correct_yaw(.2)
+        for actual, expected in ((f.room, room), (f.room_velocity, velocity), (f.covariance, covariance), (f.odom, odom)):
+            np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_allclose(f.flow_velocity, rotate(flow, .2))
+        np.testing.assert_allclose(f.accelerations[0][1], rotate((.1, -.2), .2))
+        self.assertEqual((f.uwb_stamp, f.flow_stamp, f.accelerations[0][0], f.stamp), (10, 10, 10, 10.1))
+        expected = .8*velocity + .2*(rotate(flow, .2) + rotate((.1, -.2), .2)*.1)
+        np.testing.assert_allclose(rotate(f.velocity, f.yaw_offset), expected)
+
     def test_acceleration_axes_include_tilt_without_subtracting_gravity_twice(self):
         np.testing.assert_allclose(horizontal_acceleration((1, 0, 0), (0, 0, 0)), (0, -1), atol=1e-12)
         np.testing.assert_allclose(horizontal_acceleration((0, 1, 0), (0, 0, math.pi/2)), (0, 1), atol=1e-12)
@@ -236,6 +254,8 @@ class FusionNodeTest(unittest.TestCase):
             setattr(sys.modules['std_msgs.msg'], name, NS)
         sys.modules['nav_msgs.msg'].Odometry = lambda: NS(header=NS(), child_frame_id='')
         sys.modules['pidrone_pkg.msg'].State = state
+        sys.modules['pidrone_pkg.msg'].TagCorners = NS
+        sys.modules['sensor_msgs.msg'].CameraInfo = NS
         sys.modules['pidrone_pkg.msg'].Mode = sys.modules['pidrone_pkg.msg'].RC = NS
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
@@ -257,6 +277,104 @@ class FusionNodeTest(unittest.TestCase):
             linear_acceleration=NS(**dict(zip(('x', 'y', 'z'), acceleration))),
             linear_acceleration_covariance=[0 if acceleration_valid else -1]*9,
             orientation_covariance=[0]*9, header=NS(stamp=Stamp(self.ros_now))))
+
+    def tag_reference(self):
+        from localization.apriltag_geometry import camera_rotation
+        self.node.tag_rotation = camera_rotation(90)
+        self.node.camera_callback(NS(header=NS(frame_id='camera'), width=320, height=240,
+            K=[300, 0, 160, 0, 300, 120, 0, 0, 1], D=[0]*5, distortion_model='plumb_bob'))
+        return NS(header=NS(frame_id='camera', stamp=Stamp(self.ros_now)), tag_id=5,
+                  image_width=320, image_height=240,
+                  corner_x=[130, 190, 190, 130], corner_y=[90, 90, 150, 150])
+
+    def test_tag5_corrects_in_all_modes_without_jumps_or_losing_hold_and_freezes_on_loss(self):
+        controller = self.controller()
+        controller.room_target = (1.2, 2.1, .5)
+        generation, offset = self.node.generation, self.node.filter.yaw_offset
+        reference = self.tag_reference()
+        for mode in ('DISARMED', 'ARMED', 'FLYING'):
+            for i in range(6):
+                self.ros_now += .1
+                self.refresh(yaw=.2)  # IMU drift; tag orientation remains unchanged.
+                self.node.mode_callback(NS(mode=mode))
+                self.uwb()
+                self.node.step()
+                reference.header.stamp = Stamp(self.ros_now)
+                before = self.node.filter.yaw_offset
+                room, odom = self.node.filter.room.copy(), self.node.filter.odom.copy()
+                self.node.tag_callback(reference)
+                delta = self.node.filter.yaw_offset - before
+                self.assertLessEqual(abs(delta), math.radians(.2)+1e-12)
+                if i >= 2:
+                    self.assertLess(delta, 0)
+                np.testing.assert_array_equal(self.node.filter.room, room)
+                np.testing.assert_array_equal(self.node.filter.odom, odom)
+                self.assertEqual(self.node.generation, generation)
+                after = self.node.filter.yaw_offset
+                self.node.tag_callback(reference)
+                self.assertEqual(self.node.filter.yaw_offset, after, 'cached frame must not correct twice')
+                self.node.step()
+                controller.current_state_callback(self.messages['pidrone/state'][-1])
+                controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
+                controller.room_generation_callback(NS(data=self.node.generation))
+                self.assertEqual(controller.room_target, (1.2, 2.1, .5))
+        self.assertLess(self.node.filter.yaw_offset, offset)
+        offset = self.node.filter.yaw_offset
+        for _ in range(8):
+            self.ros_now += .1
+            self.refresh(yaw=.3)
+            self.uwb()
+            self.node.step()
+        self.node.tag_callback(reference)  # Delayed stale observation.
+        self.assertEqual(self.node.filter.yaw_offset, offset)
+        self.assertEqual(self.params['~room_yaw_offset'], offset)
+
+    def test_tag_yaw_rejects_bad_observations_and_matches_historical_imu_across_wrap(self):
+        reference = self.tag_reference()
+        offset = self.node.filter.yaw_offset
+        # Every invalid condition is repeated across enough frames to calibrate.
+        for field, bad in [('tag_id', 4), ('image_width', 240), ('corner_x', [0]*3),
+                           ('corner_x', [float('nan')]*4), ('corner_y', [-1]*4)]:
+            original = getattr(reference, field)
+            setattr(reference, field, bad)
+            for _ in range(3):
+                self.ros_now += .02
+                self.refresh()
+                reference.header.stamp = Stamp(self.ros_now)
+                self.node.tag_callback(reference)
+            self.assertEqual(self.node.filter.yaw_offset, offset)
+            setattr(reference, field, original)
+        for focal_length, model in ((0, 'plumb_bob'), (float('nan'), 'plumb_bob'), (300, 'unknown')):
+            self.node.camera_callback(NS(header=NS(frame_id='camera'), width=320, height=240,
+                K=[focal_length, 0, 160, 0, 300, 120, 0, 0, 1], D=[0]*5, distortion_model=model))
+            for _ in range(3):
+                self.ros_now += .02
+                self.refresh()
+                reference.header.stamp = Stamp(self.ros_now)
+                self.node.tag_callback(reference)
+            self.assertEqual(self.node.filter.yaw_offset, offset)
+        self.tag_reference()  # Restore valid calibration.
+        for invalid_stamp in (0, self.ros_now+1, self.ros_now-1):
+            reference.header.stamp = Stamp(invalid_stamp)
+            self.node.tag_callback(reference)
+        self.assertEqual(self.node.filter.yaw_offset, offset)
+        self.ros_now += .1  # No matching IMU, though the last IMU is still fresh.
+        reference.header.stamp = Stamp(self.ros_now)
+        self.node.tag_callback(reference)
+        self.assertEqual(self.node.filter.yaw_offset, offset)
+        # Observations straddle +/-pi, and detection arrives after a newer turn.
+        self.node.filter.yaw_offset = math.pi-.03
+        for bias in (-.01, .01, -.01):
+            self.ros_now += .1
+            self.refresh(yaw=-math.pi/2+bias)
+            reference.header.stamp = Stamp(self.ros_now)
+            self.ros_now += .03
+            self.refresh(yaw=-math.pi/2+.4)
+            self.node.tag_callback(reference)
+        self.assertGreater(self.node.filter.yaw_offset, math.pi-.03)
+        self.assertLess(self.node.filter.yaw_offset, math.pi)
+        self.assertEqual(len(self.node.tag_samples), 3)
+        self.assertAlmostEqual(abs(self.node.tag_samples[-1][1]), math.pi-.01)
 
     def test_startup_bias_waits_for_stationary_disarmed_data_and_is_frozen_in_flight(self):
         self.node = type(self.node)()

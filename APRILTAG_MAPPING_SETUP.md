@@ -55,8 +55,8 @@ forward. For an image measurement `u,v`:
 A wall-mounted tag, a tilted tag, or an unknown tag height requires a
 full 6-DOF solution such as calibrated AprilTag corners plus solvePnP and a
 known tag size instead of intersecting a floor plane. The method also assumes
-that UWB anchors are properly surveyed and the fusion yaw is aligned. It does
-not repair drift of that heading after startup.
+that UWB anchors are properly surveyed and the fusion yaw is aligned. Fusion
+uses tag 5 separately for [yaw correction](src/scripts/localization/README.md#room-heading).
 
 For a perfectly forward-looking 60°-down camera, an image-center tag viewed
 from 1.00 m above the tag plane intersects approximately **0.577 m forward**

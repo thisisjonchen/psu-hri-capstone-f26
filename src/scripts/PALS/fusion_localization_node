@@ -10,13 +10,14 @@ import tf
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
 from nav_msgs.msg import Odometry
-from pidrone_pkg.msg import AnchorLayout, Mode, State
-from sensor_msgs.msg import Imu, Range
+from pidrone_pkg.msg import AnchorLayout, Mode, State, TagCorners
+from sensor_msgs.msg import CameraInfo, Imu, Range
 from std_msgs.msg import Bool, UInt32
 
 from localization.fusion import (PlanarFusion, body_angle, horizontal_acceleration,
                                  rotate, XY_PREDICTION_TIMEOUT)
 from localization.position import PositionCombiner
+from localization.apriltag_geometry import camera_rotation, floor_tag_yaw_offset
 from localization.uwb_locator import monotonic
 
 
@@ -52,6 +53,17 @@ class FusionLocalizationNode(object):
             floor_z=float(rospy.get_param('~floor_z', 0.0)),
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
         self.imu = None
+        self.imu_history = deque(maxlen=200)
+        self.tag_camera = None
+        self.tag_rotation = camera_rotation(
+            float(rospy.get_param('~tag_camera/camera_pitch_down_deg', 60.0)),
+            float(rospy.get_param('~tag_camera/camera_azimuth_deg', 0.0)),
+            float(rospy.get_param('~tag_camera/camera_image_roll_deg', 0.0)))
+        self.tag_samples = deque(maxlen=3)
+        self.tag_last_stamp = None
+        self.tag_correction_at = None
+        self.tag_accepted_stamp = None
+        self.tag_reason = 'Waiting for tag 5'
         self.use_imu_acceleration = bool(rospy.get_param('~use_imu_acceleration', False))
         self.imu_acceleration_gain = float(rospy.get_param('~imu_acceleration_gain', 0.25))
         if not np.isfinite(self.imu_acceleration_gain) or not 0 < self.imu_acceleration_gain <= 1:
@@ -78,6 +90,8 @@ class FusionLocalizationNode(object):
         self.subscribers = [
             rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
             rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
+            rospy.Subscriber('pidrone/apriltag/reference_corners', TagCorners, self.tag_callback, queue_size=1),
+            rospy.Subscriber('raspicam_node/camera_info', CameraInfo, self.camera_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
             rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
@@ -114,7 +128,77 @@ class FusionLocalizationNode(object):
             quaternion /= norm
             self.height.update_attitude(tuple(quaternion), stamp, monotonic())
             self.imu = (stamp, tf.transformations.euler_from_quaternion(quaternion), omega, quaternion)
+            self.imu_history.append(self.imu)
             self.update_acceleration(msg)
+
+    def camera_callback(self, msg):
+        with self.lock:
+            # Ignore changing header timestamps. Geometry validates calibration on use.
+            calibration = (msg.width, msg.height, msg.header.frame_id,
+                           tuple(msg.K), tuple(msg.D), msg.distortion_model)
+            if calibration != self.tag_camera:
+                self.tag_samples.clear()
+            self.tag_camera = calibration
+
+    def tag_callback(self, msg):
+        """Use tag 5's printed top as +Y in every flight mode; never command yaw."""
+        with self.lock:
+            now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
+            if msg.tag_id != 5:
+                return
+            if not self.fresh(stamp, now):
+                self.tag_reason = 'Tag 5 frame is stale or invalid'
+                return
+            if self.tag_last_stamp is not None and stamp <= self.tag_last_stamp:
+                return
+            self.tag_last_stamp = stamp
+            try:
+                if self.tag_camera is None or not self.imu_history or self.filter.yaw_offset is None:
+                    raise ValueError('Tag 5 needs camera calibration and initialized IMU heading')
+                width, height, frame, k, d, model = self.tag_camera
+                if (msg.image_width != width or msg.image_height != height
+                        or not frame or msg.header.frame_id != frame):
+                    raise ValueError('Tag 5 image does not match camera calibration')
+                # Match image acquisition time, not delayed detector receipt time.
+                imu = min(self.imu_history, key=lambda sample: abs(sample[0] - stamp))
+                skew = abs(imu[0] - stamp)
+                if (not self.fresh(imu[0], now) or skew > .05
+                        or skew * np.linalg.norm(imu[2]) > math.radians(1)):
+                    raise ValueError('Tag 5 needs time-aligned IMU')
+                pixels = np.column_stack((msg.corner_x, msg.corner_y))
+                if (pixels.shape != (4, 2) or np.any(pixels < 0)
+                        or np.any(pixels[:, 0] >= width) or np.any(pixels[:, 1] >= height)):
+                    raise ValueError('Invalid tag corners or image bounds')
+                local_quaternion = tf.transformations.quaternion_multiply(
+                    imu[3], tf.transformations.quaternion_from_euler(0, 0, -math.pi / 2))
+                offset = floor_tag_yaw_offset(pixels, k, d, local_quaternion, self.tag_rotation, model)
+            except ValueError as error:
+                self.tag_samples.clear()
+                self.tag_reason = str(error)
+                return
+            if (self.tag_samples and (stamp - self.tag_samples[-1][0] > self.timeout
+                    or any(abs(math.atan2(math.sin(offset - value), math.cos(offset - value)))
+                           > math.radians(5) for _, value in self.tag_samples))):
+                self.tag_samples.clear()
+            self.tag_samples.append((stamp, offset))
+            if len(self.tag_samples) < 3:
+                self.tag_reason = 'Confirming tag 5 across three frames'
+                return
+            mean = math.atan2(sum(math.sin(v) for _, v in self.tag_samples),
+                              sum(math.cos(v) for _, v in self.tag_samples))
+            error = math.atan2(math.sin(mean - self.filter.yaw_offset),
+                               math.cos(mean - self.filter.yaw_offset))
+            # At most 2 degrees/sec, with no accumulated allowance through gaps
+            # or bursts of delayed detections. Small errors converge smoothly.
+            dt = min(.1, stamp - self.tag_samples[-2][0])
+            if self.tag_correction_at is not None:
+                dt = min(dt, max(0, now - self.tag_correction_at))
+            limit = math.radians(2) * dt
+            delta = max(-limit, min(limit, error * (1 - math.exp(-dt))))
+            self.filter.correct_yaw(delta)
+            self.tag_correction_at, self.tag_accepted_stamp = now, stamp
+            self.tag_reason = 'Tag 5 correcting yaw'
+            rospy.set_param('~room_yaw_offset', self.filter.yaw_offset)
 
     def update_acceleration(self, msg):
         stamp, attitude, omega, _ = self.imu
@@ -233,10 +317,14 @@ class FusionLocalizationNode(object):
                 self.bias_samples.clear()
                 self.invalidate_room()
                 self.height.range = self.height.attitude = self.imu = None
+                self.imu_history.clear()
+                self.tag_samples.clear()
+                self.tag_last_stamp = self.tag_correction_at = self.tag_accepted_stamp = None
                 self.layout = None
                 self.layout_stamp = None
             self.last_time = now
-            # Capture once per node start. Later turns/disarms must not realign the room.
+            # Initial fallback only. Tag 5 may subsequently correct this offset;
+            # later turns/disarms must not recapture it from IMU alone.
             if (self.filter.yaw_offset is None and self.mode == 'DISARMED'
                     and self.fresh(self.mode_at, now) and self.imu is not None
                     and self.fresh(self.imu[0], now)):
@@ -287,6 +375,10 @@ class FusionLocalizationNode(object):
             if self.filter.flow_active(now):
                 sources.append('optical flow')
             status.values = [KeyValue(key='xy_source', value=' + '.join(sources)),
+                             KeyValue(key='room_yaw_offset', value=str(self.filter.yaw_offset)),
+                             KeyValue(key='tag_yaw_status', value=(self.tag_reason
+                                 if self.fresh(self.tag_last_stamp, now) else 'Tag 5 unavailable; retaining yaw offset')),
+                             KeyValue(key='tag_yaw_stamp', value=str(self.tag_accepted_stamp)),
                              KeyValue(key='acceleration_bias_ready', value=str(self.acceleration_bias is not None)),
                              KeyValue(key='height_source', value='ToF'),
                              KeyValue(key='local_ready', value=str(local_ready)),

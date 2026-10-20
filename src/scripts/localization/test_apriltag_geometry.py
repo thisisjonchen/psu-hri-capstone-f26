@@ -9,8 +9,11 @@ from types import ModuleType, SimpleNamespace as NS
 from unittest import mock
 
 import numpy as np
+import cv2
 
-from localization.apriltag_geometry import camera_rotation, project_floor_tag
+from localization.apriltag_geometry import (camera_rotation, project_floor_tag,
+                                            floor_tag_yaw_offset, quaternion_matrix)
+from localization.test_fusion import quaternion
 from localization.test_ros_node import Pose, Stamp
 
 
@@ -45,6 +48,28 @@ class AprilTagGeometryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             project_floor_tag((160,120), self.K, [], (0,0,5), (0,0,0,1),
                               (0,0,0), camera_rotation(60), max_distance=2)
+
+    def test_yaw_reference_recovers_offset_with_tilt_mounting_distortion_and_wrap(self):
+        # Independently render a square whose printed top is world +Y.
+        points = np.array([[-.2, .2, 0], [.2, .2, 0], [.2, -.2, 0], [-.2, -.2, 0]])
+        mounting = camera_rotation(60, 12, -8)
+        k = np.array(self.K, dtype=float).reshape(3, 3)
+        for yaw in (0, .7, math.pi-.01, -math.pi+.01):
+            for model in ('plumb_bob', 'equidistant'):
+                actual = quaternion(.08, -.12, yaw)
+                biased = quaternion(.08, -.12, yaw+.25)
+                rotation = quaternion_matrix(actual).dot(mounting)
+                camera = points.dot(rotation) - np.array([0, 0, 1]).dot(rotation)
+                distortion = np.array([-.1, .02, 0, 0, 0] if model == 'plumb_bob' else [-.05, .01, 0, 0])
+                if model == 'equidistant':
+                    pixels = cv2.fisheye.projectPoints(camera.reshape(1, -1, 3),
+                        np.zeros(3), np.zeros(3), k, distortion)[0].reshape(4, 2)
+                else:
+                    pixels = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), k, distortion)[0].reshape(4, 2)
+                self.assertAlmostEqual(floor_tag_yaw_offset(pixels, k, distortion, biased,
+                                                            mounting, model), -.25, places=5)
+        with self.assertRaises(ValueError):
+            floor_tag_yaw_offset(np.zeros((4, 2)), k, [], (0, 0, 0, 1), mounting)
 
 
 class AprilTagMappingTests(unittest.TestCase):
