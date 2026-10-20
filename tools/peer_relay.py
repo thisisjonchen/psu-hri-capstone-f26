@@ -137,8 +137,9 @@ def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
                     if stop.is_set():
                         return
                     # Drone endpoints are on the local network, outside laptop proxies.
+                    # Allow delayed pongs; STATE_TIMEOUT still rejects stale telemetry after 0.5 s.
                     clients.append(Client(stack.enter_context(connect(
-                        url, proxy=None, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=1))))
+                        url, proxy=None, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=5))))
                 while not stop.is_set():
                     try:
                         messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())

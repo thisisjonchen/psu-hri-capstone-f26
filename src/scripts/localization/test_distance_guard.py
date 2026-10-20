@@ -247,6 +247,8 @@ class PeerRelayTest(unittest.TestCase):
         del second['pose']
         with self.assertRaisesRegex(ValueError, 'missing/stale'):
             self.module['peer_messages']([first, second], 100.1, 10.1)
+        with self.assertRaisesRegex(ValueError, 'missing/stale'):
+            self.module['peer_messages']([first, self.snapshot()], 100.1, 10.51)
 
 
 if __name__ == '__main__':
