@@ -1389,13 +1389,13 @@ document.addEventListener('keydown', event => {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   // Drone terminals receive every key, including Space; Esc leaves the terminal.
   if (event.target && event.target.closest && event.target.closest('.script-terminal')) return;
+  if (isFormControl(event.target)) return;
   if (key === ' ') {
     event.preventDefault();
     stopHeldKeys();
     dispatch('disarm', 'both');
     return;
   }
-  if (isFormControl(event.target)) return;
   if (movementKeys[key]) {
     event.preventDefault();
     if (event.repeat && !heldKeys.has(key)) return;

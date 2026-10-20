@@ -144,7 +144,11 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     if (discover) receive(api.drones[id], '/pidrone/localization/anchors', anchorsAt(100));
     return api.drones[id];
   };
-  const key = (name, value, target = element(), repeat = false) => listeners[name]({ key: value, target, repeat, preventDefault() {} });
+  const key = (name, value, target = element(), repeat = false) => {
+    let prevented = false;
+    listeners[name]({ key: value, target, repeat, preventDefault() { prevented = true; } });
+    return prevented;
+  };
   return { ...api, calibrationRequests, events, retries, connect, receive, key, elements, timers, maintenanceTimers, listeners, element, advanceTime(ms) { now += ms; } };
 }
 const stamp = secs => ({ header: { stamp: { secs, nsecs: 0 } } });
@@ -387,14 +391,20 @@ test('key release stops original recipients even after focus changes', () => {
   assert.equal(b.publishers.twist.messages.length, sent);
 });
 
-test('Space disarms all despite form focus', () => {
+test('Space allows typing in forms and terminals, and disarms all outside them', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const terminal = app.element(); terminal.closest = selector => selector === '.script-terminal' ? terminal : null;
-  app.key('keydown', ' ', terminal);
+  assert.equal(app.key('keydown', ' ', terminal), false);
+  for (const tag of ['input', 'textarea', 'select']) {
+    const input = app.element(); input.closest = selector => selector.split(', ').includes(tag) ? input : null;
+    assert.equal(app.key('keydown', ' ', input), false);
+  }
+  const editable = app.element(); editable.isContentEditable = true;
+  assert.equal(app.key('keydown', ' ', editable), false);
   assert.equal(last(a, 'mode'), undefined);
-  const input = app.element(); input.closest = selector => selector.includes('input') ? input : null;
-  app.key('keydown', ' ', input);
+  assert.equal(last(b, 'mode'), undefined);
+  assert.equal(app.key('keydown', ' '), true);
   assert.equal(last(a, 'mode').mode, 'DISARMED');
   assert.equal(last(b, 'mode').mode, 'DISARMED');
 });
