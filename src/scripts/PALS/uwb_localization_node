@@ -11,7 +11,8 @@ from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from pidrone_pkg.msg import AnchorLayout
 from sensor_msgs.msg import Imu, Range
 
-from localization.uwb_locator import UWBLocator, finite, monotonic
+from localization import finite, monotonic
+from localization.uwb_locator import UWBLocator
 from localization.position import PositionCombiner
 
 
@@ -66,6 +67,21 @@ class UWBLocalizationNode(object):
             self.combiner.update_attitude((q.x, q.y, q.z, q.w), msg.header.stamp.to_sec(),
                                           monotonic(), msg.orientation_covariance[0] != -1)
 
+    def pose_message(self, x, y, stamp, z=None):
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = rospy.Time.from_sec(stamp)
+        msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
+        # Unmeasured axes retain high variance.
+        msg.pose.pose.orientation.w = 1.0
+        msg.pose.covariance[0] = msg.pose.covariance[7] = self.xy_variance
+        for index in (14, 21, 28, 35):
+            msg.pose.covariance[index] = 1e6
+        if z is not None:
+            msg.pose.pose.position.z = z
+            msg.pose.covariance[14] = self.z_variance
+        return msg
+
     def step(self):
         now = monotonic()
         ros_now = rospy.Time.now().to_sec()
@@ -99,14 +115,7 @@ class UWBLocalizationNode(object):
                 and 0 <= now - p.timestamp <= self.locator.stale_after):
             stamp = ros_now - (now - p.timestamp)
             if stamp > 0:
-                xy = PoseWithCovarianceStamped()
-                xy.header.frame_id, xy.header.stamp = self.frame_id, rospy.Time.from_sec(stamp)
-                xy.pose.pose.position.x, xy.pose.pose.position.y = p.x, p.y
-                xy.pose.pose.orientation.w = 1.0
-                xy.pose.covariance[0] = xy.pose.covariance[7] = self.xy_variance
-                for index in (14, 21, 28, 35):
-                    xy.pose.covariance[index] = 1e6
-                self.xy_pub.publish(xy)
+                self.xy_pub.publish(self.pose_message(p.x, p.y, stamp))
                 self.last_xy_published = p.timestamp
         anchor_stamp = sample.timestamp if sample is not None else None
         anchor_time = ros_now - (now - anchor_stamp) if sample is not None else ros_now
@@ -120,17 +129,7 @@ class UWBLocalizationNode(object):
             self.anchor_pub.publish(anchors)
             self.last_anchor_published = anchor_stamp
         if fix is not None and p.timestamp != self.last_published:
-            msg = PoseWithCovarianceStamped()
-            msg.header.frame_id = self.frame_id
-            msg.header.stamp = rospy.Time.from_sec(fix.stamp)
-            msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z = fix.x, fix.y, fix.z
-            # Orientation is unmeasured; identity is a placeholder with high variance.
-            msg.pose.pose.orientation.w = 1.0
-            msg.pose.covariance[0] = msg.pose.covariance[7] = self.xy_variance
-            msg.pose.covariance[14] = self.z_variance
-            for index in (21, 28, 35):
-                msg.pose.covariance[index] = 1e6
-            self.publisher.publish(msg)
+            self.publisher.publish(self.pose_message(fix.x, fix.y, fix.stamp, fix.z))
             self.last_published = p.timestamp
         status = DiagnosticStatus()
         status.name = rospy.get_name().lstrip('/')

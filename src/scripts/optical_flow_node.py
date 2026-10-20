@@ -5,12 +5,7 @@ import rospy
 import numpy as np
 from geometry_msgs.msg import TwistStamped
 from raspicam_node.msg import MotionVectors
-import numpy as np
-import rospy
-import tf
-from sensor_msgs.msg import Imu, Range
-from std_msgs.msg import Empty
-
+from sensor_msgs.msg import Range
 
 
 class OpticalFlowNode(object):
@@ -64,8 +59,6 @@ class OpticalFlowNode(object):
         # DD24 camera mounting: forward translation must publish positive y.
         # The velocity PID then lowers Betaflight pitch to oppose that motion.
         twist_msg.twist.linear.y = y_motion
-        #print(self.altitude)
-        #print(x_motion,y_motion)
         # Update and publish the twist message
         self.twistpub.publish(twist_msg)
         duration_from_last_altitude = rospy.Time.now() - self.altitude_ts

@@ -11,7 +11,7 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 - `src/scripts/pid_controller.py` and `pid_class.py`: control logic.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
 - `src/web/`: dashboard, laptop calibration service, and web tests.
-- `src/scripts/archive/` and bundled libraries: historical or third-party code; avoid unrelated edits.
+- Bundled libraries contain third-party code; avoid unrelated edits.
 
 Read the relevant README and implementation before changing behavior. Documentation
 can lag behind the code; verify the actual launch configuration and data path.

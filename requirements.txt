@@ -1,0 +1,8 @@
+# Dependencies for the Base Station, should be handled by tools/pals.py
+bleak>=0.22,<2
+numpy>=1.24
+paramiko>=3.4,<4
+websockets>=15,<16
+opencv-python
+pupil-apriltags
+pyserial>=3.0

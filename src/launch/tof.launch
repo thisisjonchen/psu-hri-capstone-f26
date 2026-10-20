@@ -1,5 +1,5 @@
 <launch>
-    <node pkg="vl53l1x" type="vl53l1x_node" name="vl53l1x" clear_params="true">
+    <node pkg="pidrone_pkg" type="tof_node.py" name="vl53l1x" clear_params="true">
         <remap from="~range" to="/pidrone/range"/>
         <param name="mode" value="3"/>
         <param name="i2c_bus" value="22"/>

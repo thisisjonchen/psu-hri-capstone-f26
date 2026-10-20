@@ -519,6 +519,19 @@ class Drone(object):
             raise ValueError('meters must be positive')
         self.move(y=-meters)
 
+    def finish(self, hold_xy=False):
+        """End a routine, keeping the heartbeat active if landing needs recovery."""
+        if self.mode == 'FLYING':
+            try:
+                self.land(hold_xy=hold_xy)
+            except Exception as error:
+                rospy.logerr('Landing needs manual recovery: %s', error)
+                # Keep the heartbeat active for manual landing.
+                while self.mode != 'DISARMED':
+                    rospy.sleep(0.5)
+        else:
+            self.disarm()
+
     def land(self, hold_xy=False):
         """Descend and disarm at the ground threshold, optionally holding X/Y."""
         if not hold_xy:

@@ -18,7 +18,7 @@ from localization.fusion import (PlanarFusion, body_angle, horizontal_accelerati
                                  rotate, XY_PREDICTION_TIMEOUT)
 from localization.position import PositionCombiner
 from localization.apriltag_geometry import camera_rotation, floor_tag_yaw_offset
-from localization.uwb_locator import monotonic
+from localization import monotonic
 
 
 class FusionLocalizationNode(object):

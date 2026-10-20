@@ -2,7 +2,7 @@
 import math
 from collections import namedtuple
 
-from .uwb_locator import finite
+from localization import finite
 
 RangeSample = namedtuple('RangeSample', 'distance stamp received')
 Attitude = namedtuple('Attitude', 'vertical stamp received')

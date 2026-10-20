@@ -20,23 +20,13 @@ RUN apt-get update && apt-get install -y --allow-unauthenticated --no-install-re
     ros-kinetic-desktop-full \
     ros-kinetic-navigation \
     ros-kinetic-ros-control ros-kinetic-ros-controllers \
-    ros-kinetic-joy \
-    ros-kinetic-gmapping ros-kinetic-navigation \
     ros-kinetic-rviz-imu-plugin \
     ros-kinetic-ar-track-alvar \
-    ros-kinetic-moveit \
-    ros-kinetic-moveit-commander \
-    ros-kinetic-moveit-visual-tools \
-    ros-kinetic-moveit-ros-visualization \
-    ros-kinetic-moveit-planners-ompl \
-    ros-kinetic-moveit-simple-controller-manager \
-    ros-kinetic-trac-ik-kinematics-plugin \
     gdb \
     mlocate \
     screen \
-    emacs \
     git \
-    netcat nmap wget iputils-ping openssh-client vim less \
+    netcat nmap wget vim less \
     python-numpy \
     python-smbus \
     python-scipy \

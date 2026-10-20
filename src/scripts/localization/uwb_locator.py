@@ -4,7 +4,6 @@ Position timestamps are host monotonic receipt times, not UWB measurement times.
 """
 from __future__ import print_function
 
-import math
 import logging
 import re
 import threading
@@ -13,21 +12,13 @@ from time import sleep
 
 import serial
 
+from localization import finite, monotonic
 from localization.serial_port import ExclusiveSerial
-
-try:
-    from time import monotonic
-except ImportError:  # Python 2.7 on the DD24's ROS Kinetic image
-    from monotonic import monotonic
 
 Position = namedtuple('Position', 'x y z quality timestamp')
 Anchor = namedtuple('Anchor', 'id x y z distance')
 AnchorSample = namedtuple('AnchorSample', 'anchors timestamp')
 SERIAL_SILENCE_TIMEOUT = 30.0
-
-
-def finite(value):
-    return not (math.isnan(value) or math.isinf(value))
 
 
 RATE_PATTERNS = (

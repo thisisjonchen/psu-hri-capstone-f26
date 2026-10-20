@@ -32,15 +32,7 @@ def main():
             path.visit(index)
         drone.wait_for_stage('land', check=path.check)
     finally:
-        if drone.mode == 'FLYING':
-            try:
-                drone.land(hold_xy=True)
-            except Exception as error:
-                rospy.logerr('Landing needs manual recovery: %s', error)
-                while drone.mode != 'DISARMED':
-                    rospy.sleep(.5)
-        else:
-            drone.disarm()
+        drone.finish(hold_xy=True)
 
 
 if __name__ == '__main__':
