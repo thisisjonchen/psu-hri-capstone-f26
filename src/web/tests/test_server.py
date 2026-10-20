@@ -36,6 +36,30 @@ import server
                 self.assertEqual(handler.guess_type(name), expected)
 
 
+class ResponseTest(unittest.TestCase):
+    def test_closed_browser_connection_ends_response_without_retry(self):
+        for stage in ('headers', 'body'):
+            for error in (BrokenPipeError, ConnectionResetError, OSError):
+                with self.subTest(stage=stage, error=error):
+                    handler = DashboardHandler.__new__(DashboardHandler)
+                    handler.send_response = mock.Mock()
+                    handler.send_header = mock.Mock()
+                    handler.end_headers = mock.Mock()
+                    handler.wfile = mock.Mock()
+                    handler.close_connection = False
+                    write = handler.end_headers if stage == 'headers' else handler.wfile.write
+                    write.side_effect = error('write failed')
+                    if error is OSError:
+                        with self.assertRaises(OSError):
+                            handler.respond(200, {'running': False})
+                    else:
+                        handler.respond(200, {'running': False})
+                        self.assertTrue(handler.close_connection)
+                    write.assert_called_once()
+                    if stage == 'headers':
+                        handler.wfile.write.assert_not_called()
+
+
 class PeerRelayLifecycleTest(unittest.TestCase):
     def test_waits_for_pair_skips_invalid_data_and_reconnects_after_loss(self):
         stop = threading.Event()

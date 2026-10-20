@@ -43,11 +43,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def respond(self, code, value):
         data = json.dumps(value, allow_nan=False).encode('utf-8')
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser closed the request before the response finished.
+            self.close_connection = True
 
     def do_GET(self):
         if not self.allowed():
