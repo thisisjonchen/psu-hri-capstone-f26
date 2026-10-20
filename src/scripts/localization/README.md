@@ -103,7 +103,8 @@ comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
 ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
-body-axis displacement is converted once into a fixed room target.
+body-axis displacement is converted once into a fixed room target. Horizontal moves
+request velocity proportional to the remaining error, capped at the requested speed.
 During UWB gaps, fusion continues predicting for up to 1 second since the last
 accepted fix, while IMU and altitude freshness requirements remain unchanged.
 Active holds keep their target and velocity feedback. If XY trim is enabled,

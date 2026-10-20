@@ -458,11 +458,9 @@ class Drone(object):
                     if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
-                if horizontal:
-                    for error, axis in ((ex, 'x'), (ey, 'y')):
-                        if abs(error) > 0.06:
-                            speed = min(speed_limit, max(0.06, abs(error) * 0.5))
-                            setattr(command.linear, axis, speed if error > 0 else -speed)
+                if horizontal and not horizontal_done:
+                    command.linear.x, command.linear.y = target_velocity(
+                        target_xy, (p.x, p.y), yaw, 0.5, speed_limit)
                 planar_speed = self._limit_planar_speed(command, speed_limit)
                 self.twist_pub.publish(command)
                 last_command_speed = planar_speed

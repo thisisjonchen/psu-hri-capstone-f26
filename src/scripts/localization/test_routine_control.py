@@ -95,6 +95,7 @@ class RoutineControlTest(unittest.TestCase):
         q.x, q.y, q.z, q.w = quaternion(yaw=math.pi/2)
         drone._fused_received(pose)
         commands = []
+        positions = iter([(1.061, 2), (1, 2.9), (1, 3)])
 
         def tick(seconds):
             command = self.fusion.messages['/pidrone/desired/twist'][-1]
@@ -103,18 +104,22 @@ class RoutineControlTest(unittest.TestCase):
             self.fusion.ros_now += seconds
             drone.mode_at = drone.height_at = self.fusion.now
             pose.header.stamp = Stamp(self.fusion.ros_now)
-            # The room target stays at (1, 2.2) even after the nose turns.
-            pose.pose.pose.position.y += .1
+            # Keep the room target after turning, then approach with a sideways error.
+            pose.pose.pose.position.x, pose.pose.pose.position.y = next(positions)
             q.x, q.y, q.z, q.w = quaternion(yaw=0)
             drone._fused_received(pose)
 
         self.ros.sleep = tick
-        drone.move(x=.2, speed_limit=.06)
-        self.assertEqual(len(commands), 2)
+        drone.move(x=1, speed_limit=.06)
+        self.assertEqual(len(commands), 3)
         self.assertGreater(commands[0][0], 0)
         self.assertAlmostEqual(commands[0][1], 0)
-        self.assertAlmostEqual(commands[1][0], 0)
-        self.assertGreater(commands[1][1], 0)
+        self.assertLess(commands[1][0], 0)
+        self.assertGreater(commands[1][1], .059)
+        self.assertAlmostEqual(commands[1][0] / commands[1][1], -.061)
+        self.assertAlmostEqual(commands[2][0], 0)
+        self.assertGreater(commands[2][1], 0)
+        self.assertLess(commands[2][1], commands[1][1])
         self.assertTrue(all(math.hypot(*command) <= .06 for command in commands))
         final = self.fusion.messages['/pidrone/desired/twist'][-1]
         self.assertEqual((final.linear.x, final.linear.y), (0, 0))
