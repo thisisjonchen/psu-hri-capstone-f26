@@ -331,8 +331,12 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, synchronized_stages=False, preflight=None, check=None):
-        """Take off, optionally holding fused room X/Y from before liftoff."""
+    def takeoff(self, hold_xy=False, synchronized_stages=False, preflight=None, check=None,
+                continue_height=None):
+        """Take off; optionally continue at a height before the target settles."""
+        if continue_height is not None and (math.isnan(continue_height) or
+                math.isinf(continue_height) or not 0 < continue_height <= self.takeoff_height):
+            raise ValueError('Continue height must be positive and no higher than the takeoff target')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self.wait_for_start(hold_xy=hold_xy, require_run=synchronized_stages)
@@ -364,6 +368,13 @@ class Drone(object):
             self._check_flight('takeoff')
             if hold_xy:
                 self.twist_pub.publish(self._xy_hold_command())
+            if continue_height is not None:
+                if self.height >= continue_height:
+                    rospy.loginfo('Takeoff reached %.2f m; continuing toward %.2f m target',
+                                  self.height, self.takeoff_height)
+                    return
+                rospy.sleep(0.1)
+                continue
             now = time.time()
             settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
@@ -372,6 +383,8 @@ class Drone(object):
                               self.ALTITUDE_SETTLE_SECONDS)
                 return
             rospy.sleep(0.1)
+        if continue_height is not None:
+            raise RuntimeError('Takeoff did not reach {:.2f} m within 10 seconds'.format(continue_height))
         raise RuntimeError('Takeoff altitude did not settle within 10 seconds')
 
     def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,

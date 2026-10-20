@@ -30,7 +30,7 @@ def main():
     drone = Drone()
     drone.ready()
     try:
-        drone.takeoff(hold_xy=True, synchronized_stages=True)
+        drone.takeoff(hold_xy=True, synchronized_stages=True, continue_height=0.20)
         drone.wait_for_stage('forward')
         drone.unlock_xy()
         rospy.loginfo('Moving forward %.2f m', args.distance)
