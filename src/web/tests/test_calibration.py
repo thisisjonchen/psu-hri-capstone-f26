@@ -53,7 +53,7 @@ class CalibrationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'info=.*mode=.*PAN='):
                 decode_info(data, flags, network)
 
-    def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
+    def test_shared_height_layout_rejects_bad_ranges_but_accepts_swapped_top_corners(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}
         layout = solve_layout(BOARDS, rows)
         np.testing.assert_allclose([[p[k] for k in ('x', 'y', 'z')] for p in layout['positions']], POINTS, atol=1e-6)
@@ -68,8 +68,12 @@ class CalibrationTest(unittest.TestCase):
         inconsistent['0001']['0002'] = (5, 100)
         with self.assertRaises(ValueError):
             solve_layout(BOARDS, inconsistent)
-        with self.assertRaises(ValueError):
-            solve_layout([BOARDS[i] for i in (0, 1, 3, 2)], ROWS)
+        order = (0, 1, 3, 2)
+        layout = solve_layout([BOARDS[i] for i in order], ROWS)
+        self.assertEqual([p['id'] for p in layout['positions']], [BOARDS[i]['id'] for i in order])
+        np.testing.assert_allclose([[p[k] for k in ('x', 'y', 'z')] for p in layout['positions']],
+                                   [POINTS[i] for i in order], atol=1e-6)
+        self.assertLess(layout['rms'], 1e-6)
 
 
 class CoordinatorTest(unittest.TestCase):

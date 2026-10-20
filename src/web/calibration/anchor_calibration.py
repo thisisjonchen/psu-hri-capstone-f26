@@ -130,12 +130,7 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
     rms, worst = float(np.sqrt(np.mean(error ** 2))), float(np.max(np.abs(error)))
     xy = np.array([[0., 0.], [values[0], 0.], values[1:3], values[3:5]])
     if values[0] <= 0 or xy[2, 1] <= 0 or xy[3, 1] <= 0:
-        raise ValueError('Invalid orientation; order anchors counterclockwise from the origin')
-    for i in range(4):
-        a, b, c = xy[i], xy[(i + 1) % 4], xy[(i + 2) % 4]
-        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
-        if cross < 0.1:
-            raise ValueError('Anchors must form four well-separated convex corners in the selected order')
+        raise ValueError('Invalid orientation; the remaining anchors must be on the +Y side of the baseline')
     if rms > max_rms or worst > max_error:
         raise ValueError('Range fit is inconsistent (RMS %.3f m, max %.3f m)' % (rms, worst))
     positions = [dict(a, x=float(xy[i, 0]), y=float(xy[i, 1]), z=0.0)
