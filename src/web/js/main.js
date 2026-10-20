@@ -2,7 +2,6 @@
 
 const xySources = [
   ['groundTruth', 'Ground truth', []],
-  ['ukf', 'UKF', [6, 3]],
   ['camera', 'Camera pose', [2, 3]],
   ['fused', 'Fused position', []]
 ];
@@ -718,21 +717,18 @@ class DroneSession {
     this.updateXY('fused', message.pose.pose, message.header.frame_id);
   }
 
-  dataset(key, label, color, extra = {}) {
+  dataset(key, label, color) {
     if (!this.series[key]) this.series[key] = [];
-    return Object.assign({
+    return {
       key, label, data: this.series[key].slice(), borderColor: color,
       backgroundColor: color, borderWidth: 1.5, pointRadius: 0,
       fill: false, lineTension: 0
-    }, extra);
+    };
   }
 
   heightDatasets() {
     return [
       this.dataset('range', 'Raw range', '#e46555'),
-      this.dataset('ukfHeight', 'UKF height', '#49368c'),
-      this.dataset('ukfPlus', 'UKF +sigma', '#49368c', { band: true, borderWidth: 0, fill: '+1', backgroundColor: '#49368c22' }),
-      this.dataset('ukfMinus', 'UKF −sigma', '#49368c', { band: true, borderWidth: 0 }),
       this.dataset('ema', 'EMA height', '#fc46ad'),
       this.dataset('truthHeight', 'Ground truth', '#172337')
     ];
@@ -748,7 +744,7 @@ class DroneSession {
         },
         legend: { labels: { filter: (item, data) => {
           const dataset = data.datasets[item.datasetIndex];
-          return !dataset.band && dataset.data.length > 0;
+          return dataset.data.length > 0;
         } } }
       }
     });
@@ -986,18 +982,6 @@ class DroneSession {
       this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
       this.render('speed');
     });
-    const ukf = message => {
-      const time = this.time(message);
-      const pose = message.pose_with_covariance.pose;
-      const sigma = Math.sqrt(message.pose_with_covariance.covariance[14]);
-      this.addPoint('ukfHeight', time, pose.position.z);
-      this.addPoint('ukfPlus', time, pose.position.z + sigma);
-      this.addPoint('ukfMinus', time, pose.position.z - sigma);
-      this.updateXY('ukf', pose, message.header && message.header.frame_id);
-      this.render('height');
-    };
-    subscribe('/pidrone/state/ukf_2d', 'pidrone_pkg/State', ukf);
-    subscribe('/pidrone/state/ukf_7d', 'pidrone_pkg/State', ukf);
     subscribe('/pidrone/state/ema', 'pidrone_pkg/State', message => {
       this.addPoint('ema', this.time(message), message.pose_with_covariance.pose.position.z);
       this.render('height');

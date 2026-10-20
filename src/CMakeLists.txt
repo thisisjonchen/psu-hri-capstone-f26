@@ -52,7 +52,6 @@ add_message_files(
   Battery.msg
   State.msg
   StateGroundTruth.msg
-  UkfStats.msg
   TagDetection.msg
   TagCorners.msg
   TagMap.msg

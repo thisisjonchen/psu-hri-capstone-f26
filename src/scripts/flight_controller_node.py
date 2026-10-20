@@ -272,7 +272,6 @@ class FlightController(object):
                 print('\nCannot connect to the flight controller board.')
                 print('The USB is unplugged. Please check connection.')
                 raise
-                sys.exit()
         return board
 
     def send_rc_cmd(self):

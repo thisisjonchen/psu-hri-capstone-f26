@@ -89,8 +89,7 @@ For a missing/stale fix, inspect `/pidrone/localization/status`. It includes the
 reader startup stage, actual update intervals/readback, serial/parsed-record ages,
 last reported quality, rejected record count, and the last serial line.
 
-The **SE** Screen window now starts fusion instead of EMA. Do not run
-`state_estimator.py -p ema` alongside it: only fusion should publish
+The **SE** Screen window starts fusion, the sole publisher of
 `/pidrone/state`. The legacy rigid-transform camera pose node is no longer started
 by Screen. ToF, the flight controller's IMU, UWB and rosbridge remain separate
 processes. The fusion launch file also starts `/optical_flow_node`, so both Screen's
@@ -294,7 +293,7 @@ Validate the layout on your flashed boards before flight; automated checks use s
 Only streams whose header frame matches the configured room frame are drawn.
 Leading `/` is ignored; `map`, `global`, `World` and `Body` are otherwise different
 frames. Unknown or different frames are listed beneath the map and their height
-graphs remain available. Transform UKF, camera and ground-truth poses into the
+graphs remain available. Transform camera and ground-truth poses into the
 surveyed room frame upstream before overlaying them; changing a frame name alone
 does not align coordinates. Both drones must use the same physical origin and axes.
 

@@ -770,8 +770,6 @@ test('shared map isolates pose streams and clears only the disconnected drone', 
   assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.5);
   app.receive(a, '/pidrone/state/ground_truth', { header: { ...stamp(100).header, frame_id: 'map' }, pose: poseAt(-0.4, 0.3) });
   assert.equal(sharedMarker(app, 'drone1', 'groundTruth2').data[0].x, -0.4);
-  app.receive(b, '/pidrone/state/ukf_2d', { header: { ...stamp(100).header, frame_id: 'map' }, pose_with_covariance: { pose: poseAt(0.4, -0.3), covariance: Array(36).fill(0) } });
-  assert.equal(sharedMarker(app, 'drone2', 'ukf2').data[0].x, 0.4);
   app.receive(a, '/pidrone/picamera/pose', { pose: poseAt(NaN, 0) });
   assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.5);
   const send = (drone, x) => app.receive(drone, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(x, 0) });
