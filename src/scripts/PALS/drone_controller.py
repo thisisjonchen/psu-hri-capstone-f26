@@ -453,7 +453,8 @@ class Drone(object):
                         progress_xy = ((p.x - start_xy[0]) * displacement[0] +
                                        (p.y - start_xy[1]) * displacement[1])
                         if progress_xy / horizontal < 0.03:
-                            raise RuntimeError('No horizontal movement detected')
+                            raise RuntimeError('No horizontal movement detected: {:.3f} m forward progress'.format(
+                                progress_xy / horizontal))
                     if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
@@ -472,6 +473,9 @@ class Drone(object):
                     'best vertical progress={:.3f} m'.format(
                         target_z, self.height, best_vertical_progress))
             raise RuntimeError('Movement timed out')
+        except Exception as error:
+            rospy.logerr('Movement failed: %s', error)
+            raise
         finally:
             self.twist_pub.publish(self._xy_hold_command())
 

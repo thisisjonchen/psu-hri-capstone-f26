@@ -307,8 +307,8 @@ requested velocities, not guarantees of actual speed. Tune
 `/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`
 against the physical drone; both are read when the controller classes start.
 
-The XY velocity controller uses proportional feedback (0.75 RC units per cm/s of
-velocity error). XY trim integration is temporarily disabled (Ki=0) to isolate
+The XY velocity controller uses proportional feedback: roll 0.50 and pitch 0.75
+RC units per cm/s of velocity error. XY trim integration is temporarily disabled (Ki=0) to isolate
 circling from accumulated correction; there is no fast XY integral either.
 This may leave steady drift that previously required trim compensation.
 The optional trim path retains its +/-5 RC limit, input cap and gap-freezing

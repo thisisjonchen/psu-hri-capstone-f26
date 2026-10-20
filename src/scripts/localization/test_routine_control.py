@@ -20,6 +20,7 @@ class RoutineControlTest(unittest.TestCase):
         self.fusion.setUp()
         self.addCleanup(self.fusion.doCleanups)
         self.ros = self.fusion.ros
+        self.ros.logerr = mock.Mock()
         self.ros.Timer = mock.Mock()
         self.ros.Duration = lambda seconds: seconds
         self.ros.is_shutdown = lambda: False
@@ -120,6 +121,21 @@ class RoutineControlTest(unittest.TestCase):
         self.fusion.ros_now += 1
         with self.assertRaisesRegex(RuntimeError, 'missing/stale'):
             drone.move(y=.2)
+
+        def stationary_tick(seconds):
+            self.fusion.now += seconds
+            self.fusion.ros_now += seconds
+            drone.mode_at = drone.height_at = drone.battery_at = self.fusion.now
+            pose.header.stamp = Stamp(self.fusion.ros_now)
+            drone._fused_received(pose)
+        self.ros.sleep = stationary_tick
+        stationary_tick(0)
+        with self.assertRaisesRegex(RuntimeError, 'No horizontal movement detected: 0.000 m'):
+            drone.move_forward(.25, speed_limit=.06)
+        self.ros.logerr.assert_called_once()
+        self.assertIn('No horizontal movement detected', str(self.ros.logerr.call_args.args[1]))
+        final = self.fusion.messages['/pidrone/desired/twist'][-1]
+        self.assertEqual((final.linear.x, final.linear.y), (0, 0))
 
     def test_hold_rejects_invalid_or_different_frame_pose(self):
         self.drone.lock_xy()
