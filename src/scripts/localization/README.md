@@ -340,8 +340,8 @@ existing camera scale (`/pidrone/localization/flow_scale`, default 0.165).
 Fusion restores the earlier EMA rotation compensation (angular rate times ToF
 height times `angular_compensation`, default 0.2), then rotates the horizontal
 velocity into the room frame. `flow_velocity_weight` specifies a fixed fraction
-between zero and one, read at fusion startup. The launch configuration uses **0.3**:
-`controller_velocity = 0.7 * uwb_imu_velocity + 0.3 * flow_velocity`.
+between zero and one, read at fusion startup. The launch configuration uses **0.2**:
+`controller_velocity = 0.8 * uwb_imu_velocity + 0.2 * flow_velocity`.
 A value of 0 disables flow's contribution; 1 uses flow for velocity whenever it
 is fresh and accepted. Room position always remains anchored to UWB.
 Flow does not modify the independent UWB/IMU Kalman state, so repeated camera frames

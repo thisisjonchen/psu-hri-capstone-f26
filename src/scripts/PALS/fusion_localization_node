@@ -33,7 +33,7 @@ class FusionLocalizationNode(object):
             max_gap=self.timeout,
             gate=float(rospy.get_param('~innovation_gate', 9.21)),
             max_innovation=float(rospy.get_param('~max_innovation', 1.0)),
-            flow_velocity_weight=float(rospy.get_param('~flow_velocity_weight', 0.3)))
+            flow_velocity_weight=float(rospy.get_param('~flow_velocity_weight', 0.2)))
         self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.odom_frame = rospy.get_param('~odom_frame', 'odom')

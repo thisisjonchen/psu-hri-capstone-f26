@@ -62,7 +62,7 @@ class FusionMathTest(unittest.TestCase):
         np.testing.assert_allclose(f.flow_velocity, rotate(flow, .2))
         np.testing.assert_allclose(f.accelerations[0][1], rotate((.1, -.2), .2))
         self.assertEqual((f.uwb_stamp, f.flow_stamp, f.accelerations[0][0], f.stamp), (10, 10, 10, 10.1))
-        expected = .7*velocity + .3*(rotate(flow, .2) + rotate((.1, -.2), .2)*.1)
+        expected = .8*velocity + .2*(rotate(flow, .2) + rotate((.1, -.2), .2)*.1)
         np.testing.assert_allclose(rotate(f.velocity, f.yaw_offset), expected)
 
     def test_acceleration_axes_include_tilt_without_subtracting_gravity_twice(self):
@@ -112,7 +112,7 @@ class FusionMathTest(unittest.TestCase):
             np.testing.assert_allclose(rotate((1, 0), angle), right, atol=1e-12)
 
     def test_fixed_flow_blend_preserves_uwb_estimate_timestamps_and_continuous_odometry(self):
-        for weight in (0, .3, 1):
+        for weight in (0, .2, 1):
             f = PlanarFusion(yaw_offset=math.pi/2, max_gap=.5, flow_velocity_weight=weight)
             f.predict(10)
             f.update_uwb((0, 0), np.eye(2)*.0225, 10)
@@ -499,15 +499,15 @@ class FusionNodeTest(unittest.TestCase):
         self.node.step()
         message = self.messages['pidrone/state'][-1]
         velocity = message.twist_with_covariance.twist.linear
-        self.assertAlmostEqual(velocity.x, .03)
-        self.assertAlmostEqual(velocity.y, .06)
+        self.assertAlmostEqual(velocity.x, .02)
+        self.assertAlmostEqual(velocity.y, .04)
         np.testing.assert_array_equal(self.node.filter.room_velocity, (0, 0))
         self.assertEqual(message.pose_with_covariance.pose.position.z, .5)
         self.assertEqual(self.node.filter.uwb_stamp, fix_stamp)
         self.assertEqual(self.node.flow_reason, 'OK')
         values = {v.key: v.value for v in self.messages['pidrone/localization/fusion_status'][-1].status[0].values}
         self.assertIn('optical flow', values['xy_source'])
-        self.assertEqual(float(values['flow_velocity_weight']), .3)
+        self.assertEqual(float(values['flow_velocity_weight']), .2)
         controller = self.controller()
         output = controller.step()
         self.assertLess(output[0], 1500)

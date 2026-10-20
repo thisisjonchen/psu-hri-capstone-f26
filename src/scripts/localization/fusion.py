@@ -49,7 +49,7 @@ class PlanarFusion(object):
     def __init__(self, yaw_offset=None, velocity_stddev=0.12,
                  drift_stddev=0.08,
                  max_gap=0.25, gate=9.21, max_innovation=1.0,
-                 acceleration_stddev=0.3, flow_velocity_weight=0.3):
+                 acceleration_stddev=0.3, flow_velocity_weight=0.2):
         values = (velocity_stddev, drift_stddev, max_gap, gate,
                   max_innovation, acceleration_stddev)
         if not all(np.isfinite(v) and v > 0 for v in values):
