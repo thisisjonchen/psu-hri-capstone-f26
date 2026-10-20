@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -86,6 +88,7 @@ class ConnectTest(unittest.TestCase):
                 self.assertIs(client, expected.return_value)
                 command = channel.exec_command.call_args.args[0]
                 self.assertEqual('pals-start.sh start;' in command, start)
+                self.assertEqual('git -C ~/catkin_ws/src/pidrone_pkg pull --ff-only && ' in command, start)
         with mock.patch.object(drones, 'setup_ssh', side_effect=RuntimeError('offline')), \
                 mock.patch.object(drones, 'connect') as connect:
             with self.assertRaisesRegex(RuntimeError, 'offline'):
@@ -104,6 +107,19 @@ class ConnectTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'terminal connection failed'):
                 drones.open_terminal('drone2', 80, 24, start=True)
             client.close.assert_called_once()
+
+    @unittest.skipUnless(shutil.which('bash'), 'requires bash')
+    def test_failed_pull_reports_failure_without_starting_or_attaching(self):
+        with mock.patch.object(drones, 'setup_ssh'):
+            _, channel = drones.open_terminal('drone2', 80, 24, start=True)
+        command = channel.exec_command.call_args.args[0]
+        # Stub the remote commands; an empty PATH prevents any real Docker call.
+        result = subprocess.run([shutil.which('bash'), '-c',
+                                 'git() { return 1; }; bash() { echo unexpected-start; }; ' + command],
+                                env={'PATH': ''}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, '\033]777;1\007')
+        self.assertEqual(result.stderr, '')
 
 
 class SetupTest(unittest.TestCase):

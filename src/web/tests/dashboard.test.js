@@ -562,7 +562,11 @@ test('terminal connection failure cancels startup but detaching a connected dron
   const context = vm.createContext({
     document: { addEventListener() {} }, drones: app.drones,
     location: { hostname: 'localhost', port: '8000' },
-    WebSocket: class { static OPEN = 1; readyState = 1; close() { this.readyState = 3; } }
+    WebSocket: class {
+      static OPEN = 1; readyState = 1;
+      constructor(url) { this.url = url; }
+      close() { this.readyState = 3; }
+    }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Terminal = vm.runInContext('RoutineTerminal', context);
@@ -579,7 +583,11 @@ test('terminal connection failure cancels startup but detaching a connected dron
   const before = drone.publishers.mode.messages.length;
   pane.attach();
   const old = pane.socket;
-  pane.attach();
+  pane.nodes = true;
+  pane.poll = () => {};
+  pane.connectDrone();
+  assert.equal(old.readyState, 3);
+  assert.equal(pane.socket.url, 'ws://localhost:8001/terminal/drone1?start=1');
   const count = output.length;
   old.onmessage({ data: 'stale startup result' });
   assert.equal(output.length, count);

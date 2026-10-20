@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Hold the drone's offset from the first floor AprilTag it sees.
+"""Hold the drone's offset from a selected floor AprilTag.
 
-While that tag is out of view, keep the fused (Kalman) X/Y target captured at
-acquisition, and resume the tag offset when it returns.
+While that tag is out of view, keep the fused X/Y position captured at
+acquisition and resume the tag offset when it returns.
 Camera mounting comes from the AprilTag mapper's parameters.
 """
 
@@ -36,7 +36,7 @@ class TagHold(object):
         self.detection = None
         self.used_stamp = None
         self.tag_id = None
-        self.target = None  # level-frame (right, forward) tag offset at first sight
+        self.target = None  # desired level-frame (right, forward) tag offset
         self.offset = None
         self.offset_stamp = None
         self.lost = False
@@ -97,25 +97,29 @@ class TagHold(object):
             return None
         return point[:2]
 
-    def acquire(self, timeout=3.0):
-        """Hover on the fused hold until a tag is seen; lock its ID and offset."""
+    def acquire(self, timeout=3.0, tag_id=None):
+        """Lock the requested tag, or the first visible tag when no ID is given."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             self.drone.hover(0.1)
             msg = self._new_detection()
             if msg is None or not msg.tag_ids:
                 continue
-            offset = self._tag_offset(msg, 0)
+            if tag_id is not None and tag_id not in msg.tag_ids:
+                continue
+            index = 0 if tag_id is None else list(msg.tag_ids).index(tag_id)
+            offset = self._tag_offset(msg, index)
             if offset is None:
                 continue
-            self.tag_id = msg.tag_ids[0]
+            self.tag_id = msg.tag_ids[index]
             self.drone.lock_xy()
             self.target = self.offset = offset
             self.offset_stamp = self.used_stamp
             rospy.loginfo('Stabilization: Kalman -> AprilTag (locked tag %d at offset (%.3f, %.3f) m)',
                           self.tag_id, offset[0], offset[1])
             return
-        raise RuntimeError('No AprilTag seen within {:.1f} s'.format(timeout))
+        name = 'AprilTag' if tag_id is None else 'AprilTag {}'.format(tag_id)
+        raise RuntimeError('No {} seen within {:.1f} s'.format(name, timeout))
 
     def command(self):
         msg = self._new_detection()

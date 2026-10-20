@@ -6,9 +6,9 @@ use_imu_acceleration: true
 # Fraction of bias-corrected horizontal acceleration used when prediction is enabled.
 imu_acceleration_gain: 0.25
 velocity_stddev: 0.12
-# Fixed controller velocity blend: 20% optical flow, 80% UWB/IMU when flow is fresh.
+# Fixed controller velocity blend: 30% optical flow, 70% UWB/IMU when flow is fresh.
 # Without a fresh accepted flow sample, use 100% UWB/IMU. Allowed range: 0 through 1.
-flow_velocity_weight: 0.2
+flow_velocity_weight: 0.3
 # Flow uncertainty (m/s) for outlier checks/covariance, not the blend percentage.
 flow_velocity_stddev: 0.4
 # Preserve the earlier camera speed limit and EMA rotation compensation.

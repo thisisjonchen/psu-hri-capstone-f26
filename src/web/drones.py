@@ -216,8 +216,8 @@ def execute(drone, script, args):
 def open_terminal(drone, cols, rows, start=False, active=lambda: True):
     """Attach to the drone's screen session; closing only detaches.
 
-    With start (the Connect button), set up SSH and start the nodes here so their
-    startup output is visible, then report the exit status as OSC 777.
+    With start (the Connect button), set up SSH, pull updates and start the nodes
+    with visible output, then report the exit status as OSC 777.
     """
     client = setup_ssh(drone) if start else connect(drone)
     try:
@@ -226,7 +226,8 @@ def open_terminal(drone, cols, rows, start=False, active=lambda: True):
         channel.get_pty(term='xterm-256color', width=cols, height=rows)
         attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)
         if start:
-            command = START + r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach
+            command = ('git -C ' + PACKAGE + ' pull --ff-only && ' + START +
+                       r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach)
         else:
             command = ("until %s status; do [ -n \"$waited\" ] || echo 'Nodes not started: click Connect.'; "
                        'waited=1; sleep 2; done; %s' % (START, attach))

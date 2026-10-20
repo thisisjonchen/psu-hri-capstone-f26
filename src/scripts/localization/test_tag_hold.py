@@ -92,6 +92,56 @@ class TagHoldTest(unittest.TestCase):
                     for call in log.call_args_list if call[0][0].startswith('Stabilization')]
         self.assertEqual(len(switches), 3)  # Lock, loss, reacquire.
 
+    def test_requested_tag_ignores_other_ids_and_locks_its_own_offset(self):
+        def frame():
+            self.advance(.1)
+            if self.drone.hover.call_count == 1:
+                self.see(tag_ids=(3,))
+            else:
+                self.see(tag_ids=(3, 5))
+                self.hold.detection.center_x = [120, 170]
+        self.drone.hover.side_effect = lambda _: frame()
+        with mock.patch('time.time', side_effect=[0, 1, 2, 4]):
+            self.hold.acquire(tag_id=5)
+        self.assertEqual(self.drone.hover.call_count, 2)
+        self.assertEqual(self.hold.tag_id, 5)
+        self.assertAlmostEqual(self.hold.target[0], .25)
+        self.assertAlmostEqual(self.hold.target[1], 0)
+        self.advance(.6)
+        self.see(tag_ids=(3,))
+        self.hold.command()
+        self.assertTrue(self.hold.lost)
+        self.assertEqual(self.hold.tag_id, 5)
+        self.assertEqual(self.drone.xy_anchor, (1, 2))
+
+    def test_lockon_routine_lands_after_hold_or_failed_acquisition(self):
+        script = os.path.join(os.path.dirname(SCRIPT), 'routines', 'apriltag_lockon.py')
+        for failed in (None, 'acquire'):
+            with self.subTest(failed=failed):
+                drone, hold = mock.Mock(mode='FLYING'), mock.Mock(tag_id=5)
+                if failed:
+                    getattr(hold, failed).side_effect = RuntimeError('tag flight failed')
+                self.ros.init_node = mock.Mock()
+                with mock.patch.dict(sys.modules, {
+                        'drone_controller': NS(Drone=lambda: drone),
+                        'tag_hold': NS(TagHold=lambda _: hold)}), \
+                        mock.patch.object(sys, 'argv', [script, '--fly', '--tag', '5', '--seconds', '2']):
+                    main = runpy.run_path(script)['main']
+                    if failed:
+                        with self.assertRaisesRegex(RuntimeError, 'tag flight failed'):
+                            main()
+                        drone.hover.assert_not_called()
+                    else:
+                        main()
+                        drone.hover.assert_called_once_with(2, hold.command)
+                        hold.finish.assert_called_once_with()
+                drone.move_to.assert_not_called()
+                drone.takeoff.assert_called_once_with(hold_xy=True)
+                drone.move_to_altitude.assert_called_once_with(.5)
+                hold.acquire.assert_called_once_with(3, tag_id=5)
+                drone.land.assert_called_once_with(hold_xy=True)
+                drone.disarm.assert_not_called()
+
     def test_no_tag_or_missing_calibration_fails(self):
         with self.assertRaises(RuntimeError):
             self.hold.acquire(timeout=0)

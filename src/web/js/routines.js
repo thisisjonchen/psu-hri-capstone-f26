@@ -47,8 +47,7 @@ class RoutineTerminal {
   }
 
   connectDrone() {
-    // Already attached to running nodes: starting again would change nothing.
-    if (!(this.enabled && this.socket && this.nodes)) this.setEnabled(true, true);
+    this.setEnabled(true, true);
   }
 
   attach(start = false) {
