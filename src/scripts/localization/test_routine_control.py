@@ -381,7 +381,7 @@ class RoutineControlTest(unittest.TestCase):
             self.assertEqual(drone.wait_for_stage.call_args_list, [mock.call('forward'), mock.call('land')])
             drone.takeoff.assert_called_once_with(
                 hold_xy=True, synchronized_stages=True, continue_height=.20)
-            drone.move_forward.assert_called_once_with(.3, speed_limit=None, timeout=15.)
+            drone.move_forward.assert_called_once_with(.3, speed_limit=.5, timeout=15.)
             drone.reset_mock()
             drone.move_forward.side_effect = RuntimeError('movement failed')
             with self.assertRaisesRegex(RuntimeError, 'movement failed'):
