@@ -105,8 +105,10 @@ dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
 body-axis displacement is converted once into a fixed room target. Horizontal moves
 request velocity proportional to the remaining error, capped at the requested speed.
-The forward prototype continues at 0.20 m without waiting for a settled hover;
-the takeoff altitude target remains active (0.25 m by default).
+The forward prototype continues at 0.20 m without waiting for a settled hover.
+Its velocity request is uncapped: 0.5 times the remaining position error
+(2 m ahead requests 1 m/s). The takeoff altitude target remains active
+(0.25 m by default). Controller output limits and paired-flight speed limits still apply.
 During UWB gaps, fusion continues predicting for up to 1 second since the last
 accepted fix, while IMU and altitude freshness requirements remain unchanged.
 Active holds keep their target and velocity feedback. If XY trim is enabled,

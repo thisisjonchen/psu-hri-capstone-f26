@@ -392,11 +392,15 @@ class Drone(object):
         """Move relative to the drone: x right, y forward, z up (meters).
 
         Horizontal distance and heading come from the UWB/IMU room pose.
+        Use speed_limit=None for an uncapped proportional velocity request.
         """
         if self.mode != 'FLYING':
             raise RuntimeError('Drone must be flying before moving')
-        if any(math.isnan(v) or math.isinf(v) or v <= 0 for v in (speed_limit, timeout)):
+        limits = (timeout,) if speed_limit is None else (speed_limit, timeout)
+        if any(math.isnan(v) or math.isinf(v) or v <= 0 for v in limits):
             raise ValueError('Movement speed and timeout must be finite and positive')
+        if speed_limit is None:
+            speed_limit = float('inf')
         if x == 0 and y == 0 and z == 0 and room_target is None:
             return
         horizontal = math.hypot(x, y)

@@ -12,9 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-FORWARD_SPEED_MPS = 0.06 # Below both paired-flight speed budgets at default tuning.
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fly', action='store_true', help='run the flight')
@@ -34,8 +31,8 @@ def main():
         drone.wait_for_stage('forward')
         drone.unlock_xy()
         rospy.loginfo('Moving forward %.2f m', args.distance)
-        drone.move_forward(args.distance, speed_limit=FORWARD_SPEED_MPS,
-                           timeout=max(15.0, 2 * args.distance / FORWARD_SPEED_MPS + 5.0))
+        drone.move_forward(args.distance, speed_limit=None,
+                           timeout=max(15.0, 20 * args.distance + 5.0))
         drone.lock_xy()
         drone.wait_for_stage('land')
     finally:

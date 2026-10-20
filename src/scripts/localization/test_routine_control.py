@@ -123,6 +123,17 @@ class RoutineControlTest(unittest.TestCase):
         self.assertTrue(all(math.hypot(*command) <= .06 for command in commands))
         final = self.fusion.messages['/pidrone/desired/twist'][-1]
         self.assertEqual((final.linear.x, final.linear.y), (0, 0))
+        commands[:] = []
+        pose.pose.pose.position.x, pose.pose.pose.position.y = 1, 2
+        q.x, q.y, q.z, q.w = quaternion(yaw=math.pi/2)
+        drone._fused_received(pose)
+        positions = iter([(1.061, 2), (1, 2.9), (1, 3)])
+        drone.move(x=1, speed_limit=None)
+        self.assertAlmostEqual(commands[0][0], .5)
+        self.assertAlmostEqual(commands[1][0] / commands[1][1], -.061)
+        self.assertAlmostEqual(commands[2][1], .05)
+        final = self.fusion.messages['/pidrone/desired/twist'][-1]
+        self.assertEqual((final.linear.x, final.linear.y), (0, 0))
         self.fusion.ros_now += 1
         with self.assertRaisesRegex(RuntimeError, 'missing/stale'):
             drone.move(y=.2)
@@ -136,7 +147,7 @@ class RoutineControlTest(unittest.TestCase):
         self.ros.sleep = stationary_tick
         stationary_tick(0)
         with self.assertRaisesRegex(RuntimeError, 'No horizontal movement detected: 0.000 m'):
-            drone.move_forward(.25, speed_limit=.06)
+            drone.move_forward(.25, speed_limit=None)
         self.ros.logerr.assert_called_once()
         self.assertIn('No horizontal movement detected', str(self.ros.logerr.call_args.args[1]))
         final = self.fusion.messages['/pidrone/desired/twist'][-1]
@@ -370,7 +381,7 @@ class RoutineControlTest(unittest.TestCase):
             self.assertEqual(drone.wait_for_stage.call_args_list, [mock.call('forward'), mock.call('land')])
             drone.takeoff.assert_called_once_with(
                 hold_xy=True, synchronized_stages=True, continue_height=.20)
-            drone.move_forward.assert_called_once_with(.3, speed_limit=.06, timeout=15.)
+            drone.move_forward.assert_called_once_with(.3, speed_limit=None, timeout=15.)
             drone.reset_mock()
             drone.move_forward.side_effect = RuntimeError('movement failed')
             with self.assertRaisesRegex(RuntimeError, 'movement failed'):
