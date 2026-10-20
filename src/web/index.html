@@ -11,7 +11,7 @@
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
-  <script src="js/anchor-calibration.js?v=20261019-calibration-map" defer></script>
+  <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
   <script src="js/main.js?v=20261019-connect-panel" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
@@ -75,10 +75,20 @@
           <div class="calibration-actions">
             <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>1. Scan</button>
             <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>2. Measure</button>
+            <button class="btn btn-outline-secondary" id="calibration-edit" type="button" disabled>Adjust saved layout</button>
             <button class="btn btn-primary" id="calibration-apply" type="button" disabled>3. Save</button>
             <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
           </div>
-          <pre class="calibration-preview" id="calibration-preview" hidden></pre>
+          <div class="calibration-preview" id="calibration-preview" hidden>
+            <p>Adjust coordinates in meters, then save. Antennas must share the same height.</p>
+            <div class="calibration-coordinates">
+              <span>Anchor</span><span>X (m)</span><span>Y (m)</span>
+              <span id="calibration-label-3"></span><input id="calibration-x-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left X"><input id="calibration-y-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left Y">
+              <span id="calibration-label-2"></span><input id="calibration-x-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right X"><input id="calibration-y-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right Y">
+              <span id="calibration-label-0"></span><input id="calibration-x-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left X"><input id="calibration-y-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left Y">
+              <span id="calibration-label-1"></span><input id="calibration-x-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right X"><input id="calibration-y-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right Y">
+            </div>
+          </div>
           <p class="map-note" id="calibration-status" role="status" aria-live="polite">Calibration server offline.</p>
           </div>
           <div class="calibration-success" id="calibration-success" role="status" hidden>
@@ -116,7 +126,7 @@
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
-      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p><strong>Keyboard shortcuts</strong></p>
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p id="peer-relay-status" role="status">Change peer relay before arming. Off disables automatic spacing control; routine synchronization stays on.</p><p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
@@ -134,7 +144,7 @@
           <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
           <button class="btn btn-danger" data-command="disarm">Disarm all</button>
         </div>
-        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
+        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><button class="btn btn-outline-secondary" id="peer-relay-toggle" type="button" aria-pressed="true" aria-describedby="peer-relay-status" disabled>Peer relay: loading</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
       </div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
       <div class="routine-terminals">

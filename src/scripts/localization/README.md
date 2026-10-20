@@ -264,7 +264,9 @@ Flight and navigation still use each drone's live telemetry.
    The dashboard does not configure roles or PAN IDs.
    An empty BLE PAN value stays unknown; calibration still requires valid live
    distances between all six anchor pairs and rejects conflicting reported PAN IDs.
-2. Press **Measure layout** and review the shape and dimensions.
+2. Press **Measure** and review the coordinates. Adjust each anchor's X/Y in meters
+   if needed. To correct an existing calibration without measuring again, press
+   **Adjust saved layout**. Edits stay in the form until you press **Save**.
 3. Press **Save layout** within two minutes. Calibration completes after BLE readback
    confirms the saved coordinates on all four anchors. The server keeps four BLE
    connections open through preflight and save, then disconnects them. If the laptop

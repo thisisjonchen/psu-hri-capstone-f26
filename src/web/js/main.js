@@ -1308,14 +1308,65 @@ function stopHeldKeys() {
 
 // Keep one selection across staggered arming. Onboard PIDs latch it when armed.
 let coordinationPaired = null;
+let peerRelayEnabled = null;
+let peerRelayBusy = false;
+let peerRelayAvailable = false;
+function canChangePeerRelay() {
+  return Object.values(drones).filter(drone => drone.connected).every(drone =>
+    drone.modeReceivedAt !== null && Date.now() - drone.modeReceivedAt >= 0 &&
+    Date.now() - drone.modeReceivedAt <= 1500 &&
+    drone.field('flightMode').textContent === 'DISARMED');
+}
+
+function renderPeerRelay() {
+  const button = document.getElementById('peer-relay-toggle');
+  button.textContent = 'Peer relay: ' + (peerRelayEnabled === null ? 'loading' : peerRelayEnabled ? 'on' : 'off');
+  button.setAttribute('aria-pressed', String(peerRelayEnabled !== false));
+  button.disabled = peerRelayBusy || !peerRelayAvailable || !canChangePeerRelay();
+  document.getElementById('peer-relay-status').textContent = !peerRelayAvailable
+    ? 'Peer relay server unavailable.'
+    : peerRelayEnabled
+      ? 'Change before arming. Off disables automatic spacing control.'
+      : 'Automatic spacing control off for the next flight. Routine synchronization stays on.';
+  button.title = document.getElementById('peer-relay-status').textContent;
+}
+
+async function updatePeerRelay(enabled) {
+  if (peerRelayBusy) return;
+  const changing = typeof enabled === 'boolean';
+  if (changing && (!peerRelayAvailable || !canChangePeerRelay())) return;
+  peerRelayBusy = true;
+  renderPeerRelay();
+  try {
+    const options = { signal: AbortSignal.timeout(2000) };
+    if (changing) Object.assign(options, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Routine-Request': '1' },
+      body: JSON.stringify({ enabled })
+    });
+    const response = await fetch('/api/peer-relay', options);
+    const state = await response.json();
+    if (!response.ok || typeof state.enabled !== 'boolean') throw new Error('Relay setting unavailable');
+    peerRelayEnabled = state.enabled;
+    peerRelayAvailable = true;
+    publishCoordinationSelection();
+  } catch (_) {
+    peerRelayAvailable = false;
+    if (changing) feedback('Could not confirm the peer relay setting. Wait for the server to reconnect.');
+  } finally {
+    peerRelayBusy = false;
+    renderPeerRelay();
+  }
+}
+
 function publishCoordinationSelection() {
+  renderPeerRelay();
   const connected = Object.values(drones).filter(drone => drone.connected);
   if (!connected.length) { coordinationPaired = null; return; }
   const fresh = drone => drone.modeReceivedAt !== null &&
     Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500;
   if (!connected.every(fresh)) return;
   if (connected.every(drone => drone.field('flightMode').textContent === 'DISARMED')) {
-    coordinationPaired = connected.length === 2;
+    coordinationPaired = peerRelayEnabled !== false && connected.length === 2;
   }
   if (coordinationPaired === null) return;
   connected.forEach(drone => drone.publish('coordination', { data: coordinationPaired }));
@@ -1355,6 +1406,9 @@ document.addEventListener('DOMContentLoaded', () => {
   ['drone1', 'drone2'].forEach(id => { drones[id] = new DroneSession(id); });
   fleetMap = new FleetMap();
   anchorCalibration = new AnchorCalibration();
+  document.getElementById('peer-relay-toggle').addEventListener('click', () => updatePeerRelay(!peerRelayEnabled));
+  updatePeerRelay();
+  setInterval(() => updatePeerRelay(), 2000);
   setInterval(() => {
     publishCoordinationSelection();
     Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); });

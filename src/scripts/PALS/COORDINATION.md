@@ -101,6 +101,10 @@ ROS master loads the files again, so the ROS-only solo override is not persisten
 Missing peer data never switches to solo mode. Invalid configuration or an unknown
 automatic identity inhibits XY motion while preserving altitude and watchdogs.
 The dashboard server starts the laptop peer relay automatically.
+Use **Peer relay** in Controls before arming to turn off both peer telemetry and
+automatic spacing control for the next flight. Routine start/stage synchronization
+still works. The toggle locks while any connected drone is armed or its mode is stale.
+The setting is shared by dashboard tabs and resets to on when the laptop server restarts.
 
 Dashboard Execute now waits for fresh readiness from every selected routine before
 sending its start releases. This is independent of the distance guard and does not

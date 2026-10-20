@@ -390,10 +390,15 @@ class PIDController(object):
         command = self.pid.step(self.pid_error, self.desired_yaw_velocity,
                                 self.altitude_sample, integrate_xy=integrate_xy)
         if self.current_mode == 'FLYING':
+            filtered_xy = ((self.current_velocity.x + self.pid_error.x / 100.,
+                            self.current_velocity.y + self.pid_error.y / 100.)
+                           if xy_ready else (0., 0.))
             rospy.loginfo_throttle(1,
                 'XY PID: local_ready=%s position_control=%s desired=(%.3f, %.3f) '
+                'filtered=(%.3f, %.3f) coordination=%s '
                 'measured=(%.3f, %.3f) m/s roll=%.1f pitch=%.1f' % (
                     xy_ready, self.position_control, requested_xy[0], requested_xy[1],
+                    filtered_xy[0], filtered_xy[1], self.coordination_status,
                     self.current_velocity.x, self.current_velocity.y, command[0], command[1]))
         return command
 

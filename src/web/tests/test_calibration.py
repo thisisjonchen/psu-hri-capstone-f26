@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
+from calibration.anchor_calibration import (decode_info, decode_location, solve_layout, adjust_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
@@ -77,6 +77,21 @@ class CalibrationTest(unittest.TestCase):
         self.assertLess(layout['rms'], 1e-6)
 
 
+    def test_adjustment_preserves_identity_and_rejects_invalid_coordinates(self):
+        positions = solve_layout(BOARDS, ROWS)['positions']
+        edits = [dict(id=p['id'], x=p['x'], y=p['y']) for p in positions]
+        edits[2].update(x=4.2, ble='untrusted-address', z=10)
+        adjusted = adjust_layout(positions, edits)
+        self.assertEqual(adjusted[2], dict(positions[2], x=4.2))
+        self.assertAlmostEqual(positions[2]['x'], 4)
+        for edit in ({'id': 'unknown'}, {'x': float('nan')}, {'y': 1001}, {'x': ''},
+                     {'x': 0, 'y': 0}):
+            bad = copy.deepcopy(edits)
+            bad[2].update(edit)
+            with self.assertRaises(ValueError):
+                adjust_layout(positions, bad)
+
+
 class CoordinatorTest(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
@@ -110,6 +125,19 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(self.node.state['stage'], 'complete')
         self.assertTrue(self.node.state['layout']['verified'])
         layout = self.node.status()['layout']
+        self.node.request({'action': 'edit'})
+        self.node.worker.join()
+        self.assertEqual(self.node.state['stage'], 'preview')
+        self.assertEqual(self.node.preview['positions'], layout['positions'])
+        self.assertEqual(self.ble.measure.call_count, 1)
+        self.assertEqual(self.ble.save.call_count, 1)
+        edits = [dict(id=p['id'], x=p['x'], y=p['y']) for p in layout['positions']]
+        edits[2]['x'] = 4.2
+        self.node.run(dict(action='apply', token=self.node.state['token'], positions=edits))
+        self.assertEqual(self.node.state['stage'], 'complete')
+        self.assertEqual(self.ble.save.call_args.args[0][2]['x'], 4.2)
+        layout = self.node.status()['layout']
+        self.assertEqual(layout['positions'][2]['x'], 4.2)
         self.node.close()
         self.node = self.create()
         self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))

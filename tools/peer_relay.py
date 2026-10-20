@@ -117,7 +117,7 @@ def peer_messages(snapshots, now, received_now):
     return messages
 
 
-def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
+def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090'), enabled=None):
     """Wait for both ROS connections and reconnect until the laptop server stops."""
     from websockets.sync.client import connect
     from websockets.exceptions import WebSocketException
@@ -141,6 +141,10 @@ def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
                     clients.append(Client(stack.enter_context(connect(
                         url, proxy=None, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=5))))
                 while not stop.is_set():
+                    if enabled is not None and not enabled.is_set():
+                        report('Peer relay disabled.')
+                        stop.wait(.1)
+                        continue
                     try:
                         messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
                         for client, message in zip(clients, messages):

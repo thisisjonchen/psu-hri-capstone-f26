@@ -73,6 +73,27 @@ def encode_position(position):
     return struct.pack('<iiiB', *([int(round(v * 1000)) for v in coordinates] + [100]))
 
 
+def adjust_layout(positions, edits):
+    """Change XY only; keep each anchor's verified identity and shared Z."""
+    if not isinstance(edits, list) or len(edits) != 4:
+        raise ValueError('Provide X/Y coordinates for all four anchors')
+    adjusted = []
+    for original, edit in zip(positions, edits):
+        if not isinstance(edit, dict) or edit.get('id') != original['id']:
+            raise ValueError('Anchor selection changed; open a new preview')
+        try:
+            position = dict(original, x=float(edit['x']), y=float(edit['y']), z=0.0)
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('Enter numeric X/Y coordinates for every anchor')
+        encode_position(position)
+        adjusted.append(position)
+    for i, a in enumerate(adjusted):
+        for b in adjusted[i + 1:]:
+            if math.hypot(a['x'] - b['x'], a['y'] - b['y']) < 0.3:
+                raise ValueError('Minimum anchor spacing is 0.3 m')
+    return adjusted
+
+
 def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
     """Fit six ranges in the shared Z=0 plane; A0 is origin, A1 sets +X."""
     if len(anchors) != 4 or len(set(a['id'] for a in anchors)) != 4:

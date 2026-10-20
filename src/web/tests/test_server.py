@@ -1,5 +1,8 @@
 """Hardware-free checks for the laptop dashboard server."""
 import mimetypes
+import io
+import json
+from email.message import Message
 import subprocess
 import sys
 import threading
@@ -61,6 +64,52 @@ class ResponseTest(unittest.TestCase):
 
 
 class PeerRelayLifecycleTest(unittest.TestCase):
+    def test_toggle_api_validates_boolean_and_returns_shared_state(self):
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.allowed = lambda: True
+        handler.respond = mock.Mock()
+        handler.server = mock.Mock(relay_enabled=threading.Event())
+        handler.path = '/api/peer-relay'
+        for value in (False, True, 'false'):
+            body = json.dumps({'enabled': value}).encode()
+            handler.headers = Message()
+            handler.headers['Content-Type'] = 'application/json'
+            handler.headers['X-Routine-Request'] = '1'
+            handler.headers['Content-Length'] = str(len(body))
+            handler.rfile = io.BytesIO(body)
+            handler.do_POST()
+            if isinstance(value, bool):
+                handler.respond.assert_called_with(200, {'enabled': value})
+                handler.do_GET()
+                handler.respond.assert_called_with(200, {'enabled': value})
+            else:
+                self.assertEqual(handler.respond.call_args.args[0], 400)
+                self.assertTrue(handler.server.relay_enabled.is_set())
+
+    def test_disabled_relay_stops_forwarding_and_can_resume(self):
+        stop, enabled = threading.Event(), threading.Event()
+        clients = [mock.Mock(), mock.Mock()]
+        messages = [{'drone_id': 'drone2'}, {'drone_id': 'drone1'}]
+        waits = 0
+        def wait(_):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                enabled.set()
+            elif waits == 2:
+                enabled.clear()
+            else:
+                stop.set()
+        with mock.patch('websockets.sync.client.connect', return_value=mock.MagicMock()), \
+                mock.patch.object(peer_relay, 'Client', side_effect=clients), \
+                mock.patch.object(peer_relay, 'peer_messages', return_value=messages) as states, \
+                mock.patch.object(stop, 'wait', side_effect=wait):
+            peer_relay.run(stop, enabled=enabled)
+        states.assert_called_once()
+        for client, message in zip(clients, messages):
+            client.send.assert_called_once_with({
+                'op': 'publish', 'topic': peer_relay.PEER_TOPIC, 'msg': message})
+
     def test_waits_for_pair_skips_invalid_data_and_reconnects_after_loss(self):
         stop = threading.Event()
         sockets = [mock.MagicMock() for _ in range(5)]

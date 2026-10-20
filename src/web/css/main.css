@@ -48,9 +48,9 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 #fleet-xyChart:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
 .map-ready #fleet-xyChart { cursor: crosshair; }
 .map-ready #fleet-xyChart.target-dragging { cursor: grabbing; }
-.calibration-grid select { width: 100%; min-width: 0; min-height: var(--control-compact); border: 1px solid #dce3ed; border-radius: var(--radius-control); padding: 6px var(--space-2); color: var(--ink); background: var(--surface); font: 400 var(--type-label)/20px var(--font-ui); }
+.calibration-grid select, .calibration-coordinates input { width: 100%; min-width: 0; min-height: var(--control-compact); border: 1px solid #dce3ed; border-radius: var(--radius-control); padding: 6px var(--space-2); color: var(--ink); background: var(--surface); font: 400 var(--type-label)/20px var(--font-ui); }
 .target-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); width: 100%; }
-.calibration-grid select:focus-visible, #calibration-toggle:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
+.calibration-grid select:focus-visible, .calibration-coordinates input:focus-visible, #calibration-toggle:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
 .target-status { font-variant-numeric: tabular-nums; }
 .canvas-wrap.flight-map-wrap { position: relative; width: 100%; height: clamp(320px, 35vw, 480px); margin-bottom: var(--space-3); }
 .map-unavailable canvas { visibility: hidden; }
@@ -109,7 +109,8 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .calibration-body .map-note { margin: var(--space-3) 0; overflow-wrap: anywhere; }
 .calibration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-3); }
 .calibration-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-3); }
-.calibration-preview { margin: var(--space-3) 0; color: var(--ink); font: var(--type-label)/1.5 var(--font-ui); font-variant-numeric: tabular-nums; white-space: pre-wrap; overflow-wrap: anywhere; }
+.calibration-preview { margin: var(--space-3) 0; color: var(--ink); font: var(--type-label)/1.5 var(--font-ui); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.calibration-coordinates { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 1fr)); align-items: center; gap: var(--space-2); }
 .camera-viewport { display: grid; align-items: center; justify-items: start; min-width: 0; min-height: 0; }
 .camera-content { display: grid; gap: 6px; width: 100%; min-width: 0; }
 .camera-content > .panel-header { margin: 0; }

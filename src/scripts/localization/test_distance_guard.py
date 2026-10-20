@@ -118,6 +118,30 @@ class DistancePIDTest(unittest.TestCase):
         self.assertEqual(self.c.current_mode, 'FLYING')
         self.assertEqual(self.c.coordination_status, 'too_close')
 
+    def test_blocked_forward_request_logs_filtered_velocity_for_both_drones(self):
+        for own, other in [('drone1', 'drone2'), ('drone2', 'drone1')]:
+            self.fixture.params['/pidrone/coordination'].update(
+                drone_id=own, peer_id=other, min_distance=.85,
+                max_distance=1.15, nominal_separation_m=1.)
+            controller = self.fixture.controller()
+            controller.room_generation_callback(NS(data=0))
+            controller.room_pose = copy.deepcopy(controller.room_pose)
+            controller.room_pose.pose.covariance[0] = .01
+            controller.room_pose.pose.covariance[7] = .01
+            peer = self.peer()
+            peer.drone_id, peer.recipient_id = other, own
+            controller.peer_state_callback(peer)
+            command = helpers.twist()
+            command.linear.y = .5
+            controller.desired_twist_callback(command)
+            controller.step()
+            self.assertEqual(controller.coordination_status, 'uncertainty_too_large')
+            self.assertAlmostEqual(controller.current_velocity.y + controller.pid_error.y / 100., 0)
+            message = self.fixture.ros.loginfo_throttle.call_args[0][1]
+            self.assertIn('desired=(0.000, 0.500)', message)
+            self.assertIn('filtered=(0.000, 0.000) coordination=uncertainty_too_large', message)
+            self.assertEqual(controller.current_mode, 'FLYING')
+
     def test_base_selection_is_latched_until_disarm_and_missing_selection_is_not_solo(self):
         self.c.current_mode_callback(NS(mode='DISARMED'))
         self.c.coordination_selection_callback(NS(data=False))

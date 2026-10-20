@@ -59,6 +59,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == '/api/calibration':
             self.respond(200, self.server.calibration.status())
+        elif url.path == '/api/peer-relay':
+            self.respond(200, {'enabled': self.server.relay_enabled.is_set()})
         elif url.path == '/api/routine':
             drone = parse_qs(url.query).get('drone', [''])[0]
             try:
@@ -72,7 +74,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if not self.allowed():
             return
         headers = {'/api/calibration': 'X-Calibration-Request', '/api/execute': 'X-Routine-Request',
-                   '/api/nodes': 'X-Routine-Request'}
+                   '/api/nodes': 'X-Routine-Request', '/api/peer-relay': 'X-Routine-Request'}
         if self.path not in headers:
             self.send_error(404)
             return
@@ -85,6 +87,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if not 0 < length <= 4096:
                 raise ValueError('Request must be between 1 and 4096 bytes')
             request = json.loads(self.rfile.read(length))
+            if self.path == '/api/peer-relay':
+                if not isinstance(request, dict) or type(request.get('enabled')) is not bool:
+                    raise ValueError('enabled must be a boolean')
+                if request['enabled']:
+                    self.server.relay_enabled.set()
+                else:
+                    self.server.relay_enabled.clear()
+                self.respond(200, {'enabled': self.server.relay_enabled.is_set()})
+                return
             if self.path == '/api/execute':
                 drones.execute(request['drone'], request['script'], request['args'])
                 self.respond(200, {'started': True})
@@ -105,7 +116,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.respond(202, {'accepted': True})
 
     def log_message(self, format, *args):
-        if urlsplit(self.path).path not in ('/api/calibration', '/api/routine'):
+        if urlsplit(self.path).path not in ('/api/calibration', '/api/routine', '/api/peer-relay'):
             super().log_message(format, *args)
 
 
@@ -165,7 +176,10 @@ def main():
         terminals = serve(terminal, '127.0.0.1', args.port + 1, origins=origins)
         threading.Thread(target=terminals.serve_forever, daemon=True).start()
         relay_stop = threading.Event()
-        relay = threading.Thread(target=peer_relay.run, args=(relay_stop,), daemon=True)
+        server.relay_enabled = threading.Event()
+        server.relay_enabled.set()
+        relay = threading.Thread(target=peer_relay.run, args=(relay_stop,),
+                                 kwargs={'enabled': server.relay_enabled}, daemon=True)
         relay.start()
         print('Dashboard: http://localhost:%d' % server.server_port, flush=True)
         try:

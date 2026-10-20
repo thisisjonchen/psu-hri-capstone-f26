@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // Test command routing without opening network sockets or contacting hardware.
-function dashboard({ discover = true, calibrationFetch = null } = {}) {
+function dashboard({ discover = true, calibrationFetch = null, relayFetch = null } = {}) {
   const listeners = {};
   const events = [];
   const retries = [];
@@ -48,12 +48,14 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   }
   for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
-    'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
-  for (const name of ['scan', 'measure', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
+    'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status',
+    'peer-relay-toggle', 'peer-relay-status']) elements.set(id, element());
+  for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
   elements.get('calibration-panel').hidden = true;
   elements.get('calibration-success').hidden = true;
   for (let i = 0; i < 4; i++) {
     elements.set('calibration-anchor-' + i, element());
+    for (const name of ['x', 'y', 'label']) elements.set('calibration-' + name + '-' + i, element());
   }
   for (const id of ['drone1', 'drone2']) {
     const status = elements.get(id + '-connectionStatus');
@@ -109,6 +111,10 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     AbortSignal,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     fetch(url, options = {}) {
+      if (url === '/api/peer-relay') {
+        if (relayFetch) return relayFetch(options);
+        return Promise.resolve({ ok: true, json: async () => ({ enabled: true }) });
+      }
       assert.equal(url, '/api/calibration');
       if (options.method === 'POST') {
         assert.equal(options.headers['X-Calibration-Request'], '1');
@@ -128,7 +134,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     Quaternion: class { rotateVector(vector) { return vector; } },
     ROSLIB: { Ros, Topic, Message: class { constructor(data) { Object.assign(this, data); } } },
     Date: class extends Date { static now() { return now; } },
-    setInterval(callback, delay) { const id = ++nextTimer; (delay === 250 || delay === 500 ? maintenanceTimers : timers).set(id, callback); return id; },
+    setInterval(callback, delay) { const id = ++nextTimer; (delay === 1000 ? timers : maintenanceTimers).set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
     setTimeout(callback) { retries.push(callback); },
     clearTimeout() {},
@@ -183,6 +189,50 @@ test('coordination selects solo or paired while disarmed and keeps the selection
   app.advanceTime(2000);
   app.maintenanceTimers.forEach(callback => callback());
   assert.equal(b.publishers.coordination.messages.length, count);
+});
+
+test('peer relay toggle selects independent control before flight and locks while armed', async () => {
+  let enabled = true;
+  let fail = false;
+  const writes = [];
+  const app = dashboard({ relayFetch: async options => {
+    if (options.method === 'POST') {
+      if (fail) throw new Error('server unavailable');
+      assert.equal(options.headers['X-Routine-Request'], '1');
+      enabled = JSON.parse(options.body).enabled;
+      writes.push(enabled);
+    }
+    return { ok: true, json: async () => ({ enabled }) };
+  } });
+  await new Promise(resolve => setImmediate(resolve));
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  const button = app.elements.get('peer-relay-toggle');
+  assert.equal(button.disabled, false);
+  await button.listeners.click();
+  assert.deepEqual(writes, [false]);
+  assert.equal(last(a, 'coordination').data, false);
+  assert.equal(last(b, 'coordination').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
+  assert.equal(button.disabled, true);
+  await button.listeners.click();
+  assert.deepEqual(writes, [false]);
+  assert.equal(last(b, 'coordination').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
+  await button.listeners.click();
+  assert.deepEqual(writes, [false, true]);
+  assert.equal(last(a, 'coordination').data, true);
+  assert.equal(last(b, 'coordination').data, true);
+  app.advanceTime(1600);
+  await button.listeners.click();
+  assert.deepEqual(writes, [false, true], 'stale mode must not allow toggling');
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  fail = true;
+  await button.listeners.click();
+  assert.equal(last(a, 'coordination').data, true, 'failed toggle must not select independent control');
+  assert.equal(last(b, 'coordination').data, true);
+  assert.equal(button.disabled, true);
+  assert.match(app.elements.get('peer-relay-status').textContent, /unavailable/);
 });
 
 test('room targets require live fused localization and explicit send, stay isolated, and stop on conflict', () => {
@@ -283,8 +333,10 @@ test('shared commands reach both bridges and individual commands only their targ
   }
 });
 
-test('a synchronized start releases every Execute drone together once all are freshly ready', () => {
-  const app = dashboard();
+for (const enabled of [true, false]) {
+test(`synchronized start waits for both drones with peer relay ${enabled ? 'on' : 'off'}`, async () => {
+  const app = dashboard({ relayFetch: async () => ({ ok: true, json: async () => ({ enabled }) }) });
+  await new Promise(resolve => setImmediate(resolve));
   const a = app.connect('drone1'), b = app.connect('drone2');
   const starts = () => [a, b].map(drone => drone.publishers.routineStart.messages.length);
   assert.ok(a.publishers.routineStart.advertised && b.publishers.routineStart.advertised);
@@ -302,6 +354,7 @@ test('a synchronized start releases every Execute drone together once all are fr
   assert.deepEqual(starts(), [0, 0]); // Wait for both HTTP launches to succeed too.
   app.confirmSyncStart();
   assert.deepEqual(starts(), [1, 1]);
+  for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, enabled);
   app.receive(a, '/pidrone/routine/ready', {});
   app.receive(b, '/pidrone/routine/ready', {});
   assert.deepEqual(starts(), [1, 1]);  // Released once per Execute.
@@ -317,8 +370,9 @@ test('a synchronized start releases every Execute drone together once all are fr
   assert.deepEqual(starts(), [1, 1]);
 });
 
-test('flight stages require both fresh participants in the current run and cancel on disconnect', () => {
-  const app = dashboard();
+test(`flight stages wait for both drones with peer relay ${enabled ? 'on' : 'off'}`, async () => {
+  const app = dashboard({ relayFetch: async () => ({ ok: true, json: async () => ({ enabled }) }) });
+  await new Promise(resolve => setImmediate(resolve));
   const a = app.connect('drone1'), b = app.connect('drone2');
   const begin = () => {
     app.awaitSyncStart(['drone1', 'drone2'], ['forward', 'land']);
@@ -346,12 +400,14 @@ test('flight stages require both fresh participants in the current run and cance
   assert.equal(stage(a), 'forward'); // One drone is still completing movement.
   ready(b, 'land');
   assert.equal(stage(a), 'land'); assert.equal(stage(b), 'land');
+  for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, enabled);
   const nextRun = begin();
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
   b.disconnect();
   ready(a, 'forward', nextRun);
   assert.equal(stage(a), 'start');
 });
+}
 
 test('an offline partner blocks shared flight commands without queued or partial sends', () => {
   const app = dashboard();
@@ -977,7 +1033,8 @@ test('scan, assignment, measurement and saving work independently of drones', as
   const drone = app.connect('drone2');
   app.receive(drone, '/pidrone/mode', { mode: 'ARMED' });
   await app.anchorCalibration.request('apply');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'reviewed-token' });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'reviewed-token',
+    positions: boards.map((p, i) => ({ id: p.id, x: i, y: i })) });
   assert.equal(app.elements.get('calibration-panel').hidden, false);
   assert.equal(app.elements.get('calibration-success').hidden, true);
   status();
@@ -1022,6 +1079,35 @@ test('room setup works without drones and reuses saved corners without a scan', 
     ...anchorsAt(100, positions.map(p => [p.x, p.y, p.z])), anchor_ids: boards.map(b => b.id) });
   assert.equal(app.fleetMap.layoutUsable, true);
   assert.equal(app.elements.get('target-send').disabled, true);
+});
+
+test('saved anchor coordinates can be adjusted without polling overwriting edits', async () => {
+  const app = dashboard({ discover: false });
+  const boards = ['980C', '9781', 'CA83', '4D12'].map((id, i) =>
+    ({ id, ble: 'uuid-' + i, active: true, initiator: i === 3, pan: null }));
+  const positions = boards.map((board, i) => ({ ...board, x: [0, 2, 4, 2][i], y: [0, 0, 6, 6][i], z: 0 }));
+  const state = { stage: 'idle', message: 'Ready', boards, busy: false,
+    layout: { revision: 'saved', frame: 'map', verified: false, positions } };
+  app.anchorCalibration.update(state);
+  await app.anchorCalibration.request('edit');
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'edit' });
+  const preview = { ...state, stage: 'preview', token: 'edit-token', preview: { positions } };
+  app.anchorCalibration.update(preview);
+  const topLeft = app.elements.get('calibration-x-3');
+  topLeft.value = '0';
+  topLeft.listeners.input();
+  app.anchorCalibration.update(preview);
+  assert.equal(topLeft.value, '0');
+  const topRight = app.elements.get('calibration-x-2');
+  topRight.value = '';
+  topRight.listeners.input();
+  assert.equal(app.elements.get('calibration-apply').disabled, true);
+  topRight.value = '2';
+  topRight.listeners.input();
+  await app.anchorCalibration.request('apply');
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'edit-token',
+    positions: boards.map((p, i) => ({ id: p.id, x: [0, 2, 2, 0][i], y: [0, 0, 6, 6][i] })) });
+  assert.equal(app.calibrationRequests.length, 2);
 });
 
 test('late status and request timeouts cannot unlock calibration or trigger duplicate requests', async () => {
