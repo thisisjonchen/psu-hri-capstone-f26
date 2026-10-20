@@ -258,6 +258,10 @@ class FlightController(object):
         """ Connect to the flight controller board """
         # (if the flight cotroll usb is unplugged and plugged back in,
         #  it becomes .../USB1)
+        # Provisioned drones pin the board's /dev/serial/by-id path.
+        port = os.environ.get('PALS_FC_PORT')
+        if port:
+            return MultiWii(port)
         try:
             board = MultiWii('/dev/ttyACM0')
         except SerialException as e:

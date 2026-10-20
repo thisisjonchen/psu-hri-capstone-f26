@@ -6,11 +6,10 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-import fcntl
 import threading
 import uuid
 
-from calibration.anchor_calibration import solve_layout
+from calibration.anchor_calibration import solve_layout, adjust_layout
 from calibration.pans_ble import PansBLE
 from time import monotonic
 
@@ -19,20 +18,30 @@ class CalibrationJournal:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_file = open(str(self.path) + '.lock', 'a')
+        self.lock_file = open(str(self.path) + '.lock', 'a+b')
         try:
-            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == 'nt':
+                import msvcrt
+                self.lock_file.seek(0)
+                msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.lock_file.close()
             raise ValueError('Another laptop calibration service is using this recovery file')
-        self.values = json.loads(self.path.read_text()) if self.path.exists() else {}
-        if not isinstance(self.values, dict):
-            raise ValueError('Invalid calibration recovery file; restore it before starting')
+        try:
+            self.values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
+            if not isinstance(self.values, dict):
+                raise ValueError('Invalid calibration recovery file; restore it before starting')
+        except Exception:
+            self.close()
+            raise
 
     def save(self, values):
         descriptor, temporary = tempfile.mkstemp(dir=self.path.parent, prefix='.calibration-')
         try:
-            with os.fdopen(descriptor, 'w') as stream:
+            with os.fdopen(descriptor, 'w', encoding='utf-8', newline='\n') as stream:
                 json.dump(values, stream, allow_nan=False)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -102,7 +111,7 @@ class AnchorCalibration:
             raise ValueError('Calibration cancelled')
 
     def request(self, request):
-        if not isinstance(request, dict) or request.get('action') not in ('scan', 'measure', 'apply', 'cancel'):
+        if not isinstance(request, dict) or request.get('action') not in ('scan', 'measure', 'edit', 'apply', 'cancel'):
             raise ValueError('Unknown calibration action')
         action = request['action']
         with self.lock:
@@ -167,17 +176,28 @@ class AnchorCalibration:
                 self.preview_at = monotonic()
                 self.update('preview', 'Review the layout, then save it to all four anchors.',
                             preview=preview, token=str(uuid.uuid4()))
+            elif action == 'edit':
+                layout = self.state.get('layout')
+                if not layout or self.dirty:
+                    raise ValueError('No saved layout to adjust; measure first')
+                self.preview = {'positions': copy.deepcopy(layout['positions'])}
+                self.preview_at = monotonic()
+                self.update('preview', 'Adjust X/Y coordinates, then save to all four anchors.',
+                            preview=self.preview, token=str(uuid.uuid4()))
             elif action == 'apply':
                 if (self.preview is None or self.preview_at is None or monotonic() - self.preview_at > 120
                         or request.get('token') != self.state['token']):
                     raise ValueError('Preview expired or changed; measure again')
+                positions = self.preview['positions']
+                if 'positions' in request:
+                    positions = adjust_layout(positions, request['positions'])
                 self.update('saving', 'Saving and verifying anchor coordinates...')
-                ble.call('save', self.check_cancelled, self.preview['positions'], self.mark_write)
+                ble.call('save', self.check_cancelled, positions, self.mark_write)
                 self.check_cancelled()
                 # Keep the recovery warning until saved coordinates are verified.
                 self.dirty = False
                 layout = {'revision': self.state['token'], 'frame': 'map', 'verified': True,
-                          'positions': copy.deepcopy(self.preview['positions'])}
+                          'positions': copy.deepcopy(positions)}
                 self.preview = None
                 self.preview_at = None
                 self.update('complete', 'Layout saved and verified.',

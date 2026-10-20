@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibration.anchor_calibration import (decode_info, decode_location, solve_layout,
+from calibration.anchor_calibration import (decode_info, decode_location, solve_layout, adjust_layout,
     DATA_MODE, LOCATION, CLUSTER, SERVICE)
 from calibration.pans_ble import PansBLE
 from calibration.calibration_service import AnchorCalibration, CalibrationJournal
@@ -53,7 +53,7 @@ class CalibrationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'info=.*mode=.*PAN='):
                 decode_info(data, flags, network)
 
-    def test_shared_height_layout_from_ble_ranges_rejects_bad_data_and_corner_order(self):
+    def test_shared_height_layout_rejects_bad_ranges_but_accepts_swapped_top_corners(self):
         rows = {key: decode_location(payload(row))[1] for key, row in ROWS.items()}
         layout = solve_layout(BOARDS, rows)
         np.testing.assert_allclose([[p[k] for k in ('x', 'y', 'z')] for p in layout['positions']], POINTS, atol=1e-6)
@@ -66,10 +66,30 @@ class CalibrationTest(unittest.TestCase):
             solve_layout(BOARDS, missing)
         inconsistent = copy.deepcopy(ROWS)
         inconsistent['0001']['0002'] = (5, 100)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,
+                r'0001 to 0002 = 5\.000 m, 0002 to 0001 = 4\.000 m'):
             solve_layout(BOARDS, inconsistent)
-        with self.assertRaises(ValueError):
-            solve_layout([BOARDS[i] for i in (0, 1, 3, 2)], ROWS)
+        order = (0, 1, 3, 2)
+        layout = solve_layout([BOARDS[i] for i in order], ROWS)
+        self.assertEqual([p['id'] for p in layout['positions']], [BOARDS[i]['id'] for i in order])
+        np.testing.assert_allclose([[p[k] for k in ('x', 'y', 'z')] for p in layout['positions']],
+                                   [POINTS[i] for i in order], atol=1e-6)
+        self.assertLess(layout['rms'], 1e-6)
+
+
+    def test_adjustment_preserves_identity_and_rejects_invalid_coordinates(self):
+        positions = solve_layout(BOARDS, ROWS)['positions']
+        edits = [dict(id=p['id'], x=p['x'], y=p['y']) for p in positions]
+        edits[2].update(x=4.2, ble='untrusted-address', z=10)
+        adjusted = adjust_layout(positions, edits)
+        self.assertEqual(adjusted[2], dict(positions[2], x=4.2))
+        self.assertAlmostEqual(positions[2]['x'], 4)
+        for edit in ({'id': 'unknown'}, {'x': float('nan')}, {'y': 1001}, {'x': ''},
+                     {'x': 0, 'y': 0}):
+            bad = copy.deepcopy(edits)
+            bad[2].update(edit)
+            with self.assertRaises(ValueError):
+                adjust_layout(positions, bad)
 
 
 class CoordinatorTest(unittest.TestCase):
@@ -105,6 +125,19 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(self.node.state['stage'], 'complete')
         self.assertTrue(self.node.state['layout']['verified'])
         layout = self.node.status()['layout']
+        self.node.request({'action': 'edit'})
+        self.node.worker.join()
+        self.assertEqual(self.node.state['stage'], 'preview')
+        self.assertEqual(self.node.preview['positions'], layout['positions'])
+        self.assertEqual(self.ble.measure.call_count, 1)
+        self.assertEqual(self.ble.save.call_count, 1)
+        edits = [dict(id=p['id'], x=p['x'], y=p['y']) for p in layout['positions']]
+        edits[2]['x'] = 4.2
+        self.node.run(dict(action='apply', token=self.node.state['token'], positions=edits))
+        self.assertEqual(self.node.state['stage'], 'complete')
+        self.assertEqual(self.ble.save.call_args.args[0][2]['x'], 4.2)
+        layout = self.node.status()['layout']
+        self.assertEqual(layout['positions'][2]['x'], 4.2)
         self.node.close()
         self.node = self.create()
         self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
@@ -137,6 +170,47 @@ class CoordinatorTest(unittest.TestCase):
         self.node.preview_at -= 121
         self.node.run(dict(action='apply', token=self.node.state['token']))
         self.ble.save.assert_not_called()
+
+
+class JournalTest(unittest.TestCase):
+    def test_windows_lock_contention_leaves_saved_layout_untouched(self):
+        windows = NS(LK_NBLCK=2, locking=mock.Mock())
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'Room café' / 'calibration.json'
+            # Replace only this module's os reference; pathlib still uses the host OS.
+            with mock.patch('calibration.calibration_service.os', mock.Mock(wraps=os, name='os')) as platform, \
+                    mock.patch.dict(sys.modules, {'msvcrt': windows}):
+                platform.name = 'nt'
+                journal = CalibrationJournal(path)
+                try:
+                    windows.locking.assert_called_once_with(journal.lock_file.fileno(), windows.LK_NBLCK, 1)
+                    journal.save({'label': 'Room café'})
+                    saved = path.read_bytes()
+                    windows.locking.side_effect = OSError('already locked')
+                    with self.assertRaisesRegex(ValueError, 'Another laptop calibration service'):
+                        CalibrationJournal(path)
+                    self.assertEqual(path.read_bytes(), saved)
+                finally:
+                    journal.close()
+                self.assertTrue(journal.lock_file.closed)
+
+    def test_invalid_state_releases_lock_for_recovery(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'calibration.json'
+            path.write_text('[]', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'Invalid calibration recovery file'):
+                CalibrationJournal(path)
+            path.write_text('{}', encoding='utf-8')
+            journal = CalibrationJournal(path)
+            try:
+                journal.save({'label': 'Room café'})
+            finally:
+                journal.close()
+            journal = CalibrationJournal(path)
+            try:
+                self.assertEqual(journal.values, {'label': 'Room café'})
+            finally:
+                journal.close()
 
 
 class LaptopBLETest(unittest.IsolatedAsyncioTestCase):

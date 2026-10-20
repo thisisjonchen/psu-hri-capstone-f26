@@ -3,38 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PALS Flight Dashboard</title>
+  <title>PALS: Paired Aerial Lift System</title>
   <link rel="stylesheet" href="css/bootstrap.css">
-  <link rel="stylesheet" href="css/main.css?v=20261016-drag-targets">
+  <link rel="stylesheet" href="css/xterm.css">
+  <link rel="stylesheet" href="css/main.css?v=20261019-tag-placeholder">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
-  <script src="js/anchor-calibration.js?v=20261015-independent-calibration" defer></script>
-  <script src="js/main.js?v=20261016-drag-targets" defer></script>
+  <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
+  <script src="js/main.js?v=20261019-connect-panel" defer></script>
+  <script src="js/xterm.js" defer></script>
+  <script src="js/xterm-addon-fit.js" defer></script>
+  <script src="js/routines.js?v=20261019-terminal-messages" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
-    <div class="page-intro"><div><h1>PALS Flight Dashboard</h1></div>
-    <section class="panel connection-panel" aria-label="Drone connection">
-      <fieldset class="drone-select">
-        <legend>Select drones</legend>
-        <div class="drone-options">
-          <label class="drone-option"><input type="radio" name="droneSelection" value="drone1" checked><span class="drone-option-content" id="drone1-connectionStatus" aria-label="Drone 1 disconnected"><strong>Drone 1<span class="state-icon" data-state-icon data-state="disconnected" role="img" aria-label="Disconnected" title="Disconnected">○</span></strong><small data-connection-text role="status">Disconnected</small></span></label>
-          <label class="drone-option"><input type="radio" name="droneSelection" value="drone2"><span class="drone-option-content" id="drone2-connectionStatus" aria-label="Drone 2 disconnected"><strong>Drone 2<span class="state-icon" data-state-icon data-state="disconnected" role="img" aria-label="Disconnected" title="Disconnected">○</span></strong><small data-connection-text role="status">Disconnected</small></span></label>
-        </div>
-      </fieldset>
-      <div class="connection-actions"><button class="btn btn-primary" data-connect="selected">Connect</button><button class="btn btn-outline-secondary" data-disconnect="selected">Disconnect</button></div>
-    </section></div>
-    <section class="panel fleet-controls" id="fleetControls" aria-label="Flight controls">
-      <div class="panel-header fleet-controls-header"><h2 id="controlsHeading">Flight controls</h2>
-      <div class="command-buttons" data-controller="shared">
-              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
-              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
-              <button class="btn btn-danger" data-command="disarm">Disarm all</button>
-            </div></div>
+    <div class="page-intro"><div class="page-title"><h1>PALS: Paired Aerial Lift System</h1><div class="partner-logos" aria-label="Project partners">
+      <!-- Official assets: assets.engr.psu.edu/coe/images/logo-psu-coe-header.png and usa.honda-ri.com/o/liferay-hri-theme/images/honda-main-logo.png -->
+      <a href="https://www.engr.psu.edu/" target="_blank" rel="noopener noreferrer"><img src="images/penn-state-engineering.png" alt="Penn State College of Engineering"></a>
+      <a href="https://usa.honda-ri.com/" target="_blank" rel="noopener noreferrer"><img src="images/honda-research-institute.png" alt="Honda Research Institute"></a>
+    </div></div><div class="header-actions">
+    <a class="btn btn-outline-secondary icon-button with-label github-link" href="https://github.com/thisisjonchen/psu-hri-capstone-f26" target="_blank" rel="noopener noreferrer" aria-label="View PALS on GitHub" title="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg><span>GitHub</span></a>
+    <button class="btn btn-outline-secondary icon-button" id="fullscreen-toggle" type="button" aria-pressed="false" hidden aria-label="Full screen" title="Full screen"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="expand-icon" d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><path class="collapse-icon" d="M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5"/></svg></button></div></div>
+    <section class="panel fleet-controls" id="fleetControls" aria-label="Telemetry">
+      <div class="panel-header"><h2>Telemetry</h2></div>
       <div class="flight-controls-layout"><div class="control-cameras">
-        <article class="camera-panel" id="drone1-cameraPanel"><div class="panel-header"><h3>Drone 1 camera</h3></div>
+        <article class="camera-panel" id="drone1-cameraPanel"><div class="camera-viewport"><div class="camera-content"><div class="panel-header"><h3>Drone 1 camera</h3></div>
           <div class="camera-frame"><img id="drone1-camera" data-field="camera" alt="Drone 1 camera" src="nocamera.svg" width="240" height="320">
             <div class="camera-placeholder" role="img" aria-label="Drone 1 camera unavailable">
               <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
@@ -44,9 +39,9 @@
               <span>Camera unavailable</span>
             </div>
           </div>
-          <p class="detection-status"><span>Detected</span><strong id="drone1-detection" data-state="offline" role="status" aria-live="polite">Drone Offline</strong></p>
-        </article>
-        <article class="camera-panel" id="drone2-cameraPanel"><div class="panel-header"><h3>Drone 2 camera</h3></div>
+          <p class="detection-status"><strong id="drone1-detection" data-state="offline" role="status" aria-live="polite">No tag data</strong></p>
+        </div></div></article>
+        <article class="camera-panel" id="drone2-cameraPanel"><div class="camera-viewport"><div class="camera-content"><div class="panel-header"><h3>Drone 2 camera</h3></div>
           <div class="camera-frame"><img id="drone2-camera" data-field="camera" alt="Drone 2 camera" src="nocamera.svg" width="240" height="320">
             <div class="camera-placeholder" role="img" aria-label="Drone 2 camera unavailable">
               <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
@@ -56,16 +51,51 @@
               <span>Camera unavailable</span>
             </div>
           </div>
-          <p class="detection-status"><span>Detected</span><strong id="drone2-detection" data-state="offline" role="status" aria-live="polite">Drone Offline</strong></p>
-        </article>
+          <p class="detection-status"><strong id="drone2-detection" data-state="offline" role="status" aria-live="polite">No tag data</strong></p>
+        </div></div></article>
       </div>
       <section class="control-map" aria-label="Shared XY map">
-        <div class="panel-header"><h3>XY map</h3><div class="map-actions">
-          <button class="btn btn-outline-secondary" id="room-fit" disabled>Fit room</button>
+        <div class="panel-header"><div class="section-title"><h3>XY map</h3><details class="section-help"><summary aria-label="Map help">?</summary><div class="help-content" id="target-help"><p>Select a drone, then click or drag a destination. Focus the map and use arrow keys to adjust it; Send target confirms.</p><p>Scan for anchors, assign them to the room corners, then measure and save the layout.</p></div></details></div><div class="map-actions">
+          <button class="btn btn-outline-secondary icon-button" id="room-fit" disabled aria-label="Fit room" title="Fit room"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></button>
           <button class="btn btn-outline-secondary" id="room-zoom-in" aria-label="Zoom in on room" disabled>+</button>
           <button class="btn btn-outline-secondary" id="room-zoom-out" aria-label="Zoom out of room" disabled>−</button>
+          <span class="toolbar-divider" aria-hidden="true"></span>
+          <button class="btn btn-outline-secondary" id="calibration-toggle" type="button" aria-expanded="false" aria-controls="calibration-panel">Calibrate anchors</button>
         </div></div>
         <div class="canvas-wrap flight-map-wrap map-unavailable" id="map-frame">
+          <div class="calibration-body" id="calibration-panel" aria-label="Anchor calibration" hidden>
+          <div id="calibration-form">
+          <div class="calibration-grid">
+            <label>Top left<select id="calibration-anchor-3" disabled><option value="">Select anchor</option></select></label>
+            <label>Top right<select id="calibration-anchor-2" disabled><option value="">Select anchor</option></select></label>
+            <label>Bottom left<select id="calibration-anchor-0" disabled><option value="">Select anchor</option></select></label>
+            <label>Bottom right<select id="calibration-anchor-1" disabled><option value="">Select anchor</option></select></label>
+          </div>
+          <p class="map-note" id="calibration-selection" role="status" aria-live="polite" hidden></p>
+          <div class="calibration-actions">
+            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>1. Scan</button>
+            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>2. Measure</button>
+            <button class="btn btn-outline-secondary" id="calibration-edit" type="button" disabled>Adjust saved layout</button>
+            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>3. Save</button>
+            <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
+          </div>
+          <div class="calibration-preview" id="calibration-preview" hidden>
+            <p>Adjust coordinates in meters, then save. Antennas must share the same height.</p>
+            <div class="calibration-coordinates">
+              <span>Anchor</span><span>X (m)</span><span>Y (m)</span>
+              <span id="calibration-label-3"></span><input id="calibration-x-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left X"><input id="calibration-y-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left Y">
+              <span id="calibration-label-2"></span><input id="calibration-x-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right X"><input id="calibration-y-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right Y">
+              <span id="calibration-label-0"></span><input id="calibration-x-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left X"><input id="calibration-y-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left Y">
+              <span id="calibration-label-1"></span><input id="calibration-x-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right X"><input id="calibration-y-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right Y">
+            </div>
+          </div>
+          <p class="map-note" id="calibration-status" role="status" aria-live="polite">Calibration server offline.</p>
+          </div>
+          <div class="calibration-success" id="calibration-success" role="status" hidden>
+            <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="28"/><path d="m19 32 9 9 17-18"/></svg>
+            <strong>Layout saved</strong>
+          </div>
+          </div>
           <canvas id="fleet-xyChart" aria-label="Both drones XY map" aria-describedby="target-help" aria-hidden="true" tabindex="0"></canvas>
           <div class="map-placeholder" id="map-placeholder" role="img" aria-label="XY map unavailable">
             <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
@@ -77,35 +107,15 @@
           </div>
         </div>
         <div class="map-details">
-        <div class="map-legend" id="map-legend" hidden><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span><span><i style="--marker-color:#198a71"></i>Mapped AprilTags</span></div>
-        <div class="map-sources" id="map-sources" hidden><span>Ground truth</span><span class="map-source-ukf">UKF</span><span class="map-source-camera">Camera pose</span><span>Fused position</span></div>
+        <div class="map-legend" id="map-legend" hidden><span><i style="--marker-color:#0072b2"></i>Drone 1</span><span><i style="--marker-color:#d55e00"></i>Drone 2</span><span><i style="--marker-color:#198a71"></i>AprilTags</span></div>
         <div class="target-preview">
-          <p class="map-note" id="target-help">Drag a drone or target marker to choose a destination, then Send target. Or select a drone above and tap the map. With the map focused, arrow keys adjust the target.</p>
-          <p class="map-note" id="target-selection" role="status" aria-live="polite">No target selected.</p>
+          <p class="map-note" id="target-selection" role="status" aria-live="polite" hidden></p>
           <div class="target-actions">
-          <button class="btn btn-outline-secondary" id="target-clear" type="button" disabled>Clear</button>
-          <button class="btn btn-primary" id="target-send" type="button" disabled>Send target</button>
-          <button class="btn btn-outline-secondary" id="target-stop" type="button" disabled>Stop target</button>
+          <button class="btn btn-outline-secondary icon-button" id="target-clear" type="button" hidden disabled aria-label="Clear target" title="Clear target"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+          <button class="btn btn-primary" id="target-send" type="button" hidden disabled>Send target</button>
+          <button class="btn btn-outline-secondary" id="target-stop" type="button" hidden disabled>Stop target</button>
           </div>
         </div>
-        <details class="anchor-calibration">
-          <summary>Calibrate anchors</summary>
-          <div class="calibration-grid">
-            <label>Corner 1 (Top Left)<select id="calibration-anchor-3" disabled><option value="">Select anchor</option></select></label>
-            <label>Corner 2 (Top Right)<select id="calibration-anchor-2" disabled><option value="">Select anchor</option></select></label>
-            <label>Corner 3 (Bottom Left)<select id="calibration-anchor-0" disabled><option value="">Select anchor</option></select></label>
-            <label>Corner 4 (Bottom Right)<select id="calibration-anchor-1" disabled><option value="">Select anchor</option></select></label>
-          </div>
-          <p class="map-note" id="calibration-selection" role="status" aria-live="polite" hidden></p>
-          <div class="calibration-actions">
-            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>1. Scan anchors</button>
-            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>2. Measure layout</button>
-            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>3. Save layout</button>
-            <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
-          </div>
-          <pre class="calibration-preview" id="calibration-preview" hidden></pre>
-          <p class="map-note" id="calibration-status" role="status" aria-live="polite">Start the laptop dashboard server to set up the room.</p>
-        </details>
         <div class="map-feedback">
           <p class="map-note" id="room-status" role="status" hidden></p>
           <p class="map-note" id="map-stream-status" role="status"></p>
@@ -114,64 +124,79 @@
         </div>
         </div>
       </section></div>
+    </section>
+    <section class="panel routine-panel" aria-label="Control">
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p id="peer-relay-status" role="status">Change peer relay before arming. Off disables automatic spacing control; routine synchronization stays on.</p><p><strong>Keyboard shortcuts</strong></p>
+            <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
+              <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
+              <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
+              <tr><th scope="row"><kbd>J</kbd> / <kbd>L</kbd></th><td>Left / Right</td></tr>
+              <tr><th scope="row"><kbd>I</kbd> / <kbd>K</kbd></th><td>Forward / Backward</td></tr>
+              <tr><th scope="row"><kbd>W</kbd> / <kbd>S</kbd></th><td>Up / Down</td></tr>
+              <tr><th scope="row"><kbd>A</kbd> / <kbd>D</kbd></th><td>Yaw left / Right</td></tr>
+              <tr><th scope="row"><kbd>P</kbd> / <kbd>V</kbd></th><td>Position / Velocity control</td></tr>
+              <tr><th scope="row"><kbd>R</kbd></th><td>Reset position hold</td></tr>
+              <tr><th scope="row"><kbd>M</kbd></th><td>Toggle mapping</td></tr>
+              <tr><th scope="row"><kbd>Esc</kbd></th><td>Leave terminal to use flight shortcuts</td></tr>
+            </tbody></table></div></details></div>
+        <div class="command-buttons" data-controller="shared" aria-label="Shared flight controls">
+          <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+          <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
+          <button class="btn btn-danger" data-command="disarm">Disarm all</button>
+        </div>
+        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><button class="btn btn-outline-secondary" id="peer-relay-toggle" type="button" aria-pressed="true" aria-describedby="peer-relay-status" disabled>Peer relay: loading</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
+      </div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
+      <div class="routine-terminals">
+      <article class="routine-terminal" data-terminal="drone1">
+        <div class="terminal-pane"><h4 class="terminal-label" id="drone1-terminal-label">Drone 1</h4><div class="script-terminal" data-field="terminal" aria-labelledby="drone1-terminal-label"></div></div>
+      </article>
+      <article class="routine-terminal" data-terminal="drone2">
+        <div class="terminal-pane"><h4 class="terminal-label" id="drone2-terminal-label">Drone 2</h4><div class="script-terminal" data-field="terminal" aria-labelledby="drone2-terminal-label"></div></div>
+      </article>
+      </div>
     </section>
     <div class="fleet-grid" id="fleetGrid" data-count="0"><section class="drone-dashboard" id="drone1" aria-labelledby="drone1-heading">
-          <div class="drone-heading"><div><h2 id="drone1-heading">Drone 1</h2></div>
-            <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
-          </div>
-          <div class="status-grid" aria-label="Drone 1 status">
-            <div class="status-card localization-card"><p>Position · UWB + ToF</p><div data-field="fusedPosition">—</div></div>
+          <div class="drone-heading"><h2 id="drone1-heading">Drone 1</h2><button class="connection-status" id="drone1-connectionStatus" data-state="disconnected" data-connection-toggle="drone1" disabled aria-label="Drone 1 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
+          <button class="connection-entry" id="drone1-connectionToggle" data-connection-toggle="drone1" aria-label="Connect Drone 1">Connect</button>
+          <div class="status-grid" data-field="telemetry" aria-label="Drone 1 status" hidden>
+            <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
               <summary aria-label="Drone 1 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">
               <div class="canvas-wrap"><canvas id="drone1-heightChart" data-field="heightChart" aria-label="Drone 1 height chart"></canvas></div>
-              <div class="metric-chart-actions"><button class="btn btn-outline-secondary" data-analysis="drone1" aria-pressed="false">UKF analysis</button></div>
             </article></div>
             </details>
             <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
-              <summary aria-label="Drone 1 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <summary aria-label="Drone 1 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">
               <div class="canvas-wrap"><canvas id="drone1-speedChart" data-field="speedChart" aria-label="Drone 1 speed chart"></canvas></div>
             </article></div>
             </details>
           </div>
-          <article class="panel control-panel"><div class="panel-header"><h3>Drone 1 controls</h3></div><div class="command-buttons" data-controller="drone1">
-              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
-              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
-              <button class="btn btn-danger" data-command="disarm">Disarm</button>
-            </div></article>
         </section><section class="drone-dashboard" id="drone2" aria-labelledby="drone2-heading">
-          <div class="drone-heading"><div><h2 id="drone2-heading">Drone 2</h2></div>
-            <div class="drone-connection-state" data-field="connectionStatus" data-state="disconnected" role="status" aria-live="polite"><span class="state-icon" data-state-icon data-state="disconnected" aria-hidden="true">○</span><span data-connection-text>Disconnected</span></div>
-          </div>
-          <div class="status-grid" aria-label="Drone 2 status">
-            <div class="status-card localization-card"><p>Position · UWB + ToF</p><div data-field="fusedPosition">—</div></div>
+          <div class="drone-heading"><h2 id="drone2-heading">Drone 2</h2><button class="connection-status" id="drone2-connectionStatus" data-state="disconnected" data-connection-toggle="drone2" disabled aria-label="Drone 2 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
+          <button class="connection-entry" id="drone2-connectionToggle" data-connection-toggle="drone2" aria-label="Connect Drone 2">Connect</button>
+          <div class="status-grid" data-field="telemetry" aria-label="Drone 2 status" hidden>
+            <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
             <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
               <summary aria-label="Drone 2 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">
               <div class="canvas-wrap"><canvas id="drone2-heightChart" data-field="heightChart" aria-label="Drone 2 height chart"></canvas></div>
-              <div class="metric-chart-actions"><button class="btn btn-outline-secondary" data-analysis="drone2" aria-pressed="false">UKF analysis</button></div>
             </article></div>
             </details>
             <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
-              <summary aria-label="Drone 2 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
+              <summary aria-label="Drone 2 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">
               <div class="canvas-wrap"><canvas id="drone2-speedChart" data-field="speedChart" aria-label="Drone 2 speed chart"></canvas></div>
             </article></div>
             </details>
           </div>
-          <article class="panel control-panel"><div class="panel-header"><h3>Drone 2 controls</h3></div><div class="command-buttons" data-controller="drone2">
-              <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
-              <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
-              <button class="btn btn-danger" data-command="disarm">Disarm</button>
-            </div></article>
         </section></div>
-    <section class="keyboard-dock" aria-label="Keyboard controls"><div class="keyboard-dock-inner"><h2>Keyboard controls</h2><div class="shortcut-grid"><div><kbd>;</kbd><span>Arm</span></div><div><kbd>Space</kbd><span>Disarm all</span></div><div><kbd>T</kbd><span>Takeoff</span></div><div><kbd>A</kbd><span>Yaw left</span></div><div><kbd>D</kbd><span>Yaw right</span></div><div><kbd>W</kbd><span>Up</span></div><div><kbd>S</kbd><span>Down</span></div><div><kbd>J</kbd><span>Left</span></div><div><kbd>L</kbd><span>Right</span></div><div><kbd>I</kbd><span>Forward</span></div><div><kbd>K</kbd><span>Backward</span></div><div><kbd>R</kbd><span>Reset position hold</span></div><div><kbd>P</kbd><span>Position hold</span></div><div><kbd>V</kbd><span>Velocity control</span></div><div><kbd>M</kbd><span>Toggle mapping</span></div></div></div></section>
   </main>
 </body>
 </html>

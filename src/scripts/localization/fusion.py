@@ -112,6 +112,19 @@ class PlanarFusion(object):
         self.room_velocity[:] = 0
         self.velocity[:] = 0
 
+    def correct_yaw(self, delta):
+        """Correct sensor heading without moving UWB state or continuous odometry."""
+        if self.yaw_offset is None or not np.isfinite(delta):
+            return False
+        self.yaw_offset += delta
+        # These vectors came from body sensors using the old offset. UWB state
+        # and its covariance are already in the surveyed map and must not rotate.
+        self.flow_velocity = rotate(self.flow_velocity, delta)
+        self.accelerations = deque((stamp, rotate(a, delta)) for stamp, a in self.accelerations)
+        if self.room is not None:
+            self._update_local_velocity()
+        return True
+
     def flow_active(self, stamp=None):
         now = self.stamp if stamp is None else stamp
         return bool(self.room is not None and self.flow_velocity_weight > 0

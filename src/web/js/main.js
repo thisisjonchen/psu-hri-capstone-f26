@@ -30,6 +30,7 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
+    this.waypointReports = {};
     this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
@@ -204,6 +205,7 @@ class FleetMap {
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           this.tagReports = {};
+          this.waypointReports = {};
         }
         this.room = candidate;
         this.targets = {};
@@ -218,8 +220,6 @@ class FleetMap {
     if (bad) {
       status = bad[1].error || 'Anchor layouts disagree between drones';
       status += '. Map updates and target editing are paused.';
-    } else if (awaitingVerification) {
-      status = 'Saved room · Awaiting verification. Measure and save, or connect a drone for a live anchor report.';
     } else if (candidate) {
       status = '';
     } else {
@@ -287,7 +287,7 @@ class FleetMap {
     ctx.restore();
   }
 
-  updateTagMap(id, message) {
+  updateTagMap(id, message, navigation = false) {
     const header = message.header || {};
     const stamp = header.stamp && header.stamp.secs + header.stamp.nsecs / 1e9;
     const tags = message.tag_ids, zones = message.zones;
@@ -301,11 +301,15 @@ class FleetMap {
         !zones.every(zone => typeof zone === 'string') ||
         !counts.every(count => Number.isInteger(count) && count > 0) ||
         !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
-    if (this.tagReports[id] && stamp <= this.tagReports[id].stamp) return;
-    const previous = this.tagReports[id];
-    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => {
+    if (navigation && (!Number.isInteger(message.generation) || !Array.isArray(message.observed_at) ||
+        message.observed_at.length !== tags.length)) return;
+    const reports = navigation ? this.waypointReports : this.tagReports;
+    if (reports[id] && stamp <= reports[id].stamp) return;
+    const previous = reports[id];
+    reports[id] = { frame, stamp, receivedAt: Date.now(), generation: message.generation, tags: tags.map((tag, i) => {
+      const observed = message.observed_at && message.observed_at[i];
       const value = { id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
-        z: points[i].z, count: counts[i] };
+        z: points[i].z, count: counts[i], observedAt: observed && observed.secs + observed.nsecs / 1e9 };
       const old = previous && previous.frame === frame && previous.tags.find(p => p.id === tag);
       // A snapshot can update another tag while retaining this cached position.
       // Track changes locally; ROS clocks on the two drones need not agree.
@@ -313,7 +317,7 @@ class FleetMap {
       value.revision = unchanged ? old.revision : ++this.tagRevision;
       return value;
     }) };
-    this.render();
+    if (!navigation) this.render();
   }
 
   mappedTags() {
@@ -382,14 +386,14 @@ class FleetMap {
 
   hitTarget(pixel) {
     // Prefer an existing target over telemetry; break overlapping-marker ties
-    // using the existing drone selection at the top of the dashboard.
+    // using the current map selection.
     for (const targetsOnly of [true, false]) {
       const hits = Object.keys(drones).map(id => {
         const point = targetsOnly ? this.targets[id] : this.markerPosition(id);
         const p = point && this.targetPixel(point);
         return { id, distance: p ? Math.hypot(p.x - pixel.x, p.y - pixel.y) : Infinity };
       }).filter(hit => hit.distance <= 22).sort((a, b) =>
-        Math.abs(a.distance - b.distance) < 2 ? (a.id === selectedConnection() ? -1 : 1) : a.distance - b.distance);
+        Math.abs(a.distance - b.distance) < 2 ? (a.id === this.selectedTarget ? -1 : b.id === this.selectedTarget ? 1 : 0) : a.distance - b.distance);
       if (hits.length) return hits[0].id;
     }
     return null;
@@ -403,7 +407,9 @@ class FleetMap {
     const canvas = document.getElementById('fleet-xyChart');
     canvas.focus({ preventScroll: true });
     const hit = this.hitTarget(point.pixel);
-    this.selectedTarget = hit || selectedConnection();
+    const id = hit || this.selectedTarget || currentTarget();
+    if (!drones[id]) return;
+    this.selectedTarget = id;
     this.targetFeedback = '';
     document.getElementById('target-command-status').textContent = '';
     this.drag = { id: this.selectedTarget, pointerId: event.pointerId, room: this.room,
@@ -452,7 +458,8 @@ class FleetMap {
       ArrowUp: [0, step], ArrowDown: [0, -step] }[event.key];
     if (!offset || !this.layoutUsable || this.drag) return;
     event.preventDefault(); event.stopPropagation();
-    const id = this.selectedTarget || selectedConnection();
+    const id = this.selectedTarget || currentTarget();
+    if (!drones[id]) return;
     const point = this.targets[id] || this.markerPosition(id);
     if (point) this.previewTarget(id, point.x + offset[0], point.y + offset[1]);
   }
@@ -519,7 +526,7 @@ class FleetMap {
     frame.classList.toggle('map-unavailable', !visible);
     document.getElementById('map-placeholder').hidden = visible;
     document.getElementById('fleet-xyChart').setAttribute('aria-hidden', String(!visible));
-    ['map-legend', 'map-sources'].forEach(id => { document.getElementById(id).hidden = !visible; });
+    document.getElementById('map-legend').hidden = !visible;
     if (this.drag && (!this.layoutUsable || this.drag.room !== this.room)) {
       this.cancelTargetDrag();
       return;
@@ -530,7 +537,10 @@ class FleetMap {
     document.getElementById('target-clear').disabled = !selected || !this.targets[selected] || !!this.drag;
     document.getElementById('target-selection').textContent = selected
       ? 'Drone ' + selected.slice(-1) + (this.drag ? ' · Choosing destination…' : this.targets[selected] ? ' · Target preview' : ' · Tap or drag to choose a destination')
-      : 'No target selected.';
+      : '';
+    ['target-selection', 'target-clear', 'target-send', 'target-stop'].forEach(id => {
+      document.getElementById(id).hidden = !selected;
+    });
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
     document.getElementById('target-stop').disabled = !selected || !drones[selected].connected;
     this.chart.data.datasets.forEach(dataset => {
@@ -586,6 +596,7 @@ class FleetMap {
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     delete this.tagReports[id];
+    delete this.waypointReports[id];
     this.refreshAnchors();
   }
 }
@@ -602,17 +613,19 @@ class DroneSession {
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
+    this.routineReadyAt = null;
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
     this.subscribers = [];
     this.heartbeat = null;
+    this.waitUntil = 0;
+    this.retryTimer = null;
     this.positionMode = false;
     this.startTime = null;
     this.latestTime = 0;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
-    this.analysis = false;
     this.series = {};
     this.xyFrames = {};
     this.xyReceivedAt = {};
@@ -660,7 +673,7 @@ class DroneSession {
       message.zones.every(zone => typeof zone === 'string' && zone.trim());
     if (!valid || !message.camera_online) {
       this.detectionReceivedAt = null;
-      this.setDetection('Drone Offline', 'offline');
+      this.setDetection('No tag data', 'offline');
       return;
     }
     this.detectionReceivedAt = Date.now();
@@ -672,7 +685,7 @@ class DroneSession {
   refreshDetection() {
     if (this.detectionReceivedAt !== null && Date.now() - this.detectionReceivedAt > 1500) {
       this.detectionReceivedAt = null;
-      this.setDetection('Drone Offline', 'offline');
+      this.setDetection('No tag data', 'offline');
     }
   }
 
@@ -715,11 +728,6 @@ class DroneSession {
   }
 
   heightDatasets() {
-    if (this.analysis) return [
-      this.dataset('error', 'UKF − ground truth', '#d1513a'),
-      this.dataset('sigmaPlus', '+1 sigma', '#49368c', { fill: '+1', backgroundColor: '#49368c22' }),
-      this.dataset('sigmaMinus', '−1 sigma', '#49368c')
-    ];
     return [
       this.dataset('range', 'Raw range', '#e46555'),
       this.dataset('ukfHeight', 'UKF height', '#49368c'),
@@ -747,17 +755,27 @@ class DroneSession {
   }
 
   setStatus(text, connected = false) {
-    const state = connected ? 'connected' : text === 'Connecting…' ? 'connecting' : text === 'Connection error' ? 'error' : 'disconnected';
-    [document.getElementById(this.id + '-connectionStatus'), this.field('connectionStatus')].forEach(status => {
-      status.dataset.state = state;
-      status.querySelector('[data-connection-text]').textContent = text;
-      const icon = status.querySelector('[data-state-icon]');
-      icon.dataset.state = state;
-      icon.textContent = { connected: '●', connecting: '', error: '!', disconnected: '○' }[state];
-      icon.setAttribute('aria-label', text);
-      icon.title = text;
-      status.setAttribute('aria-label', 'Drone ' + this.id.slice(-1) + ' ' + text);
-    });
+    const state = connected ? 'connected' : ['Connecting…', 'Waiting for nodes…'].includes(text) ? 'connecting'
+      : ['Connection error', 'Connection timed out', 'Nodes failed to start'].includes(text) ? 'error' : 'disconnected';
+    const status = document.getElementById(this.id + '-connectionStatus');
+    status.dataset.state = state;
+    const button = document.getElementById(this.id + '-connectionToggle');
+    const active = state === 'connected' || state === 'connecting';
+    button.hidden = connected;
+    button.textContent = state === 'connecting' ? 'Cancel connection' : 'Connect';
+    button.setAttribute('aria-label', button.textContent + ' Drone ' + this.id.slice(-1));
+    this.field('telemetry').hidden = !connected;
+    status.disabled = !active;
+    status.querySelector('[data-connection-action]').textContent = connected ? 'Disconnect' : 'Cancel';
+    if (connected && document.activeElement === button) status.focus();
+    if (!active && document.activeElement === status) button.focus();
+    const icon = status.querySelector('[data-state-icon]');
+    status.querySelector('[data-connection-label]').textContent = {
+      connected: 'Connected', connecting: 'Connecting', error: 'Error', disconnected: 'Offline'
+    }[state];
+    icon.title = text;
+    status.title = active ? (connected ? 'Disconnect' : 'Cancel connection') : text;
+    status.setAttribute('aria-label', 'Drone ' + this.id.slice(-1) + ' ' + text + (active ? '. ' + status.title : ''));
   }
 
   resetTelemetry() {
@@ -769,7 +787,7 @@ class DroneSession {
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.detectionReceivedAt = null;
-    this.setDetection('Drone Offline', 'offline');
+    this.setDetection('No tag data', 'offline');
     this.fusedStamp = null;
     this.fusionGeneration = null;
     this.clearFusion();
@@ -787,33 +805,68 @@ class DroneSession {
     if (fleetMap) fleetMap.clearDrone(this.id);
   }
 
-  connect() {
+  connect(waitForNodes = false) {
     // A pending socket is also a session; repeated clicks must not create duplicates.
-    if (this.ros) return;
+    if (this.ros || this.retryTimer !== null) return;
+    if (this.expireConnection()) return;
+    // Connect also starts the drone's nodes, so retry until its rosbridge is up.
+    if (!this.waitUntil) this.waitUntil = Date.now() + (waitForNodes ? 90000 : 15000);
     this.resetTelemetry();
     this.setStatus('Connecting…');
     const ros = new ROSLIB.Ros();
     this.ros = ros;
     ros.on('connection', () => {
-      if (this.ros !== ros) return;
+      if (this.ros !== ros || this.expireConnection()) return;
+      this.waitUntil = 0;
       this.setStatus('Connected', true);
       this.setupTopics(ros);
       this.field('camera').src = 'http://' + this.host + ':8080/stream?topic=/raspicam_node/image&quality=70&type=ros_compressed';
       updateLayout();
     });
     ros.on('error', error => {
-      if (this.ros !== ros) return;
+      if (this.ros !== ros || this.retry(ros)) return;
       console.error(this.id + ' ROS connection error', error);
-      this.disconnect('Connection error');
+      this.failConnection('Connection error');
     });
     ros.on('close', () => {
-      if (this.ros !== ros) return;
-      this.disconnect();
+      if (this.ros !== ros || this.retry(ros)) return;
+      if (this.waitUntil) this.failConnection('Connection error');
+      else this.disconnect();
     });
     ros.connect('ws://' + this.host + ':9090');
   }
 
+  failConnection(status) {
+    this.disconnect(status);
+    document.dispatchEvent(new CustomEvent('drone-connect-failed', { detail: { id: this.id, message: status } }));
+  }
+
+  expireConnection() {
+    if (!this.waitUntil || Date.now() < this.waitUntil) return false;
+    this.failConnection('Connection timed out');
+    return true;
+  }
+
+  retry(ros) {
+    if (this.expireConnection()) return true;
+    if (ros.isConnected || !(Date.now() < this.waitUntil)) return false;
+    const until = this.waitUntil;
+    this.disconnect('Waiting for nodes…');
+    this.waitUntil = until;
+    this.retryTimer = setTimeout(() => {
+      if (this.waitUntil !== until) return;
+      this.retryTimer = null;
+      this.connect();
+    }, 2000);
+    return true;
+  }
+
   disconnect(status = 'Disconnected') {
+    if ((syncStart && syncStart.ids.includes(this.id)) ||
+        (routineFlight && routineFlight.ids.includes(this.id))) awaitSyncStart(null);
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.waitUntil = 0;
     const ros = this.ros;
     // Invalidate first, so callbacks from a replaced socket cannot update this drone.
     this.ros = null;
@@ -828,6 +881,7 @@ class DroneSession {
     if (ros) ros.close();
     this.resetTelemetry();
     this.setStatus(status);
+    publishCoordinationSelection();
     updateLayout();
   }
 
@@ -837,6 +891,7 @@ class DroneSession {
     };
     publisher('mode', '/pidrone/desired/mode', 'pidrone_pkg/Mode');
     publisher('heartbeat', '/pidrone/heartbeat/web_interface', 'std_msgs/Empty');
+    publisher('coordination', '/pidrone/coordination/paired', 'std_msgs/Bool');
     publisher('positionMode', '/pidrone/position_control', 'std_msgs/Bool');
     publisher('twist', '/pidrone/desired/twist', 'geometry_msgs/Twist');
     publisher('pose', '/pidrone/desired/pose', 'geometry_msgs/Pose');
@@ -844,6 +899,11 @@ class DroneSession {
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
+    publisher('routineStart', '/pidrone/routine/start', 'std_msgs/Empty');
+    publisher('stageRelease', '/pidrone/routine/stage_release', 'std_msgs/String');
+    // ROSLIB advertises on first publish, and the routine would miss that first start.
+    this.publishers.routineStart.advertise();
+    this.publishers.stageRelease.advertise();
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -854,6 +914,10 @@ class DroneSession {
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
+    subscribe('/pidrone/apriltag/waypoints', 'pidrone_pkg/TagWaypointMap', message => {
+      if (message.map) fleetMap.updateTagMap(this.id, { ...message.map,
+        observed_at: message.observed_at, generation: message.generation }, true);
+    });
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message));
     subscribe('/pidrone/localization/generation', 'std_msgs/UInt32', message => {
       if (!Number.isInteger(message.data)) return;
@@ -866,6 +930,7 @@ class DroneSession {
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         delete fleetMap.tagReports[this.id];
+        delete fleetMap.waypointReports[this.id];
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;
@@ -891,8 +956,16 @@ class DroneSession {
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
+      publishCoordinationSelection();
     });
 
+    subscribe('/pidrone/routine/ready', 'std_msgs/Empty', () => {
+      this.routineReadyAt = Date.now();
+      releaseSyncStart();
+    });
+    subscribe('/pidrone/routine/stage_ready', 'std_msgs/String', message => {
+      receiveRoutineStage(this.id, message);
+    });
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
     });
@@ -906,12 +979,11 @@ class DroneSession {
       this.updateVerticalSpeed(time, valid ? message.range : NaN);
       this.render('height');
     });
-    subscribe('/pidrone/picamera/twist', 'geometry_msgs/TwistStamped', message => {
-      const speed = Math.hypot(message.twist.linear.x, message.twist.linear.y);
+    subscribe('/pidrone/state', 'pidrone_pkg/State', message => {
+      const velocity = message.twist_with_covariance.twist.linear;
+      const speed = Math.hypot(velocity.x, velocity.y);
       this.addPoint('speed', this.time(message), speed);
-      if (Number.isFinite(speed)) {
-        this.field('speed').textContent = speed.toFixed(2) + ' m/s';
-      }
+      this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
       this.render('speed');
     });
     const ukf = message => {
@@ -937,13 +1009,6 @@ class DroneSession {
     });
     subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => {
       this.updateXY('camera', message.pose, message.header && message.header.frame_id);
-    });
-    subscribe('/pidrone/ukf_stats', 'pidrone_pkg/UkfStats', message => {
-      const time = this.time(message);
-      this.addPoint('error', time, message.error);
-      this.addPoint('sigmaPlus', time, message.stddev);
-      this.addPoint('sigmaMinus', time, -message.stddev);
-      this.render('height');
     });
   }
 
@@ -1027,15 +1092,6 @@ class DroneSession {
     if (fleetMap) fleetMap.render();
   }
 
-  toggleAnalysis(button) {
-    this.analysis = !this.analysis;
-    button.textContent = this.analysis ? 'Standard view' : 'UKF analysis';
-    button.setAttribute('aria-pressed', String(this.analysis));
-    this.heightChart.data.datasets = this.heightDatasets();
-    Object.assign(this.heightChart.options.scales.yAxes[0].ticks, this.analysis ? { min: undefined, max: undefined } : { min: 0, max: 0.6 });
-    this.render('height');
-  }
-
   publish(key, data) {
     // ROSLIB queues sends while disconnected; flight commands must never be queued.
     if (!this.connected || !this.publishers[key]) return false;
@@ -1085,7 +1141,6 @@ function currentTarget() {
   const connected = Object.values(drones).filter(drone => drone.connected);
   return connected.length === 1 ? connected[0].id : 'both';
 }
-function selectedConnection() { return document.querySelector('input[name="droneSelection"]:checked').value; }
 function feedback(message) {
   const status = document.getElementById('commandFeedback');
   status.textContent = message;
@@ -1100,7 +1155,6 @@ function updateLayout() {
   Object.values(drones).forEach(drone => {
     [drone.heightChart, drone.speedChart].forEach(chart => chart.resize());
   });
-  document.getElementById('controlsHeading').textContent = connected.length === 2 ? 'Shared controls' : 'Flight controls';
   if (fleetMap) fleetMap.chart.resize();
   if (countChanged) {
     stopHeldKeys();
@@ -1108,14 +1162,124 @@ function updateLayout() {
   }
 }
 
-function connectSelected() {
+function connectDrone(id) {
   stopHeldKeys();
-  const selected = sessionsFor(selectedConnection());
-  // Connecting the selected drone adds it to the existing fleet.
-  selected.forEach(drone => drone.connect());
+  const selected = sessionsFor(id);
+  // Connecting the selected drone adds it to the existing fleet. Its terminal
+  // (routines.js) starts the nodes, which aligns map +Y.
+  selected.forEach(drone => {
+    if (drone.ros || drone.waitUntil) return;
+    document.dispatchEvent(new CustomEvent('drone-connect', { detail: drone.id }));
+    drone.connect(true);
+  });
+}
+
+// Routines wait before takeoff (Drone.wait_for_start) until every drone of one
+// Execute posts ready; then all of them are released together.
+let syncStart = null;
+let routineFlight = null;
+let routineSerial = 0;
+function makeAprilTagPlan(ids, tags) {
+  const room = fleetMap.room;
+  if (!room || !fleetMap.layoutUsable) throw new Error('A verified room map is required.');
+  if (Object.values(drones).filter(drone => drone.connected).length !== ids.length) {
+    throw new Error('Connect only the drone(s) selected for this demo before takeoff.');
+  }
+  const plan = { ids: ids.slice(), tag_ids: tags.slice(), frame: room.frame,
+    anchors: room.anchors.map(a => ({ ...a })), generations: {}, starts: {}, points: [] };
+  for (const id of ids) {
+    const drone = drones[id];
+    if (!drone.connected || !drone.fusedPose || drone.fusedReceivedAt === null ||
+        Date.now() - drone.fusedReceivedAt > 500 || !fleetMap.hasMatchingReport(id) ||
+        !Number.isInteger(drone.fusionGeneration) || drone.field('flightMode').textContent !== 'DISARMED') {
+      throw new Error(id + ' needs fresh localization in the shared room and DISARMED mode.');
+    }
+    const p = drone.fusedPose.pose.pose.position;
+    plan.starts[id] = [p.x, p.y];
+    plan.generations[id] = drone.fusionGeneration;
+  }
+  for (const id of tags) {
+    const observations = ids.flatMap(name => {
+      const report = fleetMap.waypointReports[name], drone = drones[name];
+      if (!report || report.frame !== plan.frame || report.generation !== drone.fusionGeneration) return [];
+      const now = Math.max(drone.fusedStamp + (Date.now() - drone.fusedReceivedAt) / 1000,
+        report.stamp + (Date.now() - report.receivedAt) / 1000);
+      return report.tags.filter(tag => tag.id === id && tag.count >= 3 && Number.isFinite(tag.observedAt) &&
+        tag.observedAt > 0 && now - tag.observedAt >= 0 && now - tag.observedAt <= 120);
+    });
+    if (!observations.length) throw new Error('Tag ' + id + ' needs a confirmed observation within the last 120 seconds.');
+    if (observations.some(tag => Math.hypot(tag.x - observations[0].x, tag.y - observations[0].y) > .15)) {
+      throw new Error('Drones disagree on the position of tag ' + id + '.');
+    }
+    const tag = observations.sort((a, b) => b.observedAt - a.observedAt)[0];
+    plan.points.push({ id, x: tag.x, y: tag.y, stamp: tag.observedAt });
+  }
+  return plan;
+}
+
+function awaitSyncStart(ids, stages = [], plan = null) {
+  routineFlight = null;
+  syncStart = ids && { ids: ids.slice(), stages: stages.slice(), plan, dispatched: false,
+    run: Date.now().toString(36) + '-' + (++routineSerial), expires: Date.now() + 120000 };
+  if (ids) ids.forEach(id => { drones[id].routineReadyAt = null; });
+}
+function confirmSyncStart() {
+  if (syncStart) { syncStart.dispatched = true; releaseSyncStart(); }
+}
+function releaseSyncStart() {
+  if (!syncStart || !syncStart.dispatched) return;
+  if (Date.now() > syncStart.expires) { awaitSyncStart(null); return; }
+  const group = syncStart.ids.map(id => drones[id]);
+  if (!group.every(drone => drone.connected && drone.routineReadyAt !== null &&
+      Date.now() - drone.routineReadyAt >= 0 && Date.now() - drone.routineReadyAt <= 500 &&
+      drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
+      Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
+  if (syncStart.plan) {
+    // Recheck just before release; readiness can take a while. Keep the original
+    // frozen coordinates rather than adopting a different path while waiting.
+    try {
+      const current = makeAprilTagPlan(syncStart.ids, syncStart.plan.tag_ids);
+      if (current.ids.some(id => current.generations[id] !== syncStart.plan.generations[id] ||
+          Math.hypot(...current.starts[id].map((v, i) => v - syncStart.plan.starts[id][i])) > .06) ||
+          current.points.some((p, i) => Math.hypot(p.x - syncStart.plan.points[i].x, p.y - syncStart.plan.points[i].y) > .06) ||
+          syncStart.plan.points.some(p => group.some(d => d.fusedStamp - p.stamp > 120))) {
+        throw new Error('Tag route changed while waiting; run again after checking the map.');
+      }
+    } catch (error) { awaitSyncStart(null); feedback(error.message); return; }
+  }
+  publishCoordinationSelection();
+  const run = syncStart.run;
+  const plan = syncStart.plan;
+  if (syncStart.stages.length) {
+    routineFlight = { ids: syncStart.ids, run, stages: syncStart.stages, ready: {} };
+  }
+  syncStart = null;
+  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run, stage: 'start', ...(plan ? { plan } : {}) }) }));
+  group.forEach(drone => drone.publish('routineStart', {}));
+  feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
+}
+
+function receiveRoutineStage(id, message) {
+  const flight = routineFlight;
+  if (!flight || !flight.ids.includes(id)) return;
+  let ready;
+  try { ready = JSON.parse(message.data); } catch (_) { return; }
+  if (!ready || ready.run !== flight.run || ready.stage !== flight.stages[0]) return;
+  flight.ready[id] = Date.now();
+  const group = flight.ids.map(name => drones[name]);
+  if (!group.every(drone => drone.connected && flight.ready[drone.id] !== undefined &&
+      Date.now() - flight.ready[drone.id] >= 0 && Date.now() - flight.ready[drone.id] <= 500 &&
+      drone.field('flightMode').textContent === 'FLYING' && drone.modeReceivedAt !== null &&
+      Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
+  const stage = flight.stages.shift();
+  flight.ready = {};
+  if (!flight.stages.length) routineFlight = null;
+  group.forEach(drone => drone.publish('stageRelease', { data: JSON.stringify({ run: flight.run, stage }) }));
+  feedback('Synchronized ' + stage + ' sent to ' + group.map(drone => drone.id).join(' and ') + '.');
 }
 
 function dispatch(action, target = currentTarget()) {
+  if (action === 'disarm' || action === 'stop') awaitSyncStart(null);
   const sessions = sessionsFor(target);
   const available = sessions.filter(drone => drone.connected);
   // Stop and disarm can still reach a remaining drone if its partner is offline.
@@ -1142,19 +1306,112 @@ function stopHeldKeys() {
   heldKeys.clear();
 }
 
+// Keep one selection across staggered arming. Onboard PIDs latch it when armed.
+let coordinationPaired = null;
+let peerRelayEnabled = null;
+let peerRelayBusy = false;
+let peerRelayAvailable = false;
+function canChangePeerRelay() {
+  return Object.values(drones).filter(drone => drone.connected).every(drone =>
+    drone.modeReceivedAt !== null && Date.now() - drone.modeReceivedAt >= 0 &&
+    Date.now() - drone.modeReceivedAt <= 1500 &&
+    drone.field('flightMode').textContent === 'DISARMED');
+}
+
+function renderPeerRelay() {
+  const button = document.getElementById('peer-relay-toggle');
+  button.textContent = 'Peer relay: ' + (peerRelayEnabled === null ? 'loading' : peerRelayEnabled ? 'on' : 'off');
+  button.setAttribute('aria-pressed', String(peerRelayEnabled !== false));
+  button.disabled = peerRelayBusy || !peerRelayAvailable || !canChangePeerRelay();
+  document.getElementById('peer-relay-status').textContent = !peerRelayAvailable
+    ? 'Peer relay server unavailable.'
+    : peerRelayEnabled
+      ? 'Change before arming. Off disables automatic spacing control.'
+      : 'Automatic spacing control off for the next flight. Routine synchronization stays on.';
+  button.title = document.getElementById('peer-relay-status').textContent;
+}
+
+async function updatePeerRelay(enabled) {
+  if (peerRelayBusy) return;
+  const changing = typeof enabled === 'boolean';
+  if (changing && (!peerRelayAvailable || !canChangePeerRelay())) return;
+  peerRelayBusy = true;
+  renderPeerRelay();
+  try {
+    const options = { signal: AbortSignal.timeout(2000) };
+    if (changing) Object.assign(options, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Routine-Request': '1' },
+      body: JSON.stringify({ enabled })
+    });
+    const response = await fetch('/api/peer-relay', options);
+    const state = await response.json();
+    if (!response.ok || typeof state.enabled !== 'boolean') throw new Error('Relay setting unavailable');
+    peerRelayEnabled = state.enabled;
+    peerRelayAvailable = true;
+    publishCoordinationSelection();
+  } catch (_) {
+    peerRelayAvailable = false;
+    if (changing) feedback('Could not confirm the peer relay setting. Wait for the server to reconnect.');
+  } finally {
+    peerRelayBusy = false;
+    renderPeerRelay();
+  }
+}
+
+function publishCoordinationSelection() {
+  renderPeerRelay();
+  const connected = Object.values(drones).filter(drone => drone.connected);
+  if (!connected.length) { coordinationPaired = null; return; }
+  const fresh = drone => drone.modeReceivedAt !== null &&
+    Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500;
+  if (!connected.every(fresh)) return;
+  if (connected.every(drone => drone.field('flightMode').textContent === 'DISARMED')) {
+    coordinationPaired = peerRelayEnabled !== false && connected.length === 2;
+  }
+  if (coordinationPaired === null) return;
+  connected.forEach(drone => drone.publish('coordination', { data: coordinationPaired }));
+}
+
 function isFormControl(target) {
   return target && (target.isContentEditable || !!target.closest('input, textarea, select, summary'));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const fullscreenButton = document.getElementById('fullscreen-toggle');
+  fullscreenButton.hidden = !document.fullscreenEnabled;
+  const updateFullscreen = () => {
+    const active = !!document.fullscreenElement;
+    const label = active ? 'Exit full screen' : 'Full screen';
+    fullscreenButton.setAttribute('aria-label', label);
+    fullscreenButton.title = label;
+    fullscreenButton.setAttribute('aria-pressed', String(active));
+  };
+  document.addEventListener('fullscreenchange', updateFullscreen);
+  fullscreenButton.addEventListener('click', async () => {
+    fullscreenButton.disabled = true;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch (_) {
+      feedback('Could not change full screen. Try your browser’s full-screen control.');
+    } finally {
+      fullscreenButton.disabled = false;
+      updateFullscreen();
+    }
+  });
+  updateFullscreen();
   Chart.defaults.global.defaultFontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
   Chart.defaults.global.defaultFontSize = 12;
   Chart.defaults.global.defaultFontColor = '#58677b';
   ['drone1', 'drone2'].forEach(id => { drones[id] = new DroneSession(id); });
   fleetMap = new FleetMap();
   anchorCalibration = new AnchorCalibration();
+  document.getElementById('peer-relay-toggle').addEventListener('click', () => updatePeerRelay(!peerRelayEnabled));
+  updatePeerRelay();
+  setInterval(() => updatePeerRelay(), 2000);
   setInterval(() => {
-    Object.values(drones).forEach(drone => { drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); });
+    publishCoordinationSelection();
+    Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); });
     fleetMap.refreshAnchors();
     anchorCalibration.refresh();
   }, 250);
@@ -1162,13 +1419,14 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
-    if (button.dataset.connect === 'selected') connectSelected();
-    else if (button.dataset.connect) sessionsFor(button.dataset.connect).forEach(drone => drone.connect());
-    if (button.dataset.disconnect) {
-      stopHeldKeys();
-      sessionsFor(button.dataset.disconnect === 'selected' ? selectedConnection() : button.dataset.disconnect).forEach(drone => drone.disconnect());
+    if (button.dataset.connectionToggle) {
+      const drone = drones[button.dataset.connectionToggle];
+      if (drone.ros || drone.waitUntil) {
+        stopHeldKeys();
+        drone.disconnect();
+        document.dispatchEvent(new CustomEvent('drone-disconnect', { detail: drone.id }));
+      } else connectDrone(drone.id);
     }
-    if (button.dataset.analysis) drones[button.dataset.analysis].toggleAnalysis(button);
     if (!button.dataset.command) return;
     const controller = button.closest('[data-controller]');
     const scope = controller.dataset.controller;
@@ -1182,13 +1440,15 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('keydown', event => {
   const key = event.key.toLowerCase();
   if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // Drone terminals receive every key, including Space; Esc leaves the terminal.
+  if (event.target && event.target.closest && event.target.closest('.script-terminal')) return;
+  if (isFormControl(event.target)) return;
   if (key === ' ') {
     event.preventDefault();
     stopHeldKeys();
     dispatch('disarm', 'both');
     return;
   }
-  if (isFormControl(event.target)) return;
   if (movementKeys[key]) {
     event.preventDefault();
     if (event.repeat && !heldKeys.has(key)) return;

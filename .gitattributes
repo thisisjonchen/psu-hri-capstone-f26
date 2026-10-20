@@ -1,0 +1,6 @@
+# Keep executable scripts usable on the drones after a Windows checkout.
+*.py text eol=lf
+*.sh text eol=lf
+*.screenrc text eol=lf
+src/scripts/PALS/*_node text eol=lf
+src/scripts/PALS/apriltag_detection_drone text eol=lf

@@ -1,2 +1,4 @@
-from .uwb_locator import Position, UWBLocator, parse_lep_line
+"""Shared localization helpers; import onboard serial readers explicitly.
 
+The laptop relay uses this package too, including on Windows without POSIX serial.
+"""

@@ -38,7 +38,8 @@ installed by the image. Configure the anchors and each tag with [SETUP.md](SETUP
 The coordinates in `anchors.json` are examples; measure the installed anchors or
 use dashboard BLE calibration below.
 
-**The UWB tag defaults to `/dev/ttyACM1`.** The flight controller already
+**Provisioned drones use the serial devices selected during setup.**
+Without provisioning, the UWB tag defaults to `/dev/ttyACM1` and the flight controller
 probes `/dev/ttyACM0` and `/dev/ttyACM1`; confirm the tag still owns its configured
 port after reconnecting. To use another port, override it with the tag's persistent
 `/dev/serial/by-id/...` path. On the drone, compare `ls -l /dev/serial/by-id/`
@@ -96,13 +97,18 @@ processes. The fusion launch file also starts `/optical_flow_node`, so both Scre
 SE window and routines bring up the same flow path. Camera capture remains a separate
 node, shared with video and AprilTags. Existing manual movement controls keep their body-axis meaning.
 
-The altitude and hover routines also start UWB and fusion, reusing running nodes.
+The dashboard's **Connect** button starts the nodes; routines wait for them to be ready.
 They refuse to start alongside the legacy `/state_estimator`. Their X/Y hold point
 comes from `/pidrone/localization/fused`, the same room position shown on the
 dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 0.10 m/s, for the existing PID; altitude changes keep that X/Y point and retain
 ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
-body-axis displacement is converted once into a fixed room target.
+body-axis displacement is converted once into a fixed room target. Horizontal moves
+request velocity proportional to the remaining error, capped at the requested speed.
+The forward prototype continues at 0.20 m without waiting for a settled hover.
+Its velocity request is 0.5 times the remaining position error, capped at 0.5 m/s.
+The takeoff altitude target remains active
+(0.25 m by default). Controller output limits and paired-flight speed limits still apply.
 During UWB gaps, fusion continues predicting for up to 1 second since the last
 accepted fix, while IMU and altitude freshness requirements remain unchanged.
 Active holds keep their target and velocity feedback. If XY trim is enabled,
@@ -123,11 +129,23 @@ ROS node. Once fresh disarmed-mode and IMU data arrive, the node automatically s
 `/fusion_localization/room_yaw_offset` for inspection. Room position is unavailable
 until this startup alignment completes and UWB localization is ready.
 
-Alignment happens once per node start. Subsequent turns, disarming, and UWB gaps
-keep that offset. Restart fusion while facing +Y to align again. No routine or
-class calibration call is needed; the old manual launch/environment offset is
-removed. ToF still supplies height, and UWB still corrects room X/Y. This startup
-alignment does not correct ongoing IMU yaw drift.
+**Floor tag 5 corrects yaw in every mode, including flight.** Keep it fixed and
+flat, with the top of the standard
+[printed tag](https://github.com/AprilRobotics/apriltag-imgs/blob/master/tag36h11/tag36_11_00005.png)
+pointing toward map +Y. Fusion uses camera calibration, the mounting angles in
+`apriltag_mapping.yaml`, and IMU samples matched to the image time.
+
+Correction requires three consistent, fresh observations and is limited to
+**2 degrees/second** (at most 0.2 degrees per observation). Losing the tag keeps
+the last offset; hold targets and UWB position stay unchanged. This corrects
+estimated heading, not a commanded yaw angle. The limits are not flight-validated.
+
+Rebuild with `catkin_make` for the new `TagCorners` message, then restart the
+detector and fusion while disarmed. The existing facing-+Y startup alignment
+remains the fallback. **Align +Y** restarts fusion to repeat that alignment.
+Check `tag_yaw_status`, `tag_yaw_stamp`, and `room_yaw_offset` in fusion diagnostics.
+The detector sends fresh corners on `/pidrone/apriltag/reference_corners`;
+the existing detections topic is unchanged.
 
 The node also measures acceleration bias once, over at least two seconds of
 stationary, disarmed IMU samples. Keep the drone still until it logs
@@ -246,7 +264,9 @@ Flight and navigation still use each drone's live telemetry.
    The dashboard does not configure roles or PAN IDs.
    An empty BLE PAN value stays unknown; calibration still requires valid live
    distances between all six anchor pairs and rejects conflicting reported PAN IDs.
-2. Press **Measure layout** and review the shape and dimensions.
+2. Press **Measure** and review the coordinates. Adjust each anchor's X/Y in meters
+   if needed. To correct an existing calibration without measuring again, press
+   **Adjust saved layout**. Edits stay in the form until you press **Save**.
 3. Press **Save layout** within two minutes. Calibration completes after BLE readback
    confirms the saved coordinates on all four anchors. The server keeps four BLE
    connections open through preflight and save, then disconnects them. If the laptop
@@ -294,8 +314,8 @@ requested velocities, not guarantees of actual speed. Tune
 `/pidrone/localization/target_gain` and `/pidrone/localization/target_speed_limit`
 against the physical drone; both are read when the controller classes start.
 
-The XY velocity controller uses proportional feedback (0.75 RC units per cm/s of
-velocity error). XY trim integration is temporarily disabled (Ki=0) to isolate
+The XY velocity controller uses proportional feedback: roll 0.50 and pitch 0.75
+RC units per cm/s of velocity error. XY trim integration is temporarily disabled (Ki=0) to isolate
 circling from accumulated correction; there is no fast XY integral either.
 This may leave steady drift that previously required trim compensation.
 The optional trim path retains its +/-5 RC limit, input cap and gap-freezing
@@ -461,7 +481,8 @@ numbers, ToF-only height, tilt/offset math, freshness/time skew, ROS publication
 diagnostics, live anchor parsing/discovery, partial/stale/conflicting layouts,
 no duplicate publication, and independent dashboard telemetry.
 Fusion checks also cover delayed observations, axis rotation, covariance/outlier
-handling, UWB-derived velocity and expiry, startup acceleration bias, inertial
+handling, UWB-derived velocity and expiry, optical-flow velocity blending,
+startup acceleration bias, inertial
 braking with delayed fixes, layout/time resets, bounded room commands,
 manual overrides and explicit dashboard sending. Hardware-free tests need NumPy and Python 3.9+.
 

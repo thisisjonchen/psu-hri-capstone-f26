@@ -73,6 +73,27 @@ def encode_position(position):
     return struct.pack('<iiiB', *([int(round(v * 1000)) for v in coordinates] + [100]))
 
 
+def adjust_layout(positions, edits):
+    """Change XY only; keep each anchor's verified identity and shared Z."""
+    if not isinstance(edits, list) or len(edits) != 4:
+        raise ValueError('Provide X/Y coordinates for all four anchors')
+    adjusted = []
+    for original, edit in zip(positions, edits):
+        if not isinstance(edit, dict) or edit.get('id') != original['id']:
+            raise ValueError('Anchor selection changed; open a new preview')
+        try:
+            position = dict(original, x=float(edit['x']), y=float(edit['y']), z=0.0)
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('Enter numeric X/Y coordinates for every anchor')
+        encode_position(position)
+        adjusted.append(position)
+    for i, a in enumerate(adjusted):
+        for b in adjusted[i + 1:]:
+            if math.hypot(a['x'] - b['x'], a['y'] - b['y']) < 0.3:
+                raise ValueError('Minimum anchor spacing is 0.3 m')
+    return adjusted
+
+
 def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
     """Fit six ranges in the shared Z=0 plane; A0 is origin, A1 sets +X."""
     if len(anchors) != 4 or len(set(a['id'] for a in anchors)) != 4:
@@ -88,7 +109,11 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
             if not values or not all(np.isfinite(v) and 0 < v < 1000 for v in values):
                 raise ValueError('Missing good range between %s and %s' % (anchors[i]['id'], anchors[j]['id']))
             if max(values) - min(values) > max_error:
-                raise ValueError('Opposite range measurements disagree; check line of sight')
+                raise ValueError(
+                    'Range disagreement: %s to %s = %.3f m, %s to %s = %.3f m '
+                    '(maximum difference %.2f m); check line of sight' %
+                    (anchors[i]['id'], anchors[j]['id'], values[0],
+                     anchors[j]['id'], anchors[i]['id'], values[1], max_error))
             distance = sum(values) / len(values)
             if distance < 0.3:
                 raise ValueError('Minimum anchor spacing is 0.3 m')
@@ -130,12 +155,7 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
     rms, worst = float(np.sqrt(np.mean(error ** 2))), float(np.max(np.abs(error)))
     xy = np.array([[0., 0.], [values[0], 0.], values[1:3], values[3:5]])
     if values[0] <= 0 or xy[2, 1] <= 0 or xy[3, 1] <= 0:
-        raise ValueError('Invalid orientation; order anchors counterclockwise from the origin')
-    for i in range(4):
-        a, b, c = xy[i], xy[(i + 1) % 4], xy[(i + 2) % 4]
-        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
-        if cross < 0.1:
-            raise ValueError('Anchors must form four well-separated convex corners in the selected order')
+        raise ValueError('Invalid orientation; the remaining anchors must be on the +Y side of the baseline')
     if rms > max_rms or worst > max_error:
         raise ValueError('Range fit is inconsistent (RMS %.3f m, max %.3f m)' % (rms, worst))
     positions = [dict(a, x=float(xy[i, 0]), y=float(xy[i, 1]), z=0.0)

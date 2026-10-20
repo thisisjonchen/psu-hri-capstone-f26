@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import rospy
 from sensor_msgs.msg import CompressedImage
-from pidrone_pkg.msg import TagDetection
+from pidrone_pkg.msg import TagCorners, TagDetection
 
 TAG_ZONES = {0: 'PICKUP', 1: 'DROP_OFF', 2: 'BORDER'}
 
@@ -20,14 +20,15 @@ def make_detector():
         from pupil_apriltags import Detector
     except ImportError:
         import apriltag
-        return apriltag.Detector(apriltag.DetectorOptions(
-            families='tag36h11', nthreads=1, quad_decimate=1.0))
-    return Detector(families='tag36h11', nthreads=1, quad_decimate=1.0)
+        return (apriltag.Detector(apriltag.DetectorOptions(
+            families='tag36h11', nthreads=1, quad_decimate=1.0)), (0, 1, 2, 3))
+    # AprilTag 3 returns BL, BR, TR, TL; AprilTag 2 returns TL, TR, BR, BL.
+    return Detector(families='tag36h11', nthreads=1, quad_decimate=1.0), (3, 2, 1, 0)
 
 
 class AprilTagNode(object):
     def __init__(self):
-        self.detector = make_detector()
+        self.detector, self.corner_order = make_detector()
         self.rate = float(rospy.get_param('~rate', 10))
         self.timeout = float(rospy.get_param('~camera_timeout', 0.5))
         if not 0 < self.rate <= 30 or self.timeout <= 0:
@@ -38,6 +39,7 @@ class AprilTagNode(object):
         self.result = TagDetection()
         self.result.camera_online = False
         self.publisher = rospy.Publisher('/pidrone/apriltag/detections', TagDetection, queue_size=1)
+        self.corner_publisher = rospy.Publisher('/pidrone/apriltag/reference_corners', TagCorners, queue_size=1)
         topic = rospy.get_param('~image_topic', '/raspicam_node/image/compressed')
         self.subscriber = rospy.Subscriber(topic, CompressedImage, self.image_callback,
                                            queue_size=1, buff_size=2 ** 20)
@@ -73,6 +75,20 @@ class AprilTagNode(object):
                     self.result.image_height, self.result.image_width = image.shape
                     self.result.camera_online = True
                     self.last_frame_at = received
+                    # Only an unambiguous, uncorrected decode of our fixed yaw
+                    # reference may affect fusion. Keep the existing detections contract.
+                    references = [tag for tag in detections if int(tag.tag_id) == 5]
+                    if (len(references) == 1 and references[0].hamming == 0
+                            and references[0].decision_margin >= 30
+                            and message.header.stamp.to_sec() > 0 and 0 <= age <= self.timeout):
+                        corners = np.asarray(references[0].corners)[list(self.corner_order)]
+                        reference = TagCorners()
+                        reference.header = message.header
+                        reference.tag_id = 5
+                        reference.image_height, reference.image_width = image.shape
+                        reference.corner_x = [float(p[0]) for p in corners]
+                        reference.corner_y = [float(p[1]) for p in corners]
+                        self.corner_publisher.publish(reference)
             except (ValueError, cv2.error, RuntimeError) as error:
                 rospy.logwarn_throttle(5, 'AprilTag image processing failed: {}'.format(error))
         if self.last_frame_at is None or time.time() - self.last_frame_at > self.timeout:

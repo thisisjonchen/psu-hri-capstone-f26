@@ -100,3 +100,35 @@ def project_floor_tag(pixel, camera_matrix, distortion, drone_position,
     if not np.all(np.isfinite(intersection)):
         raise ValueError('Non-finite tag coordinates')
     return np.array([intersection[0], intersection[1], plane_z])
+
+
+def floor_tag_yaw_offset(corners, camera_matrix, distortion, local_quaternion,
+                         rotation_body_camera, distortion_model='plumb_bob'):
+    """Offset rotating a floor tag's printed top to map +Y, in radians.
+
+    Corners are TL, TR, BR, BL; quaternion maps body to the IMU's local world.
+    Unit camera height suffices because only edge direction matters.
+    """
+    pixels = np.asarray(corners, dtype=float)
+    if pixels.shape != (4, 2) or not np.all(np.isfinite(pixels)):
+        raise ValueError('Invalid tag corners')
+    if np.min(np.linalg.norm(np.roll(pixels, -1, axis=0) - pixels, axis=1)) < 12:
+        raise ValueError('Tag too small for yaw correction')
+    points = np.array([project_floor_tag(
+        pixel, camera_matrix, distortion, (0, 0, 1), local_quaternion,
+        (0, 0, 0), rotation_body_camera, max_distance=10,
+        distortion_model=distortion_model)[:2] for pixel in pixels])
+    edges = np.roll(points, -1, axis=0) - points
+    lengths = np.linalg.norm(edges, axis=1)
+    # Require similar side lengths and clockwise, approximately right-angle corners.
+    if np.min(lengths) < 1e-6 or np.max(lengths) > 1.5 * np.min(lengths):
+        raise ValueError('Tag does not reconstruct as a floor square')
+    directions = edges / lengths[:, None]
+    following = np.roll(directions, -1, axis=0)
+    turns = directions[:, 0] * following[:, 1] - directions[:, 1] * following[:, 0]
+    cosines = np.sum(directions * following, axis=1)
+    if not np.all(turns < 0) or np.any(np.abs(cosines) > .3):
+        raise ValueError('Tag does not reconstruct as a floor square')
+    top = (points[0] + points[1] - points[2] - points[3]) / 2.0
+    offset = math.pi / 2 - math.atan2(top[1], top[0])
+    return math.atan2(math.sin(offset), math.cos(offset))

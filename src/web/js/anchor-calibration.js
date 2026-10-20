@@ -15,6 +15,12 @@ class AnchorCalibration {
     this.requestEpoch = 0;
     this.requestError = null;
     this.awaitingStatus = false;
+    this.saveToken = null;
+    this.editorToken = null;
+    this.closeTimer = null;
+    document.getElementById('calibration-toggle').addEventListener('click', () => {
+      this.setOpen(document.getElementById('calibration-panel').hidden);
+    });
     this.remembered = [];
     try {
       const saved = JSON.parse(localStorage.getItem('uwb-anchor-corners'));
@@ -23,7 +29,7 @@ class AnchorCalibration {
       }
     } catch (_) { /* Calibration also works when browser storage is unavailable. */ }
     this.polling = false;
-    ['scan', 'measure', 'apply', 'cancel'].forEach(action => {
+    ['scan', 'measure', 'edit', 'apply', 'cancel'].forEach(action => {
       document.getElementById('calibration-' + action).addEventListener('click', () => this.request(action));
     });
     for (let i = 0; i < 4; i++) {
@@ -32,6 +38,9 @@ class AnchorCalibration {
         try { localStorage.setItem('uwb-anchor-corners', JSON.stringify(this.remembered)); } catch (_) {}
         this.requestError = null;
         this.refresh();
+      });
+      ['x', 'y'].forEach(axis => {
+        document.getElementById('calibration-' + axis + '-' + i).addEventListener('input', () => this.refresh());
       });
     }
     this.refresh();
@@ -48,6 +57,29 @@ class AnchorCalibration {
     this.receivedAt = Date.now();
     this.refresh();
     if (fleetMap) fleetMap.updateCalibratedLayout(state.layout);
+    if (this.saveToken && state.stage === 'complete' && state.layout &&
+        state.layout.verified && state.layout.revision === this.saveToken) {
+      this.saveToken = null;
+      if (!document.getElementById('calibration-panel').hidden) {
+        document.getElementById('calibration-form').hidden = true;
+        document.getElementById('calibration-success').hidden = false;
+        this.closeTimer = setTimeout(() => {
+          this.setOpen(false);
+          document.getElementById('calibration-toggle').focus();
+        }, 1200);
+      }
+    }
+    if (state.stage === 'error') this.saveToken = null;
+  }
+
+  setOpen(open) {
+    clearTimeout(this.closeTimer);
+    this.closeTimer = null;
+    document.getElementById('calibration-panel').hidden = !open;
+    document.getElementById('calibration-toggle').setAttribute('aria-expanded', String(open));
+    document.getElementById('map-frame').classList.toggle('calibrating', open);
+    document.getElementById('calibration-form').hidden = false;
+    document.getElementById('calibration-success').hidden = true;
   }
 
   async poll() {
@@ -131,6 +163,17 @@ class AnchorCalibration {
       document.getElementById('calibration-anchor-' + i).value === p.ble && p.z === 0));
   }
 
+  editedPositions() {
+    if (!this.state || !this.state.preview) return null;
+    const positions = this.state.preview.positions.map((p, i) => {
+      const values = ['x', 'y'].map(axis => document.getElementById('calibration-' + axis + '-' + i).value);
+      return { id: p.id, x: values[0].trim() ? Number(values[0]) : NaN,
+        y: values[1].trim() ? Number(values[1]) : NaN };
+    });
+    return positions.every(p => [p.x, p.y].every(v => Number.isFinite(v) && Math.abs(v) <= 1000))
+      ? positions : null;
+  }
+
   async request(action) {
     this.refresh();
     if (this.pendingAction || !this.fresh()) return;
@@ -142,6 +185,9 @@ class AnchorCalibration {
     if (action === 'apply') {
       if (this.state.stage !== 'preview' || !this.state.token || !this.matchesPreview()) return;
       request.token = this.state.token;
+      request.positions = this.editedPositions();
+      if (!request.positions) return;
+      this.saveToken = request.token;
     }
     this.pendingAction = action;
     this.requestEpoch++;
@@ -170,36 +216,47 @@ class AnchorCalibration {
   refresh() {
     this.updateBoards();
     const fresh = this.fresh(), busy = this.busy(), state = this.state;
+    if (state && state.preview && state.token !== this.editorToken) {
+      this.editorToken = state.token;
+      const corners = ['Bottom left', 'Bottom right', 'Top right', 'Top left'];
+      state.preview.positions.forEach((p, i) => {
+        document.getElementById('calibration-label-' + i).textContent = corners[i] + ' · ' + anchorLabel(p.id);
+        document.getElementById('calibration-anchor-' + i).value = p.ble;
+        ['x', 'y'].forEach(axis => {
+          document.getElementById('calibration-' + axis + '-' + i).value = p[axis].toFixed(3);
+        });
+      });
+    } else if (!state || !state.preview) {
+      this.editorToken = null;
+    }
     document.getElementById('calibration-scan').disabled = !fresh || busy || !!state.preview;
     document.getElementById('calibration-measure').disabled = !fresh || busy || !!this.selectionIssue();
-    document.getElementById('calibration-apply').disabled = !fresh || busy || state.stage !== 'preview' || !state.token || !this.matchesPreview();
+    document.getElementById('calibration-edit').disabled = !fresh || busy || !state.layout || state.dirty || !!state.preview;
+    document.getElementById('calibration-apply').disabled = !fresh || busy || state.stage !== 'preview' || !state.token || !this.matchesPreview() || !this.editedPositions();
     document.getElementById('calibration-cancel').disabled = !fresh || !!this.pendingAction || !(busy || state.preview || state.dirty);
     for (let i = 0; i < 4; i++) {
       document.getElementById('calibration-anchor-' + i).disabled = !fresh || busy;
+      ['x', 'y'].forEach(axis => {
+        document.getElementById('calibration-' + axis + '-' + i).disabled = !fresh || busy;
+      });
     }
-    const labels = { scan: 'Scanning…', measure: 'Measuring…', apply: 'Saving…', cancel: 'Cancelling…' };
+    const labels = { scan: 'Scanning…', measure: 'Measuring…', edit: 'Preparing…', apply: 'Saving…', cancel: 'Cancelling…' };
     const stages = { scanning: 'scan', measuring: 'measure', saving: 'apply' };
     const active = this.pendingAction || (state && state.busy && stages[state.stage]);
-    const defaults = { scan: '1. Scan anchors', measure: '2. Measure layout', apply: '3. Save layout', cancel: 'Cancel' };
+    const defaults = { scan: '1. Scan', measure: '2. Measure', edit: 'Adjust saved layout', apply: '3. Save', cancel: 'Cancel' };
     Object.keys(defaults).forEach(action => {
       document.getElementById('calibration-' + action).textContent = active === action ? labels[action] : defaults[action];
     });
     const selectionStatus = document.getElementById('calibration-selection');
-    selectionStatus.hidden = !state || state.boards.filter(board => board.active).length < 4;
-    selectionStatus.textContent = selectionStatus.hidden ? '' : this.selectionIssue() ||
-      'Four corners assigned. Confirm their physical locations before measuring.';
+    const issue = state && state.boards.filter(board => board.active).length >= 4 ? this.selectionIssue() : '';
+    selectionStatus.hidden = !issue;
+    selectionStatus.textContent = issue || '';
     document.getElementById('calibration-status').textContent = this.requestError || (!fresh
       ? (this.awaitingStatus ? 'Checking calibration status...'
         : state && (state.preview || state.dirty) ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
-        : 'Open the dashboard through the laptop server: http://localhost:8000.')
+        : 'Calibration server offline.')
       : this.pendingAction ? labels[this.pendingAction] : state.message);
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
-    const corners = ['Top Left', 'Top Right', 'Bottom Left', 'Bottom Right'];
-    // Present rows from top to bottom; the solver retains its counterclockwise order.
-    preview.textContent = fresh && state.preview ? [3, 2, 0, 1]
-      .map(index => state.preview.positions[index]).filter(Boolean).map((p, i) =>
-        'Corner ' + (i + 1) + ' (' + corners[i] + ') · ' + anchorLabel(p.id) +
-        ': X ' + p.x.toFixed(2) + ', Y ' + p.y.toFixed(2) + ' m').join('\n') : '';
   }
 }
