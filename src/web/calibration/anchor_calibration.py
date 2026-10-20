@@ -88,7 +88,11 @@ def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
             if not values or not all(np.isfinite(v) and 0 < v < 1000 for v in values):
                 raise ValueError('Missing good range between %s and %s' % (anchors[i]['id'], anchors[j]['id']))
             if max(values) - min(values) > max_error:
-                raise ValueError('Opposite range measurements disagree; check line of sight')
+                raise ValueError(
+                    'Range disagreement: %s to %s = %.3f m, %s to %s = %.3f m '
+                    '(maximum difference %.2f m); check line of sight' %
+                    (anchors[i]['id'], anchors[j]['id'], values[0],
+                     anchors[j]['id'], anchors[i]['id'], values[1], max_error))
             distance = sum(values) / len(values)
             if distance < 0.3:
                 raise ValueError('Minimum anchor spacing is 0.3 m')

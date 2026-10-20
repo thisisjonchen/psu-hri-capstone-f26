@@ -66,7 +66,8 @@ class CalibrationTest(unittest.TestCase):
             solve_layout(BOARDS, missing)
         inconsistent = copy.deepcopy(ROWS)
         inconsistent['0001']['0002'] = (5, 100)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,
+                r'0001 to 0002 = 5\.000 m, 0002 to 0001 = 4\.000 m'):
             solve_layout(BOARDS, inconsistent)
         order = (0, 1, 3, 2)
         layout = solve_layout([BOARDS[i] for i in order], ROWS)
