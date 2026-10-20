@@ -979,12 +979,11 @@ class DroneSession {
       this.updateVerticalSpeed(time, valid ? message.range : NaN);
       this.render('height');
     });
-    subscribe('/pidrone/picamera/twist', 'geometry_msgs/TwistStamped', message => {
-      const speed = Math.hypot(message.twist.linear.x, message.twist.linear.y);
+    subscribe('/pidrone/state', 'pidrone_pkg/State', message => {
+      const velocity = message.twist_with_covariance.twist.linear;
+      const speed = Math.hypot(velocity.x, velocity.y);
       this.addPoint('speed', this.time(message), speed);
-      if (Number.isFinite(speed)) {
-        this.field('speed').textContent = speed.toFixed(2) + ' m/s';
-      }
+      this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
       this.render('speed');
     });
     const ukf = message => {

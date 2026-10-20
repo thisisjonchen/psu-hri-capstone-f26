@@ -625,10 +625,11 @@ test('a dropped partner stops movement until a fresh key press', () => {
   assert.equal(last(b, 'twist').linear.y, 0.1);
 });
 
-test('the speed header shows horizontal speed and vertical direction while the graph keeps signed velocity', () => {
+test('the speed header uses controller velocity and keeps range-derived vertical speed separate', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.receive(a, '/pidrone/picamera/twist', { ...stamp(100), twist: { linear: { x: 0.3, y: 0.4, z: 99 } } });
+  app.receive(a, '/pidrone/state', { ...stamp(100),
+    twist_with_covariance: { twist: { linear: { x: -0.3, y: 0.4, z: 99 } } } });
   assert.equal(a.field('speed').textContent, '0.50 m/s');
   assert.equal(a.field('verticalSpeed').textContent, '—');
   app.receive(a, '/pidrone/range', rangeAt(100, 0.4));
@@ -639,6 +640,13 @@ test('the speed header shows horizontal speed and vertical direction while the g
   assert.ok(Math.abs(a.speedChart.data.datasets[1].data[0].y + 0.2) < 1e-6);
   assert.equal(b.series.verticalSpeed.length, 0);
   assert.equal(b.field('verticalSpeed').textContent, '—');
+  assert.equal(b.field('speed').textContent, '—');
+  app.receive(a, '/pidrone/state', { ...stamp(100.3),
+    twist_with_covariance: { twist: { linear: { x: 0, y: 0, z: 99 } } } });
+  assert.equal(a.field('speed').textContent, '0.00 m/s');
+  app.receive(a, '/pidrone/state', { ...stamp(100.4),
+    twist_with_covariance: { twist: { linear: { x: NaN, y: 0, z: 99 } } } });
+  assert.equal(a.field('speed').textContent, '—');
 });
 
 test('vertical speed follows timestamped height with smoothing and ignores repeated or older stamps', () => {
