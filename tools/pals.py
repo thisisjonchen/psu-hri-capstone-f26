@@ -18,11 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / 'src' / 'web'
 VENV = ROOT / '.venv'
 VENV_PYTHON = VENV / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-REQUIREMENTS = WEB / 'requirements.txt'
+REQUIREMENTS = ROOT / 'requirements.txt'
 
 
 def ensure_venv():
-    """Re-run inside .venv with src/web/requirements.txt installed."""
+    """Re-run inside .venv with the root laptop requirements installed."""
     if not VENV_PYTHON.exists():
         print('Creating', VENV)
         subprocess.check_call([sys.executable, '-m', 'venv', str(VENV)])
@@ -95,7 +95,7 @@ def provision(targets):
             sys.exit('%s: the flight controller and UWB tag must be different devices' % drone)
         remote(client, drone, "printf 'PALS_FC_ID=%s\\nPALS_UWB_ID=%s\\n' > ~/catkin_ws/pals.ports" % (fc, uwb))
 
-        for step in ('python -m pip install --user -r scripts/PALS/requirements.txt',
+        for step in ('python -m pip install --user -r ~/catkin_ws/src/pidrone_pkg/requirements.txt',
                      'cd ~/catkin_ws && catkin_make'):
             if remote(client, drone, "docker start pidrone_pkg >/dev/null && "
                       "docker exec pidrone_pkg bash -ic '%s'" % step)[0]:

@@ -14,9 +14,9 @@ attitude and raw-IMU requests together before waiting for their replies. Battery
 telemetry is polled at 2 Hz, leaving margin for the routines' one-second battery
 freshness check. The loop still targets 60 Hz; serial turnaround determines the
 achieved rate. After restarting the flight-controller node while disarmed, check
-`rostopic hz /pidrone/imu` and `rostopic hz /pidrone/battery`. A missing IMU reply
-ends the loop through its existing shutdown/disarm path instead of publishing a
-cached reading with a new timestamp.
+`rostopic hz /pidrone/imu` and `rostopic hz /pidrone/battery`. An incomplete batched
+IMU reply warns and skips that sample without publishing cached data with a new
+timestamp. The existing fault and shutdown/disarm paths remain separate.
 
 ## Install and launch on each drone
 
@@ -27,7 +27,7 @@ unless that environment also supplies compatible ROS Python packages.
 
 ```bash
 cd ~/catkin_ws/src/pidrone_pkg
-python -m pip install --user -r scripts/localization/requirements.txt
+python -m pip install --user -r requirements.txt
 cd ~/catkin_ws
 catkin_make
 source devel/setup.bash
@@ -105,7 +105,8 @@ dashboard. Hold errors are rotated into body-axis velocity commands, capped at
 ToF height control. Relative `move_forward`/`move_back` use the UWB room pose too: the requested
 body-axis displacement is converted once into a fixed room target. Horizontal moves
 request velocity proportional to the remaining error, capped at the requested speed.
-The forward prototype continues at 0.20 m without waiting for a settled hover.
+The forward prototype continues one second after FLYING is confirmed, without
+waiting for a settled hover.
 Its velocity request is 0.5 times the remaining position error, capped at 0.5 m/s.
 The takeoff altitude target remains active
 (0.25 m by default). Controller output limits and paired-flight speed limits still apply.
@@ -240,7 +241,7 @@ From the repository root on your laptop (macOS or Linux, Python 3.9+):
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r src/web/requirements.txt
+python -m pip install -r requirements.txt
 python src/web/server.py
 ```
 

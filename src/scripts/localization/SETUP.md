@@ -7,8 +7,10 @@ and 1 tag per drone.
 
 ## 1. Prerequisites
 
-- From this directory, `python -m pip install -r requirements.txt`, using the
-  interpreter that runs the node (normally Python 2.7 for ROS Kinetic).
+- On the drone, install `~/catkin_ws/src/pidrone_pkg/requirements.txt` using
+  `python -m pip install --user -r ~/catkin_ws/src/pidrone_pkg/requirements.txt`
+  with the interpreter that runs the node (normally Python 2.7 for ROS Kinetic).
+  On a laptop, install the repository-root `requirements.txt` in `.venv`.
 - Linux only: `sudo usermod -aG dialout $USER`, then log out and back in
 - A micro-USB **data** cable (J9, the USB port next to the J-Link chip)
 

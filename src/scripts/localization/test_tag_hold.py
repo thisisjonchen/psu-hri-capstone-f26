@@ -119,6 +119,7 @@ class TagHoldTest(unittest.TestCase):
         for failed in (None, 'acquire'):
             with self.subTest(failed=failed):
                 drone, hold = mock.Mock(mode='FLYING'), mock.Mock(tag_id=5)
+                drone.finish = type(self.drone).finish.__get__(drone)
                 if failed:
                     getattr(hold, failed).side_effect = RuntimeError('tag flight failed')
                 self.ros.init_node = mock.Mock()

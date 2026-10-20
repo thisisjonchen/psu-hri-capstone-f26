@@ -247,6 +247,41 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
 
+    def test_finish_preserves_disarm_and_manual_landing_recovery(self):
+        drone = self.drone
+        with mock.patch.object(drone, 'land') as land, \
+                mock.patch.object(drone, 'disarm') as disarm, \
+                mock.patch.object(self.ros, 'sleep', create=True) as sleep:
+            for mode in ('DISARMED', 'ARMED', None):
+                drone.mode = mode
+                drone.finish()
+                disarm.assert_called_once_with()
+                land.assert_not_called()
+                disarm.reset_mock()
+
+            drone.mode = 'FLYING'
+            for hold_xy in (False, True):
+                drone.finish(hold_xy=hold_xy)
+                land.assert_called_once_with(hold_xy=hold_xy)
+                land.reset_mock()
+            disarm.assert_not_called()
+            sleep.assert_not_called()
+
+            land.side_effect = RuntimeError('range unavailable')
+
+            def manual_recovery(seconds):
+                disarm.assert_not_called()
+                drone.heartbeat.shutdown.assert_not_called()
+                # Stay alive through an intermediate mode until manual disarm.
+                drone.mode = 'ARMED' if sleep.call_count == 1 else 'DISARMED'
+
+            sleep.side_effect = manual_recovery
+            drone.finish(hold_xy=True)
+            land.assert_called_once_with(hold_xy=True)
+            self.assertEqual(sleep.call_args_list, [mock.call(.5), mock.call(.5)])
+            disarm.assert_not_called()
+            drone.heartbeat.shutdown.assert_not_called()
+
     def advance_until(self, release_at=None, run=None):
         started = self.fusion.now
         self.drone.voltage = 16.
@@ -372,6 +407,7 @@ class RoutineControlTest(unittest.TestCase):
         module.Drone = mock.Mock()
         drone = module.Drone.return_value
         drone.mode = 'FLYING'
+        drone.finish = type(self.drone).finish.__get__(drone)
         self.ros.init_node = mock.Mock()
         script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'prototype-1-forward.py')
         with mock.patch.dict(sys.modules, {'drone_controller': module}), \
@@ -486,6 +522,7 @@ class RoutineControlTest(unittest.TestCase):
         path_module.tag_ids = lambda text: [int(i) for i in text.split(',')]
         drone, route = control.Drone.return_value, path_module.AprilTagPath.return_value
         drone.mode = 'FLYING'
+        drone.finish = type(self.drone).finish.__get__(drone)
         script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'prototype-1-apriltag.py')
         with mock.patch.dict(sys.modules, {'drone_controller': control, 'apriltag_path': path_module}), \
                 mock.patch.object(sys, 'argv', [script, '--fly', '--drones', 'both', '--tags', '1,2']):

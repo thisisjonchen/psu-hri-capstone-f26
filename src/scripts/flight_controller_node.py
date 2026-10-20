@@ -277,7 +277,7 @@ class FlightController(object):
 
     def send_rc_cmd(self):
         """ Send commands to the flight controller board """
-        assert len(self.command) is 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
+        assert len(self.command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
         self.board.send_raw_command(8, MultiWii.SET_RAW_RC, self.command)
         self.board.receiveDataPacket()
         if (self.command != self.last_command):

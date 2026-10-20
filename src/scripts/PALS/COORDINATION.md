@@ -160,7 +160,7 @@ The existing `TagMap` display topic and fusion tuning are unchanged.
 
 The dashboard server manages the relay and waits for both ROS connections. No
 separate command is needed. Without the dashboard server, run it standalone using
-the existing laptop environment (`src/web/requirements.txt`, websockets 15):
+the existing laptop environment (repository-root `requirements.txt`, websockets 15):
 
 ```sh
 .venv/bin/python tools/peer_relay.py

@@ -10,24 +10,15 @@ Assuming that the base environment is already set up on the DD24 by following th
 1. Turn the drones on and connect them and your laptop to the same hotspot:
    - Network name: **duckietown**
    - Network password: **quackquack**
-2. For first-time setup, clone this repo on your laptop and run these commands from the repository root.
-   ```
-   python3 tools/pals.py ssh-setup
-   python3 tools/pals.py provision
-   ```
-   Use `--drone drone1` to set up only one drone.
-3. Start the dashboard:
+2. Start the dashboard:
    ```
    python3 tools/pals.py dashboard
    ```
    Open `http://localhost:8000` if it does not open automatically.
-4. Place each drone disarmed, stationary, and facing the top of the map (+Y).
-5. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
-6. For paired flight, connect both drones before arming. The dashboard server automatically relays peer telemetry once both ROS connections are available.
-7. Under **Routines**, select a script, enter its arguments, and click **Execute**. For `prototype-1-forward.py`, use `--fly --distance 0.25`: both start together, then each climbs for one second after FLYING is confirmed, moves forward 0.25 m, and lands independently. See [coordination](scripts/PALS/COORDINATION.md) for paired-flight details.
-8. Read all instructions carefully and be ready to disarm at all times. Press Esc to leave a terminal, then Space to disarm all connected drones.
-
-Use **Restart nodes** after updating code, or **Align +Y** to re-align heading. Keep the drones disarmed, stationary, and facing +Y for either action.
+3. Place each drone disarmed, stationary, and facing the top of the map (+Y).
+4. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
+5. Under **Routines**, select a script, enter its arguments, and click **Run**.
+6. Read all instructions carefully and be ready to disarm at all times.
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
@@ -79,20 +70,6 @@ The camera may be out of focus. Here are some steps to fix that.
 
 NOTE: IF CAMERA IS CALIBRATED, DO NOT TOUCH THE FOCUS RING.
 
-## AprilTag Detector Installation
-To allow AprilTag detection to work, we will have to install some dependencies.
-
-
-1. Run the following
-```
-cd ~/catkin_ws/src/pidrone_pkg
-python -m pip install --user -r scripts/PALS/requirements.txt
-cd ~/catkin_ws
-catkin_make
-source devel/setup.bash
-```
-2. Done!
-
 ## UWB + ToF Localization
 
 Start each drone facing the top of the map (+Y) before starting its flight controller.
@@ -103,26 +80,6 @@ When calibrating:
 - 9781: Tag 4
 - CA83: Tag 3
 
-Start the dashboard on your laptop:
-
-```bash
-python3 tools/pals.py dashboard
-```
-
-Run from the repository root. The dashboard opens at `http://localhost:8000`.
-
-On Windows, install Python 3.11 or newer and run from PowerShell:
-
-```powershell
-py -3 tools/pals.py dashboard
-```
-
-The launcher creates `.venv` and installs dependencies. Clicking **Connect** sets up
-SSH using the default password (`quackquack`) when needed; existing keys are reused.
-If a drone is offline, click **Connect** again once it is online. Bluetooth calibration
-requires a Bluetooth LE adapter. The drones must be reachable as `drone1.local`
-and `drone2.local` on the same network. The peer relay runs automatically with the dashboard.
-
 ## Tips + Tricks
 - Use `d + [enter] to exit out of a screen session
 - If you come across an issue with the screen session, run:
@@ -132,3 +89,8 @@ and `drone2.local` on the same network. The peer relay runs automatically with t
    cd ~/catkin_ws/src/pidrone_pkg
    screen -c pi.screenrc
    ```
+
+## To Install Python Dependencies on Drone
+1. Add to `requirements.txt`
+2. SSH and start container on `/catkin_ws/src/pidrone_pkg` by using `rake start`
+3. Run `python -m pip install -r requirements.txt`

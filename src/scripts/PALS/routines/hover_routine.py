@@ -28,16 +28,7 @@ def main():
                       drone.takeoff_height)
         drone.hover(5.0)
     finally:
-        if drone.mode == 'FLYING':
-            try:
-                drone.land(hold_xy=True)
-            except Exception as error:
-                rospy.logerr('Landing needs manual recovery: %s', error)
-                # Keep the heartbeat active for manual landing.
-                while drone.mode != 'DISARMED':
-                    rospy.sleep(0.5)
-        else:
-            drone.disarm()
+        drone.finish(hold_xy=True)
 
 
 if __name__ == '__main__':
