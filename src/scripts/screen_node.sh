@@ -68,6 +68,8 @@ pidrone_screen_node() {
             fi
             # shellcheck disable=SC1091
             source "$HOME/catkin_ws/install/setup.bash" || return
+            # The install space has an old pidrone_pkg; resolve it to this checkout.
+            export ROS_PACKAGE_PATH="$package_dir:$ROS_PACKAGE_PATH"
             command=(roslaunch --wait "$package_dir/launch/tof.launch")
             ;;
         bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
