@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """IMU/optical-flow velocity, local odometry, IMU/ToF climb rate and UWB room position.
 
-IMU acceleration predicts velocity and optical flow corrects it; while the
-drone is not flying, a zero-velocity observation replaces flow. UWB only
+IMU acceleration predicts velocity and optical flow corrects it. On the ground
+(not flying, or within ground_margin of the ground height) velocity is zero;
+below flow_min_height the IMU coasts alone, as PX4 does. UWB only
 corrects the room offset, so XY control works without UWB. IMU vertical
 acceleration and ToF height give the climb rate used by altitude control.
 """
@@ -57,11 +58,15 @@ class FusionLocalizationNode(object):
         zero_stddev = float(rospy.get_param('~zero_velocity_stddev', 0.02))
         self.flow_variance, self.zero_variance = flow_stddev ** 2, zero_stddev ** 2
         self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
+        self.flow_min_height = float(rospy.get_param('~flow_min_height', 0.10))
+        self.ground_margin = float(rospy.get_param('~ground_margin', 0.02))
+        self.ground_height = None
         self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
         if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
                 or not all((self.frame, self.odom_frame, self.body_frame))
                 or not all(np.isfinite(v) and v > 0 for v in
-                           (self.timeout, self.skew, flow_stddev, zero_stddev, self.flow_limit))
+                           (self.timeout, self.skew, flow_stddev, zero_stddev, self.flow_limit,
+                            self.flow_min_height, self.ground_margin))
                 or not np.isfinite(self.angular_comp)):
             raise ValueError('Invalid fusion frames, limits or timeouts')
         self.height = PositionCombiner(
@@ -113,8 +118,13 @@ class FusionLocalizationNode(object):
         return stamp is not None and 0 < stamp <= now and now - stamp <= limit
 
     def on_ground(self):
-        """Known not flying: the drone cannot be moving horizontally."""
-        return self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, rospy.get_time())
+        """Not flying, or resting at the ground height measured before takeoff."""
+        now = rospy.get_time()
+        if self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, now):
+            return True
+        height, _ = self.height.height(monotonic(), now)
+        return bool(height is not None and self.ground_height is not None
+                    and height.z <= self.ground_height + self.ground_margin)
 
     def invalidate_room(self):
         self.room.reset()
@@ -226,6 +236,8 @@ class FusionLocalizationNode(object):
             height, _ = self.height.height(monotonic(), rospy.get_time())
             if height is not None:
                 self.vertical.correct(height.z, self.tof_variance, height.stamp)
+                if self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, rospy.get_time()):
+                    self.ground_height = height.z
 
     def uwb_callback(self, msg):
         with self.lock:
@@ -243,6 +255,9 @@ class FusionLocalizationNode(object):
             if self.on_ground():
                 return  # Zero-velocity observations replace the near-floor camera.
             height, _ = self.height.height(monotonic(), now)
+            if height is not None and height.z - self.height.floor_z < self.flow_min_height:
+                self.velocity_reason = 'Below optical-flow working height; coasting on IMU'
+                return
             if (height is None or self.imu is None or not self.fresh(self.imu[0], now)
                     or not self.fresh(stamp, now) or msg.header.frame_id != self.body_frame
                     or max(stamp, self.imu[0], height.stamp)
@@ -349,6 +364,7 @@ class FusionLocalizationNode(object):
             status.message = reason
             status.values = [KeyValue(key='velocity_source',
                                       value='zero velocity (on ground)' if self.on_ground() else 'IMU + optical flow'),
+                             KeyValue(key='ground_height', value=str(self.ground_height)),
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='last_velocity_result', value=self.velocity_reason),
                              KeyValue(key='acceleration_bias', value=str(self.velocity.state[2:].tolist())),

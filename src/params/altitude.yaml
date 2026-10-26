@@ -22,10 +22,10 @@ rate_i_limit: 0.71
 # Climb and descent speed limits (m/s), like ArduPilot PILOT_SPEED_UP/DN.
 climb_limit: 0.3
 descent_limit: 0.2
-# Takeoff target ramp (m/s); the integral is frozen until airborne_height (m) above start.
+# Takeoff target ramp (m/s), as in the earlier hover behavior.
 takeoff_rate: 0.10
-airborne_height: 0.03
 # Thrust curve, like ArduPilot MOT_THST_EXPO: thrust = (1 - e) * a + e * a^2.
 thrust_expo: 0.65
-# Angle boost divides thrust by cos(tilt), capped at this tilt.
-max_boost_tilt_deg: 30.0
+# Angle boost while leaning, capped at this tilt. Conservative: sized for the
+# steepest prop curve, so the drone may sink slightly but never gains extra thrust.
+max_boost_tilt_deg: 10.0

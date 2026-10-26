@@ -108,8 +108,8 @@ class VelocityFilter(object):
         self.gate, self.max_rejections = gate, max_rejections
         self.state = np.zeros(4)
         self.covariance = np.zeros((4, 4))
-        # Prior bias uncertainty: about a 1 degree attitude error (0.17 m/s^2).
-        self.covariance[2:, 2:] = np.eye(2) * 0.17 ** 2
+        # Prior bias uncertainty: about a 3 degree attitude error (0.5 m/s^2).
+        self.covariance[2:, 2:] = np.eye(2) * 0.5 ** 2
         self.odom = np.zeros(2)
         self.stamp = None
         self.corrected_stamp = None
