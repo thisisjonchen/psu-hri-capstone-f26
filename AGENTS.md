@@ -50,11 +50,12 @@ can lag behind the code; verify the actual launch configuration and data path.
   new exception-driven shutdown. Existing baseline fault handling remains separate.
 - Do not arm, fly, calibrate hardware, or send motor commands as part of automated
   verification. A file named `test` may be an executable hardware utility; inspect it first.
-- The current default estimates XY position and velocity from UWB with IMU
-  acceleration prediction, then blends fresh accepted optical-flow velocity into
-  controller feedback (20% flow, 80% UWB/IMU). It uses ToF for height and IMU
-  attitude for frame conversion. Do not assume a textured floor or introduce
-  optical-flow quality gating without a request.
+- XY velocity comes from a Kalman filter in which IMU acceleration predicts and
+  optical flow corrects (zero velocity while disarmed/armed on the ground), with an
+  acceleration-bias state and a standard innovation gate. UWB never affects velocity;
+  it only corrects the room offset over smooth local odometry, so hold and relative
+  moves work without UWB and room waypoints require it. The floor is assumed textured.
+  ToF gives height and IMU attitude gives frame conversion.
 - Heading alignment belongs at fusion-node startup while disarmed and facing map
   +Y, not in individual routines. It does not remove ongoing yaw drift.
 - Preserve an existing hold target through supported sensor gaps. Do not silently

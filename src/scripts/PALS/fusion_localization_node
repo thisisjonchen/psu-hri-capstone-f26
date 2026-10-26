@@ -1,5 +1,10 @@
 #!/usr/bin/env python
-"""UWB/ToF room localization with continuous local controller odometry."""
+"""IMU/optical-flow velocity, local odometry and UWB room position.
+
+IMU acceleration predicts velocity and optical flow corrects it; while the
+drone is not flying, a zero-velocity observation replaces flow. UWB only
+corrects the room offset, so XY control works without UWB.
+"""
 import math
 import threading
 from collections import deque
@@ -14,8 +19,8 @@ from pidrone_pkg.msg import AnchorLayout, Mode, State, TagCorners
 from sensor_msgs.msg import CameraInfo, Imu, Range
 from std_msgs.msg import Bool, UInt32
 
-from localization.fusion import (PlanarFusion, body_angle, horizontal_acceleration,
-                                 rotate, XY_PREDICTION_TIMEOUT)
+from localization.fusion import (RoomOffset, VelocityFilter, body_angle,
+                                 horizontal_acceleration, rotate)
 from localization.position import PositionCombiner
 from localization.apriltag_geometry import camera_rotation, floor_tag_yaw_offset
 from localization import monotonic
@@ -25,27 +30,31 @@ class FusionLocalizationNode(object):
     def __init__(self):
         self.lock = threading.RLock()
         self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
-        self.filter = PlanarFusion(
-            yaw_offset=None,
-            velocity_stddev=float(rospy.get_param('~velocity_stddev', 0.12)),
+        self.velocity_settings = dict(
             acceleration_stddev=float(rospy.get_param('~acceleration_stddev', 0.3)),
-            drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
+            bias_stddev=float(rospy.get_param('~acceleration_bias_stddev', 0.02)),
+            timeout=float(rospy.get_param('~velocity_timeout', 0.5)),
             max_gap=self.timeout,
             gate=float(rospy.get_param('~innovation_gate', 9.21)),
-            max_innovation=float(rospy.get_param('~max_innovation', 1.0)),
-            flow_velocity_weight=float(rospy.get_param('~flow_velocity_weight', 0.2)))
+            max_rejections=int(rospy.get_param('~flow_max_rejections', 5)))
+        self.velocity = VelocityFilter(**self.velocity_settings)
+        self.room = RoomOffset(
+            drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
+            gate=float(rospy.get_param('~innovation_gate', 9.21)),
+            max_innovation=float(rospy.get_param('~max_innovation', 1.0)))
         self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.odom_frame = rospy.get_param('~odom_frame', 'odom')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
-        flow_stddev = float(rospy.get_param('~flow_velocity_stddev', 0.4))
-        self.flow_variance = flow_stddev ** 2
+        flow_stddev = float(rospy.get_param('~flow_velocity_stddev', 0.15))
+        zero_stddev = float(rospy.get_param('~zero_velocity_stddev', 0.02))
+        self.flow_variance, self.zero_variance = flow_stddev ** 2, zero_stddev ** 2
         self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
         self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
         if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
                 or not all((self.frame, self.odom_frame, self.body_frame))
                 or not all(np.isfinite(v) and v > 0 for v in
-                           (self.timeout, self.skew, flow_stddev, self.flow_limit))
+                           (self.timeout, self.skew, flow_stddev, zero_stddev, self.flow_limit))
                 or not np.isfinite(self.angular_comp)):
             raise ValueError('Invalid fusion frames, limits or timeouts')
         self.height = PositionCombiner(
@@ -64,12 +73,6 @@ class FusionLocalizationNode(object):
         self.tag_correction_at = None
         self.tag_accepted_stamp = None
         self.tag_reason = 'Waiting for tag 5'
-        self.use_imu_acceleration = bool(rospy.get_param('~use_imu_acceleration', False))
-        self.imu_acceleration_gain = float(rospy.get_param('~imu_acceleration_gain', 0.25))
-        if not np.isfinite(self.imu_acceleration_gain) or not 0 < self.imu_acceleration_gain <= 1:
-            raise ValueError('IMU acceleration gain must be greater than zero and at most one')
-        self.acceleration_bias = None
-        self.bias_samples = deque()
         self.mode = None
         self.mode_at = None
         self.pending = []
@@ -77,8 +80,8 @@ class FusionLocalizationNode(object):
         self.layout_stamp = None
         self.generation = 0
         self.last_time = None
-        self.reason = 'Waiting for sensors'
-        self.flow_reason = 'No optical flow received'
+        self.reason = 'Waiting for UWB'
+        self.velocity_reason = 'Waiting for IMU'
         self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
         self.pose_pub = rospy.Publisher('pidrone/localization/fused', PoseWithCovarianceStamped, queue_size=1)
         self.odom_pub = rospy.Publisher('pidrone/localization/odometry', Odometry, queue_size=1)
@@ -97,14 +100,17 @@ class FusionLocalizationNode(object):
             rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
             rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
         rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
-        rospy.loginfo('Keep still for 2 seconds while disarmed to measure startup acceleration bias')
 
     def fresh(self, stamp, now, timeout=None):
         limit = self.timeout if timeout is None else timeout
         return stamp is not None and 0 < stamp <= now and now - stamp <= limit
 
+    def on_ground(self):
+        """Known not flying: the drone cannot be moving horizontally."""
+        return self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, rospy.get_time())
+
     def invalidate_room(self):
-        self.filter.reset_room()
+        self.room.reset()
         self.pending = []
         self.generation += 1
 
@@ -129,7 +135,14 @@ class FusionLocalizationNode(object):
             self.height.update_attitude(tuple(quaternion), stamp, monotonic())
             self.imu = (stamp, tf.transformations.euler_from_quaternion(quaternion), omega, quaternion)
             self.imu_history.append(self.imu)
-            self.update_acceleration(msg)
+            a = msg.linear_acceleration
+            acceleration = np.array([a.x, a.y, a.z])
+            local = (horizontal_acceleration(acceleration, self.imu[1])
+                     if msg.linear_acceleration_covariance[0] != -1 and np.all(np.isfinite(acceleration))
+                     else None)
+            self.velocity.predict(local, stamp)
+            if self.on_ground():
+                _, self.velocity_reason = self.velocity.correct((0, 0), self.zero_variance, stamp, gated=False)
 
     def camera_callback(self, msg):
         with self.lock:
@@ -153,7 +166,7 @@ class FusionLocalizationNode(object):
                 return
             self.tag_last_stamp = stamp
             try:
-                if self.tag_camera is None or not self.imu_history or self.filter.yaw_offset is None:
+                if self.tag_camera is None or not self.imu_history or self.room.yaw_offset is None:
                     raise ValueError('Tag 5 needs camera calibration and initialized IMU heading')
                 width, height, frame, k, d, model = self.tag_camera
                 if (msg.image_width != width or msg.image_height != height
@@ -186,8 +199,8 @@ class FusionLocalizationNode(object):
                 return
             mean = math.atan2(sum(math.sin(v) for _, v in self.tag_samples),
                               sum(math.cos(v) for _, v in self.tag_samples))
-            error = math.atan2(math.sin(mean - self.filter.yaw_offset),
-                               math.cos(mean - self.filter.yaw_offset))
+            error = math.atan2(math.sin(mean - self.room.yaw_offset),
+                               math.cos(mean - self.room.yaw_offset))
             # At most 2 degrees/sec, with no accumulated allowance through gaps
             # or bursts of delayed detections. Small errors converge smoothly.
             dt = min(.1, stamp - self.tag_samples[-2][0])
@@ -195,43 +208,10 @@ class FusionLocalizationNode(object):
                 dt = min(dt, max(0, now - self.tag_correction_at))
             limit = math.radians(2) * dt
             delta = max(-limit, min(limit, error * (1 - math.exp(-dt))))
-            self.filter.correct_yaw(delta)
+            self.room.correct_yaw(delta, self.velocity.odom)
             self.tag_correction_at, self.tag_accepted_stamp = now, stamp
             self.tag_reason = 'Tag 5 correcting yaw'
-            rospy.set_param('~room_yaw_offset', self.filter.yaw_offset)
-
-    def update_acceleration(self, msg):
-        stamp, attitude, omega, _ = self.imu
-        a = msg.linear_acceleration
-        acceleration = np.array([a.x, a.y, a.z])
-        valid = (msg.linear_acceleration_covariance[0] != -1
-                 and np.all(np.isfinite(acceleration)))
-        mode_fresh = self.fresh(self.mode_at, rospy.get_time())
-        if self.acceleration_bias is None:
-            # Learn once, with motors off. Do not learn flight acceleration as bias.
-            stationary = (valid and mode_fresh and self.mode == 'DISARMED'
-                          and np.linalg.norm(omega) < .1
-                          and np.linalg.norm(acceleration) < .5)
-            if (not stationary or (self.bias_samples
-                    and stamp - self.bias_samples[-1][0] > self.timeout)):
-                self.bias_samples.clear()
-            if stationary:
-                self.bias_samples.append((stamp, acceleration.copy()))
-                while len(self.bias_samples) > 1 and self.bias_samples[1][0] <= stamp - 2.0:
-                    self.bias_samples.popleft()
-                samples = np.array([sample[1] for sample in self.bias_samples])
-                if (len(samples) >= 20 and stamp - self.bias_samples[0][0] >= 2.0
-                        and np.max(np.std(samples, axis=0)) < .05):
-                    self.acceleration_bias = samples.mean(axis=0)
-                    self.bias_samples.clear()
-                    rospy.loginfo('Startup acceleration bias ready: (%.4f, %.4f, %.4f) m/s^2',
-                                  *self.acceleration_bias)
-        room_acceleration = np.zeros(2)
-        if (self.use_imu_acceleration and self.acceleration_bias is not None and valid
-                and mode_fresh and self.mode == 'FLYING' and self.filter.yaw_offset is not None):
-            local = horizontal_acceleration(acceleration - self.acceleration_bias, attitude)
-            room_acceleration = rotate(local, self.filter.yaw_offset) * self.imu_acceleration_gain
-        self.filter.update_acceleration(room_acceleration, stamp)
+            rospy.set_param('~room_yaw_offset', self.room.yaw_offset)
 
     def range_callback(self, msg):
         with self.lock:
@@ -251,28 +231,23 @@ class FusionLocalizationNode(object):
         with self.lock:
             now = rospy.get_time()
             stamp = msg.header.stamp.to_sec()
+            if self.on_ground():
+                return  # Zero-velocity observations replace the near-floor camera.
             height, _ = self.height.height(monotonic(), now)
             if (height is None or self.imu is None or not self.fresh(self.imu[0], now)
                     or not self.fresh(stamp, now) or msg.header.frame_id != self.body_frame
                     or max(stamp, self.imu[0], height.stamp)
                     - min(stamp, self.imu[0], height.stamp) > self.skew):
-                self.flow_reason = 'Optical flow needs fresh, aligned IMU/ToF and body frame'
+                self.velocity_reason = 'Optical flow needs fresh, aligned IMU/ToF and body frame'
                 return
             velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
-            # Restore the earlier camera/EMA rotation compensation.
+            # Remove apparent floor motion caused by rotation.
             velocity -= self.imu[2][:2] * (height.z - self.height.floor_z) * self.angular_comp
             if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
-                self.flow_reason = 'Invalid optical-flow velocity'
+                self.velocity_reason = 'Invalid optical-flow velocity'
                 return
-            if self.filter.yaw_offset is None:
-                self.flow_reason = 'Waiting for room heading'
-                return
-            if not self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT):
-                self.flow_reason = 'UWB missing or stale'
-                return
-            angle = body_angle(self.imu[1][2]) + self.filter.yaw_offset
-            _, self.flow_reason = self.filter.update_flow(
-                rotate(velocity, angle), self.flow_variance, stamp)
+            _, self.velocity_reason = self.velocity.correct(
+                rotate(velocity, body_angle(self.imu[1][2])), self.flow_variance, stamp)
 
     def anchors_callback(self, msg):
         with self.lock:
@@ -310,11 +285,7 @@ class FusionLocalizationNode(object):
         with self.lock:
             now = rospy.get_time()
             if self.last_time is not None and now < self.last_time:
-                old = self.filter
-                old.stamp = None
-                old.history.clear()
-                old.accelerations.clear()
-                self.bias_samples.clear()
+                self.velocity = VelocityFilter(**self.velocity_settings)
                 self.invalidate_room()
                 self.height.range = self.height.attitude = self.imu = None
                 self.imu_history.clear()
@@ -325,97 +296,88 @@ class FusionLocalizationNode(object):
             self.last_time = now
             # Initial fallback only. Tag 5 may subsequently correct this offset;
             # later turns/disarms must not recapture it from IMU alone.
-            if (self.filter.yaw_offset is None and self.mode == 'DISARMED'
+            if (self.room.yaw_offset is None and self.mode == 'DISARMED'
                     and self.fresh(self.mode_at, now) and self.imu is not None
                     and self.fresh(self.imu[0], now)):
-                self.filter.yaw_offset = math.pi / 2.0 - self.imu[1][2]
-                rospy.set_param('~room_yaw_offset', self.filter.yaw_offset)
+                self.room.yaw_offset = math.pi / 2.0 - self.imu[1][2]
+                rospy.set_param('~room_yaw_offset', self.room.yaw_offset)
                 rospy.loginfo('Startup heading aligned with map +Y; room_yaw_offset=%.9f rad',
-                              self.filter.yaw_offset)
+                              self.room.yaw_offset)
             height, height_reason = self.height.height(monotonic(), now)
             imu_ready = self.imu is not None and self.fresh(self.imu[0], now)
-            # Consume queued fixes before expiry so a boundary-time arrival does
-            # not discard the velocity estimate needed for braking.
-            if imu_ready:
+            local_ready = bool(imu_ready and self.velocity.ready(now))
+            if not local_ready:
+                # Odometry missed motion, so it can no longer carry the room pose.
+                self.room.reset()
+            elif self.layout is not None:
                 for stamp, position, covariance in self.pending:
-                    if not self.fresh(stamp, now) or self.layout is None:
-                        continue
-                    self.filter.predict(stamp)
-                    _, self.reason = self.filter.update_uwb(position, covariance, stamp)
+                    if self.fresh(stamp, now):
+                        _, self.reason = self.room.update(
+                            position, covariance, stamp, self.velocity.odom_at(stamp))
             self.pending = []
-            # Only an accepted fix renews the estimate; rejected fixes still expire.
-            if self.filter.room is not None and not self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT):
-                self.filter.reset_room()
-            if imu_ready:
-                # Predict between the slower UWB updates.
-                self.filter.predict(now)
-            uwb_ready = (self.filter.room is not None
-                         and self.fresh(self.filter.uwb_stamp, now, XY_PREDICTION_TIMEOUT))
-            local_ready = bool(imu_ready and uwb_ready)
-            ready = bool(local_ready and self.layout is not None and height)
-            predicting = uwb_ready and not self.fresh(self.filter.uwb_stamp, now)
-            reason = ('Predicting through UWB gap' if ready and predicting
+            # Only an accepted fix renews the room pose; rejected fixes still expire.
+            if self.room.offset is not None and not self.room.ready(now):
+                self.room.reset()
+            room_ready = self.room.ready(now)
+            ready = bool(local_ready and room_ready and self.layout is not None and height)
+            predicting = ready and not self.fresh(self.room.stamp, now)
+            reason = ('Predicting through UWB gap' if predicting
                       else 'OK' if ready else height_reason if height is None
-                      else 'Waiting for disarmed mode and fresh IMU to align heading' if self.filter.yaw_offset is None
                       else 'IMU unavailable' if not imu_ready
+                      else self.velocity_reason if not local_ready
+                      else 'Waiting for disarmed mode and fresh IMU to align heading' if self.room.yaw_offset is None
                       else 'Four surveyed anchors required' if self.layout is None
                       else 'UWB missing or stale' if self.reason == 'OK' else self.reason)
             self.local_pub.publish(Bool(data=local_ready))
             self.ready_pub.publish(Bool(data=ready))
             self.generation_pub.publish(UInt32(data=self.generation))
             if height and imu_ready:
-                self.publish_estimates(height, local_ready, ready)
+                self.publish_estimates(height, local_ready, ready, now)
             status = DiagnosticStatus()
             status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof+camera'
             status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
             status.message = reason
-            sources = ['UWB']
-            if self.use_imu_acceleration and self.acceleration_bias is not None:
-                sources.append('IMU prediction')
-            if self.filter.flow_active(now):
-                sources.append('optical flow')
-            status.values = [KeyValue(key='xy_source', value=' + '.join(sources)),
-                             KeyValue(key='room_yaw_offset', value=str(self.filter.yaw_offset)),
+            status.values = [KeyValue(key='velocity_source',
+                                      value='zero velocity (on ground)' if self.on_ground() else 'IMU + optical flow'),
+                             KeyValue(key='local_ready', value=str(local_ready)),
+                             KeyValue(key='last_velocity_result', value=self.velocity_reason),
+                             KeyValue(key='acceleration_bias', value=str(self.velocity.state[2:].tolist())),
+                             KeyValue(key='room_yaw_offset', value=str(self.room.yaw_offset)),
                              KeyValue(key='tag_yaw_status', value=(self.tag_reason
                                  if self.fresh(self.tag_last_stamp, now) else 'Tag 5 unavailable; retaining yaw offset')),
                              KeyValue(key='tag_yaw_stamp', value=str(self.tag_accepted_stamp)),
-                             KeyValue(key='acceleration_bias_ready', value=str(self.acceleration_bias is not None)),
                              KeyValue(key='height_source', value='ToF'),
-                             KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='frame_id', value=self.frame),
-                             KeyValue(key='last_uwb_result', value=self.reason),
-                             KeyValue(key='flow_velocity_weight', value=str(
-                                 self.filter.flow_velocity_weight if self.filter.flow_active(now) else 0.0)),
-                             KeyValue(key='last_flow_result', value=self.flow_reason)]
+                             KeyValue(key='last_uwb_result', value=self.reason)]
             diagnostics = DiagnosticArray()
             diagnostics.header.stamp = rospy.Time.from_sec(now)
             diagnostics.status = [status]
             self.status_pub.publish(diagnostics)
 
-    def publish_estimates(self, height, local_ready, ready):
+    def publish_estimates(self, height, local_ready, ready, now):
         angle = body_angle(self.imu[1][2])
         quaternion = tf.transformations.quaternion_multiply(self.imu[3],
             tf.transformations.quaternion_from_euler(0, 0, -math.pi / 2.0))
+        odom = self.velocity.odom
         state = State()
         state.header.frame_id = self.odom_frame
         # Preserve sensor age, even when publishing cached odometry for altitude control.
         state.header.stamp = rospy.Time.from_sec(height.stamp)
         p, q = state.pose_with_covariance.pose.position, state.pose_with_covariance.pose.orientation
-        p.x, p.y, p.z = self.filter.odom[0], self.filter.odom[1], height.z - self.height.floor_z
+        p.x, p.y, p.z = odom[0], odom[1], height.z - self.height.floor_z
         q.x, q.y, q.z, q.w = quaternion
         state.pose_with_covariance.covariance[0] = state.pose_with_covariance.covariance[7] = 1e6
         state.pose_with_covariance.covariance[14] = 0.03 ** 2
         for index in (21, 28, 35):
             state.pose_with_covariance.covariance[index] = 0.15 ** 2
-        velocity = rotate(self.filter.velocity, -angle) if local_ready else np.zeros(2)
+        velocity = rotate(self.velocity.velocity, -angle) if local_ready else np.zeros(2)
         state.twist_with_covariance.twist.linear.x, state.twist_with_covariance.twist.linear.y = velocity
         omega = state.twist_with_covariance.twist.angular
         omega.x, omega.y, omega.z = -self.imu[2][1], self.imu[2][0], self.imu[2][2]
-        velocity_covariance = np.eye(2) * self.filter.velocity_variance
-        if ready:
-            rotation = np.column_stack((rotate((1, 0), -angle - self.filter.yaw_offset),
-                                        rotate((0, 1), -angle - self.filter.yaw_offset)))
-            velocity_covariance = rotation.dot(self.filter.velocity_covariance()).dot(rotation.T)
+        velocity_covariance = np.eye(2) * 1e6
+        if local_ready:
+            rotation = np.column_stack((rotate((1, 0), -angle), rotate((0, 1), -angle)))
+            velocity_covariance = rotation.dot(self.velocity.velocity_covariance()).dot(rotation.T)
         state.twist_with_covariance.covariance[0] = velocity_covariance[0, 0]
         state.twist_with_covariance.covariance[1] = velocity_covariance[0, 1]
         state.twist_with_covariance.covariance[6] = velocity_covariance[1, 0]
@@ -427,7 +389,7 @@ class FusionLocalizationNode(object):
             return
         odometry = Odometry()
         odometry.header.frame_id, odometry.child_frame_id = self.odom_frame, self.body_frame
-        odometry.header.stamp = rospy.Time.from_sec(min(height.stamp, self.filter.stamp))
+        odometry.header.stamp = rospy.Time.from_sec(min(height.stamp, self.velocity.stamp))
         odometry.pose, odometry.twist = state.pose_with_covariance, state.twist_with_covariance
         self.odom_pub.publish(odometry)
         self.broadcaster.sendTransform((p.x, p.y, p.z), quaternion, odometry.header.stamp, self.body_frame, self.odom_frame)
@@ -435,23 +397,23 @@ class FusionLocalizationNode(object):
             return
         pose = PoseWithCovarianceStamped()
         pose.header.frame_id = self.frame
-        # Prediction must not make an old absolute fix look newly measured.
-        pose.header.stamp = rospy.Time.from_sec(min(odometry.header.stamp.to_sec(), self.filter.uwb_stamp))
+        # Odometry carries the pose, but must not make an old fix look newly measured.
+        pose.header.stamp = rospy.Time.from_sec(min(odometry.header.stamp.to_sec(), self.room.stamp))
         p = pose.pose.pose.position
-        p.x, p.y, p.z = self.filter.room[0], self.filter.room[1], height.z
+        p.x, p.y = self.room.position(odom)
+        p.z = height.z
         q = pose.pose.pose.orientation
         q.x, q.y, q.z, q.w = tf.transformations.quaternion_multiply(
-            tf.transformations.quaternion_from_euler(0, 0, self.filter.yaw_offset), quaternion)
-        covariance = self.filter.covariance[:2, :2]
+            tf.transformations.quaternion_from_euler(0, 0, self.room.yaw_offset), quaternion)
+        covariance = self.room.covariance(now)
         pose.pose.covariance[0], pose.pose.covariance[1] = covariance[0]
         pose.pose.covariance[6], pose.pose.covariance[7] = covariance[1]
         pose.pose.covariance[14] = 0.03 ** 2
         for index in (21, 28, 35):
             pose.pose.covariance[index] = 0.15 ** 2
         self.pose_pub.publish(pose)
-        translation = self.filter.room - rotate(self.filter.odom, self.filter.yaw_offset)
-        self.broadcaster.sendTransform((translation[0], translation[1], self.height.floor_z),
-            tf.transformations.quaternion_from_euler(0, 0, self.filter.yaw_offset),
+        self.broadcaster.sendTransform((self.room.offset[0], self.room.offset[1], self.height.floor_z),
+            tf.transformations.quaternion_from_euler(0, 0, self.room.yaw_offset),
             pose.header.stamp, self.odom_frame, self.frame)
 
 
