@@ -85,7 +85,6 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(drone.xy_anchor, (1, 2))
         self.assertEqual(controller.desired_position.z, .5)
         self.assertEqual(controller.current_position.z, .5)
-        self.assertEqual(controller.pid_error.z, 0)
         self.assertAlmostEqual(controller.desired_velocity.x, -.04)
         self.assertFalse(controller.position_control)
 

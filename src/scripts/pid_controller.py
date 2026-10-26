@@ -11,6 +11,7 @@ import functools
 import threading
 import numpy as np
 import command_values as cmds
+from altitude_controller import AltitudeController
 from pid_class import PID, PIDaxis
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import Mode, RC, State
@@ -20,6 +21,10 @@ from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE
 from localization.uwb_locator import monotonic
 from pidrone_pkg.msg import AnchorLayout
 from three_dim_vec import Position, Velocity, Error, RPY
+try:
+    from urllib.parse import urlparse
+except ImportError:  # Python 2.7 on the drone
+    from urlparse import urlparse
 
 
 def synchronized(method):
@@ -42,8 +47,10 @@ class PIDController(object):
         self.current_mode = 'DISARMED'
         self.desired_mode = 'DISARMED'
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
-        self.takeoff_ramp = None
-        self.altitude_target = self.takeoff_height
+        settings = dict(rospy.get_param('/pidrone/altitude/controller', {}))
+        if 'throttle_range' in settings:
+            settings['throttle_range'] = tuple(settings['throttle_range'])
+        self.altitude = AltitudeController(**settings)
         self.measurement_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         rospy.loginfo('PID sources: controller=%s pid=%s commands=%s', __file__, pid_class.__file__, cmds.__file__)
 
@@ -52,7 +59,6 @@ class PIDController(object):
 
         # Initialize the current and desired positions
         self.current_position = Position()
-        self.altitude_sample = (0.0, 0.0)
         self.desired_position = Position(z=self.takeoff_height)
 
         # Initialize the position error
@@ -71,11 +77,8 @@ class PIDController(object):
 
         # Initialize the primary PID
         self.pid = PID()
-        self.hover_throttle_midpoint = self.pid.throttle.midpoint
-        self.takeoff_throttle_midpoint = 1490
 
-        # Initialize the error used for the PID which is vx, vy, z where vx and
-        # vy are velocities, and z is the error in the altitude of the drone
+        # Initialize the planar velocity error used for the roll/pitch PID
         self.pid_error = Error()
 
         # Initialize the 'position error to velocity error' PIDs:
@@ -277,8 +280,6 @@ class PIDController(object):
         """ Store the drone's current state for calculations """
         self.current_state = state
         self.state_to_three_dim_vec_structs()
-        self.altitude_sample = (state.pose_with_covariance.pose.position.z * 100,
-                                state.header.stamp.to_sec())
 
     @synchronized
     def desired_pose_callback(self, msg):
@@ -289,7 +290,7 @@ class PIDController(object):
         if not np.isfinite(desired_z) or desired_z < 0:
             rospy.logwarn('Ignoring invalid altitude target: %s', desired_z)
             return
-        self.takeoff_ramp = None
+        self.altitude.cancel_takeoff()
         # set the desired positions equal to the desired pose message
         if self.absolute_desired_position:
             self.desired_position.x = msg.position.x
@@ -334,12 +335,12 @@ class PIDController(object):
         if previous != msg.mode:
             self.cancel_room_target()
             self.peer_state = self.peer_received = None
-            self.takeoff_ramp = None
+            self.altitude.cancel_takeoff()
             rospy.loginfo('PID mode %s -> %s', previous, msg.mode)
             if msg.mode in ('ARMED', 'FLYING'):
                 self.reset()
                 if msg.mode == 'FLYING':
-                    self.takeoff_ramp = (rospy.get_time(), self.current_position.z)
+                    self.altitude.start_takeoff(self.current_position.z, rospy.get_time())
                 if msg.mode == 'ARMED' and hasattr(self, 'position_control_pub'):
                     self.position_control_pub.publish(False)
 
@@ -387,8 +388,10 @@ class PIDController(object):
         integrate_xy = not self.use_fusion or self.room_ready(allow_prediction=False)
         if self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
             integrate_xy = integrate_xy and self.coordination_status == 'clear'
-        command = self.pid.step(self.pid_error, self.desired_yaw_velocity,
-                                self.altitude_sample, integrate_xy=integrate_xy)
+        command = self.pid.step(self.pid_error, self.desired_yaw_velocity, integrate_xy=integrate_xy)
+        tilt_cos = np.cos(self.current_rpy.r) * np.cos(self.current_rpy.p)
+        command.append(self.altitude.step(self.desired_position.z, self.current_position.z,
+                                          self.current_velocity.z, tilt_cos, rospy.get_time()))
         if self.current_mode == 'FLYING':
             filtered_xy = ((self.current_velocity.x + self.pid_error.x / 100.,
                             self.current_velocity.y + self.pid_error.y / 100.)
@@ -463,28 +466,9 @@ class PIDController(object):
             self.desired_velocity.x, self.desired_velocity.y = command
         # calculate the velocity error
         self.velocity_error = self.desired_velocity - self.current_velocity
-        # calculate the z position error
-        self.altitude_target = self.desired_position.z
-        if self.takeoff_ramp is not None:
-            started, initial_height = self.takeoff_ramp
-            ramp_height = initial_height + 0.10 * max(0.0, now - started)
-            self.altitude_target = min(self.desired_position.z, ramp_height)
-            if ramp_height >= self.desired_position.z:
-                self.takeoff_ramp = None
-        # Reduce initial thrust only while the altitude target is ramping.
-        # A pose command (including landing) cancels the ramp above.
-        midpoint = (self.takeoff_throttle_midpoint
-                    if self.current_mode == 'FLYING' and self.takeoff_ramp is not None
-                    else self.hover_throttle_midpoint)
-        if self.pid.throttle.midpoint != midpoint:
-            self.pid.throttle.midpoint = midpoint
-            rospy.loginfo('Altitude throttle midpoint=%.1f; takeoff ramp=%s',
-                          midpoint, self.takeoff_ramp is not None)
-        dz = self.altitude_target - self.current_position.z
-        # calculate the pid_error from the above values
         self.pid_error.x = self.velocity_error.x
         self.pid_error.y = self.velocity_error.y
-        self.pid_error.z = dz
+        self.pid_error.z = 0
         # multiply by 100 to account for the fact that code was originally written using cm
         self.pid_error = self.pid_error * 100
         if not xy_ready:
@@ -532,7 +516,7 @@ class PIDController(object):
         self.last_pose_time = None
         # reset the pids
         self.pid.reset()
-        self.pid.throttle.midpoint = self.hover_throttle_midpoint
+        self.altitude.reset()
         self.lr_pid.reset()
         self.fb_pid.reset()
 
@@ -593,6 +577,16 @@ def main(ControllerClass):
             rospy.logwarn('Automatic coordination configuration: %s', error)
             config = {}
         rospy.set_param('/pidrone/coordination', config)
+    if not rospy.has_param('/pidrone/altitude/controller'):
+        import yaml
+        params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
+        with open(os.path.join(params_dir, 'altitude.yaml')) as stream:
+            settings = yaml.safe_load(stream)
+        drone = urlparse(os.environ.get('ROS_MASTER_URI', '')).hostname or ''
+        drone = drone[:-6] if drone.endswith('.local') else drone
+        per_drone = settings.pop('hover_throttle_by_drone', None) or {}
+        settings['hover_throttle'] = per_drone.get(drone, settings['hover_throttle'])
+        rospy.set_param('/pidrone/altitude/controller', settings)
 
     # create the PIDController object
     pid_controller = ControllerClass()
@@ -651,7 +645,9 @@ def main(ControllerClass):
             continue
         pid_controller.heartbeat_pub.publish(Empty())
         fly_command = pid_controller.step()
-        rospy.loginfo_throttle(1, "PID target=%s estimated=%s" % (pid_controller.altitude_target, pid_controller.current_position.z))
+        rospy.loginfo_throttle(1, 'Altitude target=%s estimated=%.3f m climb=%.3f m/s throttle=%.1f' % (
+            pid_controller.altitude.target, pid_controller.current_position.z,
+            pid_controller.current_velocity.z, fly_command[3]))
 
         if pid_controller.current_mode == 'FLYING':
             if pid_controller.desired_mode == 'FLYING':
@@ -660,8 +656,6 @@ def main(ControllerClass):
             # after flying, take the converged low i terms and set these as the
             # initial values, this allows the drone to "learn" and get steadier
             # with each flight until it converges
-            # NOTE: do not store the throttle_low.init_i or else the drone will
-            # take off abruptly after the first flight
             elif pid_controller.desired_mode == 'DISARMED':
                 pid_controller.pid.roll_low.init_i = pid_controller.pid.roll_low._i
                 pid_controller.pid.pitch_low.init_i = pid_controller.pid.pitch_low._i

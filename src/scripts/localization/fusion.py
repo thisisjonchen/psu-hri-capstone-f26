@@ -12,6 +12,8 @@ This is the standard loosely coupled layout (ROS REP-105):
 - Local odometry integrates that velocity, so it is smooth and never jumps.
 - RoomOffset: room position = rotated odometry + offset. Absolute fixes (UWB)
   correct only the offset, which is the map -> odom transform.
+- VerticalFilter: IMU vertical acceleration predicts height and climb rate;
+  tilt-compensated ToF height corrects them.
 """
 import math
 from collections import deque
@@ -45,6 +47,14 @@ def horizontal_acceleration(acceleration, attitude):
     sr, cr, sp, cp = math.sin(roll), math.cos(roll), math.sin(pitch), math.cos(pitch)
     return rotate((cp * forward + sp * (-sr * right + cr * up),
                    -cr * right - sr * up), yaw)
+
+
+def vertical_acceleration(acceleration, attitude):
+    """Gravity-compensated right/forward/up acceleration -> world up (m/s^2)."""
+    right, forward, up = acceleration
+    roll, pitch, _ = attitude
+    sr, cr, sp, cp = math.sin(roll), math.cos(roll), math.sin(pitch), math.cos(pitch)
+    return -sp * forward + cp * (-sr * right + cr * up)
 
 
 def target_velocity(target, position, angle, gain, limit):
@@ -282,4 +292,86 @@ class RoomOffset(object):
         self.yaw_offset += delta
         if room is not None:
             self.offset = room - rotate(odom, self.yaw_offset)
+        return True
+
+
+class VerticalFilter(object):
+    """Kalman filter on [height, climb rate, vertical acceleration bias].
+
+    ToF readings arrive after their timing budget; each is compared with the
+    height at its own stamp using the displacement predicted since.
+    """
+
+    def __init__(self, acceleration_stddev=0.3, bias_stddev=0.05, max_gap=0.5):
+        if not positive(acceleration_stddev, bias_stddev, max_gap):
+            raise ValueError('Vertical filter noise and gap must be positive')
+        self.acceleration_variance = acceleration_stddev ** 2
+        self.bias_variance = bias_stddev ** 2
+        self.max_gap = max_gap
+        self.state = np.zeros(3)
+        self.covariance = np.diag((0.0, 0.0, 0.5 ** 2))
+        self.stamp = None
+        self.initialized = False
+        self.moved = 0.0  # Predicted height change since start.
+        self.history = deque()
+
+    @property
+    def climb_rate(self):
+        return self.state[1] if self.initialized else 0.0
+
+    def predict(self, acceleration, stamp):
+        """Integrate one world-up acceleration sample (m/s^2), or None when invalid."""
+        if acceleration is not None and not np.isfinite(acceleration):
+            return False
+        if not np.isfinite(stamp) or stamp <= 0 or (self.stamp is not None and stamp <= self.stamp):
+            return False
+        dt = 0.0 if self.stamp is None else stamp - self.stamp
+        if dt > self.max_gap:
+            self.initialized = False
+            self.history.clear()
+            dt = 0.0
+        self.stamp = stamp
+        if self.initialized:
+            a = 0.0 if acceleration is None else acceleration - self.state[2]
+            step = self.state[1] * dt + 0.5 * a * dt * dt
+            self.state[0] += step
+            self.state[1] += a * dt
+            self.moved += step
+            transition = np.array([[1, dt, -0.5 * dt * dt], [0, 1, -dt], [0, 0, 1]])
+            noise = np.zeros((3, 3))
+            noise[:2, :2] = np.array([[dt ** 3 / 3, dt ** 2 / 2], [dt ** 2 / 2, dt]]) * self.acceleration_variance
+            noise[2, 2] = self.bias_variance * dt
+            self.covariance = transition.dot(self.covariance).dot(transition.T) + noise
+        self.history.append((stamp, self.moved))
+        while self.history and stamp - self.history[0][0] > HISTORY_SECONDS:
+            self.history.popleft()
+        return True
+
+    def _moved_at(self, stamp):
+        if not self.history or stamp < self.history[0][0]:
+            return None
+        if stamp >= self.history[-1][0]:
+            return self.history[-1][1]
+        for (t0, m0), (t1, m1) in zip(self.history, list(self.history)[1:]):
+            if t0 <= stamp <= t1:
+                return m0 + (stamp - t0) / (t1 - t0) * (m1 - m0)
+        return None
+
+    def correct(self, height, variance, stamp):
+        """Correct with a vertical height measurement (m) taken at stamp."""
+        if not (np.isfinite(height) and positive(variance) and np.isfinite(stamp) and stamp > 0):
+            return False
+        moved = self._moved_at(stamp)
+        if moved is None:
+            return False
+        present = height + self.moved - moved
+        if not self.initialized:
+            self.state[:2] = present, 0.0
+            self.covariance[:2, :] = self.covariance[:, :2] = 0
+            self.covariance[0, 0], self.covariance[1, 1] = variance, 0.1 ** 2
+            self.initialized = True
+            return True
+        self.state, self.covariance = kalman_update(
+            self.state, self.covariance, np.array([[1.0, 0.0, 0.0]]),
+            np.array([present - self.state[0]]), np.array([[variance]]))
         return True

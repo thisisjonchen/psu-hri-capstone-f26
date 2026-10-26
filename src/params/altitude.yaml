@@ -1,0 +1,31 @@
+# Altitude cascade in the PX4/ArduPilot layout (scripts/altitude_controller.py).
+# Loaded by pid_controller.py at startup when /pidrone/altitude/controller is absent.
+# height error -> height_p -> climb-rate target -> PI -> acceleration -> thrust -> throttle
+# Near hover, 1 m/s^2 is about 35 us of throttle. These starting gains reproduce
+# the earlier single-loop tuning (P 0.4 us/cm, I 0.2 us/(cm s), D 0.5 us/(cm/s)).
+
+# Throttle (us) that holds a hover; per-drone values override the default.
+hover_throttle: 1510.0
+hover_throttle_by_drone:
+  drone1: 1510.0
+  drone2: 1510.0
+# Feed-forward at the start of takeoff, blended into hover_throttle by the end of the climb.
+takeoff_throttle: 1490.0
+throttle_range: [1200.0, 1700.0]
+# Climb-rate target per meter of height error (1/s).
+height_p: 0.8
+# Acceleration per m/s of climb-rate error (1/s), and its integral (1/s^2).
+rate_p: 1.43
+rate_i: 0.71
+# Integral limit (m/s^2); 0.71 is about +/-25 us of throttle.
+rate_i_limit: 0.71
+# Climb and descent speed limits (m/s), like ArduPilot PILOT_SPEED_UP/DN.
+climb_limit: 0.3
+descent_limit: 0.2
+# Takeoff target ramp (m/s); the integral is frozen until airborne_height (m) above start.
+takeoff_rate: 0.10
+airborne_height: 0.03
+# Thrust curve, like ArduPilot MOT_THST_EXPO: thrust = (1 - e) * a + e * a^2.
+thrust_expo: 0.65
+# Angle boost divides thrust by cos(tilt), capped at this tilt.
+max_boost_tilt_deg: 30.0

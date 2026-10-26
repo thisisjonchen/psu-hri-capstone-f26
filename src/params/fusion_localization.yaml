@@ -19,6 +19,11 @@ flow_max_rejections: 5
 max_flow_speed: 2.0
 angular_compensation: 0.2
 
+# Climb rate: IMU vertical acceleration predicts, tilt-compensated ToF height corrects.
+vertical_acceleration_stddev: 0.3
+vertical_bias_stddev: 0.05
+tof_height_stddev: 0.02
+
 # Room position: UWB corrects only the map->odom offset.
 # Local odometry drift rate (m per sqrt(s)); larger lets UWB pull harder.
 drift_stddev: 0.08

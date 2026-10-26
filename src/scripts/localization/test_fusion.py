@@ -9,7 +9,8 @@ from unittest import mock
 
 import numpy as np
 
-from localization.fusion import RoomOffset, VelocityFilter, body_angle, horizontal_acceleration, rotate, target_velocity
+from localization.fusion import (RoomOffset, VelocityFilter, VerticalFilter, body_angle, horizontal_acceleration,
+                                 rotate, target_velocity, vertical_acceleration)
 from localization import test_ros_node as ros_doubles
 from localization.test_ros_node import Pose, Stamp, Layout
 
@@ -185,6 +186,39 @@ class FusionMathTest(unittest.TestCase):
         self.assertFalse(room.ready(t + 1.51))
         self.assertGreater(room.covariance(t + 1)[0, 0], room.covariance(t)[0, 0])
 
+    def test_vertical_acceleration_is_world_up_at_any_tilt(self):
+        tilt = math.pi/6
+        self.assertAlmostEqual(vertical_acceleration((0, 0, 1), (0, 0, 2)), 1)
+        self.assertAlmostEqual(vertical_acceleration((0, -math.sin(tilt), math.cos(tilt)), (0, tilt, 0)), 1)
+        self.assertAlmostEqual(vertical_acceleration((0, math.cos(tilt), math.sin(tilt)), (0, tilt, 0)), 0)
+        self.assertAlmostEqual(vertical_acceleration((-math.sin(tilt), 0, math.cos(tilt)), (tilt, 0, 0)), 1)
+
+    def test_vertical_filter_tracks_climb_rate_from_biased_imu_and_delayed_tof(self):
+        random = np.random.RandomState(5)
+        f, bias, errors, raw = VerticalFilter(), .3, [], []
+        height, climb, previous = .25, 0., None
+        for i in range(1, 60*15):
+            t = 10 + i/60.0
+            acceleration = .4*math.sin(1.5*t)
+            climb += acceleration/60.0
+            height += climb/60.0
+            self.assertTrue(f.predict(acceleration + bias + random.normal(0, .1), t))
+            if i % 6 == 0:  # 10 Hz ToF, measured 50 ms before arrival.
+                measured = height - climb*.05 + random.normal(0, .02)
+                f.correct(measured, .02**2, t - .05)
+                if previous is not None and t > 15:
+                    raw.append((measured - previous)/.1 - climb)
+                previous = measured
+            if t > 15:
+                errors.append(f.climb_rate - climb)
+        rms = np.sqrt(np.mean(np.square(errors)))
+        self.assertLess(rms, .08)
+        self.assertLess(rms, .3*np.sqrt(np.mean(np.square(raw))), 'much cleaner than differentiating ToF')
+        self.assertAlmostEqual(f.state[2], bias, delta=.1)
+        self.assertFalse(f.correct(float('nan'), .01, t))
+        self.assertTrue(f.predict(None, t + .6))  # A gap stops the estimate.
+        self.assertEqual(f.climb_rate, 0)
+
     def test_yaw_correction_keeps_the_current_room_position(self):
         room = RoomOffset(yaw_offset=.3)
         odom = np.array((.4, -.2))
@@ -236,8 +270,8 @@ class FusionNodeTest(unittest.TestCase):
         self.uwb()
         self.node.step()
 
-    def refresh(self, yaw=0, acceleration=(0, 0, 0), omega=(0, 0, 0), acceleration_valid=True):
-        self.node.range_callback(NS(range=.5, min_range=.05, max_range=4, header=NS(stamp=Stamp(self.ros_now))))
+    def refresh(self, yaw=0, acceleration=(0, 0, 0), omega=(0, 0, 0), acceleration_valid=True, height=.5):
+        self.node.range_callback(NS(range=height, min_range=.05, max_range=4, header=NS(stamp=Stamp(self.ros_now))))
         q = quaternion(yaw=yaw)
         self.node.imu_callback(NS(orientation=NS(x=q[0], y=q[1], z=q[2], w=q[3]),
             angular_velocity=NS(**dict(zip(('x', 'y', 'z'), omega))),
@@ -488,6 +522,24 @@ class FusionNodeTest(unittest.TestCase):
         velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
         self.assertEqual((velocity.x, velocity.y), (0, 0))
 
+    def test_climb_rate_reaches_controller_and_throttle_uses_climb_and_tilt(self):
+        for i in range(60):  # ToF rises at 0.1 m/s; IMU reports no acceleration.
+            self.tick(height=.5 + .1*i/60.0)
+            self.node.step()
+        state_msg = self.messages['pidrone/state'][-1]
+        self.assertAlmostEqual(state_msg.twist_with_covariance.twist.linear.z, .1, delta=.02)
+        controller = self.controller()
+        controller.desired_position.z = controller.current_position.z
+        climbing = controller.step()[3]
+        controller.current_velocity.z = 0
+        level = controller.step()[3]
+        self.assertLess(climbing, level, 'brake the measured climb')
+        controller.current_state.pose_with_covariance.pose.orientation = NS(
+            **dict(zip('xyzw', quaternion(roll=math.radians(20)))))
+        controller.state_to_three_dim_vec_structs()
+        controller.current_velocity.z = 0
+        self.assertGreater(controller.step()[3], level, 'angle boost while leaning')
+
     def test_tof_remains_z_and_room_corrections_leave_controller_pose_unchanged(self):
         state_msg = self.messages['pidrone/state'][-1]
         fused = self.messages['pidrone/localization/fused'][-1]
@@ -699,7 +751,9 @@ class FusionNodeTest(unittest.TestCase):
         command = controller.step()
         self.assertLess(controller.pid_error.y, -20)
         self.assertLess(command[1], 1490)
-        self.assertAlmostEqual(controller.pid_error.z, -15)
+        # 0.15 m above the 0.35 m target and climbing: the cascade reduces throttle.
+        self.assertAlmostEqual(controller.altitude.target, .35)
+        self.assertLess(command[3], controller.altitude.hover_throttle)
 
     def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
         controller = self.controller()
