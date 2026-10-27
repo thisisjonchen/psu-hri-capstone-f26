@@ -564,13 +564,13 @@ class FusionNodeTest(unittest.TestCase):
         velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear
         self.assertLess(velocity.y, .2 * 1.05)
 
-    def test_flow_compensation_reaches_controller_and_camera_gaps_expire_velocity(self):
+    def test_flow_reaches_controller_unaltered_and_camera_gaps_expire_velocity(self):
         self.tick(height=.05)  # Measure the floor while disarmed, then fly at 0.5 m.
         self.node.mode_callback(NS(mode='FLYING'))
         for _ in range(120):  # Steady state; the initial transient is tested separately.
+            # Rotation is removed in optical_flow_node; fusion must not subtract it again.
             self.tick(yaw=math.pi/2, omega=(.2, -.4, 0))
-            # At 0.5 m, the 0.2 angular factor removes (+.02,-.04) m/s.
-            self.flow(.12, .16)
+            self.flow(.1, .2)
             self.uwb()
             self.node.step()
         velocity = self.messages['pidrone/state'][-1].twist_with_covariance.twist.linear

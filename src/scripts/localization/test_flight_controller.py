@@ -109,6 +109,22 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
         self.assertEqual(self.pending, [])
 
+    def test_turning_through_north_reports_the_turn_rate_not_a_spin(self):
+        receive = self.board.receiveDataPacket
+
+        def turning():  # 1 degree per reply, crossing 359 -> 0 degrees.
+            reply = receive()
+            if reply is self.board.attitude:
+                self.board.attitude = dict(reply, heading=(reply['heading'] + 1) % 360)
+            return reply
+        self.board.attitude['heading'] = 340
+        self.board.receiveDataPacket = turning
+        self.run_loop()
+        rates = [m.angular_velocity.z for m in self.env.messages['/pidrone/imu'][1:]]
+        self.assertGreater(len(rates), 30)
+        self.assertLess(max(abs(r) for r in rates), 3, 'heading wrap read as a spin')
+        self.assertTrue(all(r < 0 for r in rates if abs(r) > 1e-3), 'one steady turning direction')
+
 
 if __name__ == '__main__':
     unittest.main()

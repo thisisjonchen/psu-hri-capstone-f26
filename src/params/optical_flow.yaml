@@ -1,0 +1,17 @@
+# Tilted-camera optical flow (scripts/optical_flow_node.py, localization/camera_flow.py).
+# Camera mounting angles come from apriltag_mapping.yaml; the lens from camera_info.
+
+# Encoder frame rate; each motion vector spans one frame interval.
+framerate: 30.0
+# Use only blocks whose ray meets the floor within this horizontal distance (m);
+# rays near or above the horizon (room scenery) are ignored.
+max_floor_distance: 1.5
+# Fewer tracked floor blocks than this reads as no measurable motion
+# (about 6 cm/s at 0.3 m: one pixel per frame with this lens).
+min_blocks: 8
+# Overall scale, to calibrate against tape-measured motion (step 5).
+flow_gain: 1.0
+# drone2 hand-carry recording (2026-10-26): with vector rows reversed and the
+# vertical component negated, forward/back signs match the motion and a 90 deg
+# turn cancels (0.45 m -> 0.05 m false motion). The image itself is not flipped.
+flip_vectors_vertically: true

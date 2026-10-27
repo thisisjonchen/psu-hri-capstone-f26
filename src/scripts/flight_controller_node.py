@@ -208,7 +208,8 @@ class FlightController(object):
         dt = time.to_sec() - self.time.to_sec()
         dr = roll - previous_roll
         dp = pitch - previous_pitch
-        dh = heading - previous_heading
+        # Wrap to [-pi, pi]: crossing north must not read as a full-turn spin.
+        dh = np.arctan2(np.sin(heading - previous_heading), np.cos(heading - previous_heading))
         angvx = self.near_zero(dr / dt)
         angvy = self.near_zero(dp / dt)
         angvz = self.near_zero(dh / dt)

@@ -15,6 +15,9 @@
       <param name="body_frame" value="$(arg body_frame)"/>
     </node>
     <node pkg="pidrone_pkg" type="optical_flow_node.py" name="optical_flow_node" output="screen">
+      <!-- Same camera mounting as the tag mapper, plus the flow settings. -->
+      <rosparam command="load" file="$(find pidrone_pkg)/params/apriltag_mapping.yaml"/>
+      <rosparam command="load" file="$(find pidrone_pkg)/params/optical_flow.yaml"/>
       <param name="body_frame" value="$(arg body_frame)"/>
     </node>
   </group>

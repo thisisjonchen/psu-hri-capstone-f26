@@ -61,13 +61,11 @@ class FusionLocalizationNode(object):
         self.flow_min_height = float(rospy.get_param('~flow_min_height', 0.10))
         self.ground_margin = float(rospy.get_param('~ground_margin', 0.02))
         self.ground_height = None
-        self.angular_comp = float(rospy.get_param('~angular_compensation', 0.2))
         if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
                 or not all((self.frame, self.odom_frame, self.body_frame))
                 or not all(np.isfinite(v) and v > 0 for v in
                            (self.timeout, self.skew, flow_stddev, zero_stddev, self.flow_limit,
-                            self.flow_min_height, self.ground_margin))
-                or not np.isfinite(self.angular_comp)):
+                            self.flow_min_height, self.ground_margin))):
             raise ValueError('Invalid fusion frames, limits or timeouts')
         self.height = PositionCombiner(
             stale_after=self.timeout, max_skew=self.skew,
@@ -77,7 +75,7 @@ class FusionLocalizationNode(object):
         self.imu_history = deque(maxlen=200)
         self.tag_camera = None
         self.tag_rotation = camera_rotation(
-            float(rospy.get_param('~tag_camera/camera_pitch_down_deg', 60.0)),
+            float(rospy.get_param('~tag_camera/camera_pitch_down_deg', 45.0)),
             float(rospy.get_param('~tag_camera/camera_azimuth_deg', 0.0)),
             float(rospy.get_param('~tag_camera/camera_image_roll_deg', 0.0)))
         self.tag_samples = deque(maxlen=3)
@@ -264,9 +262,8 @@ class FusionLocalizationNode(object):
                     - min(stamp, self.imu[0], height.stamp) > self.skew):
                 self.velocity_reason = 'Optical flow needs fresh, aligned IMU/ToF and body frame'
                 return
+            # Already metric and rotation-free (optical_flow_node uses attitude per frame).
             velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
-            # Remove apparent floor motion caused by rotation.
-            velocity -= self.imu[2][:2] * (height.z - self.height.floor_z) * self.angular_comp
             if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
                 self.velocity_reason = 'Invalid optical-flow velocity'
                 return

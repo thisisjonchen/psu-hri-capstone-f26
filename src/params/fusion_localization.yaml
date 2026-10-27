@@ -19,9 +19,8 @@ flow_max_rejections: 5
 # below flow_min_height (m) the IMU coasts alone (like PX4 SENS_FLOW_MINHGT).
 flow_min_height: 0.10
 ground_margin: 0.02
-# Preserve the earlier camera speed limit and rotation compensation.
+# Reject flow faster than this (m/s). Rotation is removed in optical_flow_node.
 max_flow_speed: 2.0
-angular_compensation: 0.2
 
 # Climb rate: IMU vertical acceleration predicts, tilt-compensated ToF height corrects.
 vertical_acceleration_stddev: 0.3

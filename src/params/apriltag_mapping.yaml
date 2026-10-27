@@ -2,9 +2,9 @@
 # For tags laid flat on the floor and UWB z=0 at that floor, leave at 0.
 tag_plane_z: 0.0
 
-# IMPORTANT: 60 means 60 degrees BELOW HORIZONTAL (30 degrees from straight down).
-# If your measurement is 60 degrees from vertical, use 30 instead.
-camera_pitch_down_deg: 60.0
+# IMPORTANT: degrees BELOW HORIZONTAL (90 = straight down). Measured on the DD24
+# as about 45 (+/-2) on 2026-10-26. Optical flow uses this same value.
+camera_pitch_down_deg: 45.0
 # Zero assumes optical axis tilts toward the drone's forward (+Y) direction.
 # +90 means a tilt toward the drone's left (-X), due to RH rotation around Z.
 camera_azimuth_deg: 0.0
