@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import copy
-import rospy
 
 
 #####################################################
@@ -56,80 +54,3 @@ class PIDaxis():
         output = min(max(raw_output + self.midpoint, self.control_range[0]), self.control_range[1])
 
         return output
-
-
-class PID:
-
-    def __init__(self,
-
-                 # Use proportional XY feedback while diagnosing oscillation; trim is disabled.
-                 roll=PIDaxis(0.50, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
-                 roll_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
-
-                 pitch=PIDaxis(0.75, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(0, 0)),
-                 pitch_low=PIDaxis(0.0, 0.0, 0.0, control_range=(1470, 1530), midpoint=1500, i_range=(-5, 5)),
-
-                 yaw=PIDaxis(0.0, 0.0, 0.0),
-                 ):
-
-        # Retain the input cap for trim if re-enabled; its default Ki is zero.
-        # PID errors arrive in cm/s: 5 cm/s is 0.05 m/s.
-        self.trim_controller_cap_plane = 5.0
-
-        self.roll = copy.deepcopy(roll)
-        self.roll_low = copy.deepcopy(roll_low)
-
-        self.pitch = copy.deepcopy(pitch)
-        self.pitch_low = copy.deepcopy(pitch_low)
-
-        self.yaw = copy.deepcopy(yaw)
-
-        self._t = None
-
-        # Tuning values specific to each drone
-        self.roll_low.init_i = 0.0
-        self.pitch_low.init_i = 0.0
-        self.reset()
-
-    def reset(self):
-        """ Reset each pid and restore the initial i terms """
-        # reset time variable
-        self._t = None
-
-        # reset individual PIDs
-        self.roll.reset()
-        self.roll_low.reset()
-        self.pitch.reset()
-        self.pitch_low.reset()
-
-        # restore tuning values
-        self.roll_low._i = self.roll_low.init_i
-        self.pitch_low._i = self.pitch_low.init_i
-
-    def _planar_step(self, error, axis, trim, dt, integrate=True):
-        cap = self.trim_controller_cap_plane
-        previous_trim = trim._i
-        if integrate:
-            trim.step(max(-cap, min(cap, error)), dt)
-        axis.step(error, dt)
-        output = axis.midpoint + axis._p + axis._i + axis._d + trim._i
-        lower, upper = axis.control_range
-        # Limit the combined command, and allow trim to unwind at saturation.
-        if (output > upper and error > 0) or (output < lower and error < 0):
-            trim._i = previous_trim
-            output = axis.midpoint + axis._p + axis._i + axis._d + trim._i
-        return max(lower, min(upper, output))
-
-    def step(self, error, cmd_yaw_velocity=0, integrate_xy=True):
-        """ Compute roll, pitch and yaw commands; altitude_controller.py owns throttle.
-        """
-        now = rospy.get_time()
-        time_elapsed = 0.0 if self._t is None else max(0.0, now - self._t)
-        self._t = now
-
-        cmd_r = self._planar_step(error.x, self.roll, self.roll_low, time_elapsed, integrate_xy)
-        cmd_p = self._planar_step(error.y, self.pitch, self.pitch_low, time_elapsed, integrate_xy)
-
-        # Compute yaw command
-        cmd_y = 1500 + cmd_yaw_velocity
-        return [cmd_r, cmd_p, cmd_y]

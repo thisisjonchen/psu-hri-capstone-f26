@@ -852,39 +852,38 @@ class FusionNodeTest(unittest.TestCase):
         self.assertIsNone(controller.velocity_deadline)
         self.assertIsNone(controller.yaw_deadline)
 
-    def test_xy_brakes_after_sustained_velocity_correction(self):
+    def test_xy_learns_a_constant_push_from_local_flow_without_uwb(self):
         controller = self.controller()
-        request = twist()
-        request.linear.x, request.linear.y = .1, -.1
+        controller.room_ready_callback(NS(data=False))  # No UWB anchors.
         current = controller.current_state
         velocity = current.twist_with_covariance.twist.linear
-        velocity.x = velocity.y = 0
-        # Eight seconds of correction must not overpower subsequent braking.
-        for _ in range(481):
+        velocity.x, velocity.y = .08, -.08  # Steady drift right and backward, as on drone2.
+        for _ in range(300):
             current.header.stamp = Stamp(self.ros_now)
-            controller.room_pose.header.stamp = Stamp(self.ros_now)
             controller.current_state_callback(current)
-            controller.desired_twist_callback(request)
             controller.step()
             self.ros_now += 1 / 60.0
-        # Default tuning must not accumulate trim, even after sustained error.
-        self.assertEqual(controller.pid.roll_low._i, 0)
-        self.assertEqual(controller.pid.pitch_low._i, 0)
-        velocity.x, velocity.y = .12, -.12
-        current.header.stamp = Stamp(self.ros_now)
-        controller.current_state_callback(current)
-        controller.desired_twist_callback(request)
-        output = controller.step()
-        self.assertLess(output[0], 1500, 'brake when rightward velocity exceeds target')
-        self.assertGreater(output[1], 1500, 'brake when backward velocity exceeds target')
-        self.assertGreater(output[0], 1495, 'a 0.02 m/s error needs a modest correction')
-        self.assertLess(output[1], 1505, 'a 0.02 m/s error needs a modest correction')
+        self.assertLess(controller.velocity.integral[0], -.05, 'learn to push left')
+        self.assertGreater(controller.velocity.integral[1], .05, 'learn to push forward')
+        learned = list(controller.velocity.integral)
+        controller.local_ready_callback(NS(data=False))  # Stale estimate: stop learning.
+        for _ in range(60):
+            current.header.stamp = Stamp(self.ros_now)
+            controller.current_state_callback(current)
+            output = controller.step()
+            self.ros_now += 1 / 60.0
+        self.assertEqual(output[:2], [1500.0, 1500.0], 'fly level without an estimate')
+        self.assertNotEqual(controller.velocity.integral, learned)
 
     def test_xy_output_limits(self):
-        output = self.controller().pid.step(NS(x=100., y=-100., z=0.))
-        self.assertLessEqual(output[0], 1530)
-        self.assertGreaterEqual(output[1], 1470)
-
+        controller = self.controller()
+        controller.current_state.twist_with_covariance.twist.linear.x = -10.
+        controller.current_state.twist_with_covariance.twist.linear.y = 10.
+        controller.current_state_callback(controller.current_state)
+        roll, pitch = controller.step()[:2]
+        limit = 500 * 5.0 / 55.0
+        self.assertAlmostEqual(roll, 1500 + limit)
+        self.assertAlmostEqual(pitch, 1500 - limit)
 
 if __name__ == '__main__':
     unittest.main()

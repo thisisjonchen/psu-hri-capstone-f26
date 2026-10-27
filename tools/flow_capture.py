@@ -31,6 +31,7 @@ TOPICS = {
     'range': '/pidrone/range',
     'status': '/pidrone/localization/fusion_status',
     'mode': '/pidrone/mode',
+    'commands': '/pidrone/fly_commands',
 }
 # Raw camera motion vectors: one 16x16-pixel macroblock per value, plus match cost (sad).
 CAMERA_TOPICS = {
@@ -205,6 +206,23 @@ def camera_report(folder, t0, imu, flow):
     print('  smaller motion in rows that see distant floor, and forward motion spreads outward.')
 
 
+def command_report(data, t0):
+    """Roll/pitch/throttle sent to Betaflight while FLYING (commands are only sent then)."""
+    commands = series(data.get('commands', []), t0, 'field.roll', 'field.pitch', 'field.throttle')
+    if not commands:
+        return
+    print('\n== Commands to Betaflight while flying (us; 1500 = level)')
+    for i, name in ((1, 'roll'), (2, 'pitch'), (3, 'throttle')):
+        values = sorted(c[i] for c in commands if not math.isnan(c[i]))
+        print('  %-8s mean %7.1f  min %7.1f  max %7.1f  median %7.1f' % (
+            name, sum(values) / len(values), values[0], values[-1], values[len(values) // 2]))
+    for i, name in ((1, 'roll'), (2, 'pitch')):
+        extreme = max(abs(c[i] - 1500) for c in commands)
+        pinned = sum(1 for c in commands if abs(c[i] - 1500) >= extreme - 0.5) / len(commands)
+        print('  %-8s at its largest lean (%.1f us) %.0f%% of the time' % (name, extreme, 100 * pinned))
+    print('  The steady throttle in a level hover approximates hover_throttle (params/altitude.yaml).')
+
+
 def analyze(folder):
     names = TOPICS if (folder / 'state.csv').exists() else CAMERA_TOPICS
     data = {name: load(folder / (name + '.csv')) for name in TOPICS}
@@ -258,6 +276,7 @@ def analyze(folder):
     print('  x (right)  : %s' % sign_check(flow, imu, 1))
     print('  y (forward): %s' % sign_check(flow, imu, 2))
     camera_report(folder, t0, imu, flow)
+    command_report(data, t0)
 
     # Some diagnostic values contain commas ([x, y]), so read key,value pairs from the raw text.
     results, sources = Counter(), Counter()
