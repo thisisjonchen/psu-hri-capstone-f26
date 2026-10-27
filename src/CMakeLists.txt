@@ -55,6 +55,7 @@ add_message_files(
   State.msg
   StateGroundTruth.msg
   TagDetection.msg
+  PayloadDetection.msg
   TagMap.msg
   AnchorLayout.msg
   PeerState.msg
@@ -169,6 +170,7 @@ add_subdirectory(native)
 ## Mark executable scripts (Python etc.) for installation
 catkin_install_python(PROGRAMS
   scripts/PALS/apriltag_detection_drone
+  scripts/PALS/payload_detection_drone
   scripts/PALS/apriltag_mapping_node
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
