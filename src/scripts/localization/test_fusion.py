@@ -857,7 +857,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.room_ready_callback(NS(data=False))  # No UWB anchors.
         current = controller.current_state
         velocity = current.twist_with_covariance.twist.linear
-        velocity.x, velocity.y = .08, -.08  # Steady drift right and backward, as on drone2.
+        velocity.x, velocity.y = .08, -.08  # Steady drift right and backward, as seen in flight.
         for _ in range(300):
             current.header.stamp = Stamp(self.ros_now)
             controller.current_state_callback(current)
@@ -866,14 +866,19 @@ class FusionNodeTest(unittest.TestCase):
         self.assertLess(controller.velocity.integral[0], -.05, 'learn to push left')
         self.assertGreater(controller.velocity.integral[1], .05, 'learn to push forward')
         learned = list(controller.velocity.integral)
-        controller.local_ready_callback(NS(data=False))  # Stale estimate: stop learning.
+        # Estimate lost (e.g. below flow height while landing): keep cancelling the push
+        # with the learned trim, but do not learn from stale data.
+        controller.local_ready_callback(NS(data=False))
         for _ in range(60):
             current.header.stamp = Stamp(self.ros_now)
             controller.current_state_callback(current)
             output = controller.step()
             self.ros_now += 1 / 60.0
-        self.assertEqual(output[:2], [1500.0, 1500.0], 'fly level without an estimate')
-        self.assertNotEqual(controller.velocity.integral, learned)
+        self.assertEqual(controller.velocity.integral, learned)
+        self.assertLess(output[0], 1500, 'still leaning left against the push')
+        self.assertGreater(output[1], 1500, 'still leaning forward against the push')
+        controller.current_mode_callback(NS(mode='ARMED'))  # Next flight starts fresh.
+        self.assertEqual(controller.velocity.integral, [0.0, 0.0])
 
     def test_xy_output_limits(self):
         controller = self.controller()

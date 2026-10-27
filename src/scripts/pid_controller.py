@@ -456,8 +456,11 @@ class PIDController(object):
         self.last_pose_time = now
         xy_ready = self.local_ready()
         if not xy_ready:
+            # Hold the learned trim (the lean that cancels a constant push) rather than
+            # flying level: the push is still there while the estimate is unavailable,
+            # e.g. below the optical-flow height while landing. Learning pauses meanwhile;
+            # arming or a new flight clears it.
             self.desired_velocity.x = self.desired_velocity.y = 0
-            self.velocity.reset()
         if self.room_target is not None and not self.room_ready():
             # Pause correction without replacing the target or switching modes.
             self.desired_velocity.x = self.desired_velocity.y = 0
