@@ -23,7 +23,8 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.missing_reply = None
         self.board = MultiWii.__new__(MultiWii)
         self.board.attitude = dict(cmd=MultiWii.ATTITUDE, angx=0, angy=0, heading=0)
-        self.board.rawIMU = dict(cmd=MultiWii.RAW_IMU, ax=0, ay=0, az=2048)
+        self.board.rawIMU = dict(cmd=MultiWii.RAW_IMU, ax=0, ay=0, az=2048, gx=1, gy=2, gz=3)
+        self.board.motor = dict(cmd=MultiWii.MOTOR, m1=1100., m2=1200., m3=1300., m4=1400.)
         self.board.analog = dict(vbat=120, amperage=0)
 
         def send(size, code, data):
@@ -40,6 +41,7 @@ class FlightControllerLoopTest(unittest.TestCase):
                 return None
             return {MultiWii.ATTITUDE: self.board.attitude,
                     MultiWii.RAW_IMU: self.board.rawIMU,
+                    MultiWii.MOTOR: self.board.motor,
                     MultiWii.ANALOG: self.board.analog}.get(code)
 
         self.board.send_raw_command = send
@@ -55,6 +57,15 @@ class FlightControllerLoopTest(unittest.TestCase):
         sys.modules['std_msgs.msg'].Header = sys.modules['std_msgs.msg'].String = NS
         sys.modules['geometry_msgs.msg'].Quaternion = NS
         sys.modules['pidrone_pkg.msg'].Battery = NS
+        sys.modules['pidrone_pkg.msg'].FlightRaw = lambda: NS(header=NS())
+        self.raw_subscribers = 0
+        publisher = ros.Publisher
+
+        def counted(topic, *args, **kwargs):
+            result = publisher(topic, *args, **kwargs)
+            result.get_num_connections = lambda: self.raw_subscribers if topic == '/pidrone/flight_raw' else 0
+            return result
+        ros.Publisher = counted
         sys.modules['sensor_msgs.msg'].Imu = lambda: NS(
             orientation=NS(x=0., y=0., z=0., w=1.),
             angular_velocity=fusion_helpers.vector(), linear_acceleration=fusion_helpers.vector())
@@ -96,6 +107,21 @@ class FlightControllerLoopTest(unittest.TestCase):
             self.assertLess(second - first, 1.)
         self.assertEqual(len(self.env.messages['/pidrone/battery']), len(battery_times))
         self.assertEqual(transactions[-2:], expected[:2])
+
+    def test_raw_log_reads_motors_in_the_same_bulk_request_only_while_subscribed(self):
+        self.raw_subscribers = 1
+        output = self.run_loop()
+        self.assertNotIn('internal error', output)
+        imu, raw = self.env.messages['/pidrone/imu'], self.env.messages['/pidrone/flight_raw']
+        self.assertGreater(len(raw), 30)
+        self.assertEqual(len(raw), len(imu))
+        self.assertEqual([m.header.stamp.to_sec() for m in raw], [m.header.stamp.to_sec() for m in imu])
+        self.assertEqual((raw[-1].accel, raw[-1].gyro, raw[-1].motors),
+                         ([0, 0, 2048], [1, 2, 3], [1100, 1200, 1300, 1400]))
+        transactions = [(kind, code) for kind, code, _ in self.events]
+        bulk = [('send', MultiWii.ATTITUDE), ('send', MultiWii.RAW_IMU), ('send', MultiWii.MOTOR),
+                ('read', MultiWii.ATTITUDE), ('read', MultiWii.RAW_IMU), ('read', MultiWii.MOTOR)]
+        self.assertEqual(transactions[2:8], bulk)
 
     def test_missing_bulk_reply_skips_imu_and_keeps_loop_running_until_shutdown(self):
         self.missing_reply = MultiWii.RAW_IMU

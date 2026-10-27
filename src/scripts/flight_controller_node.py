@@ -21,7 +21,7 @@ from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
-from pidrone_pkg.msg import Battery, Mode, RC, State
+from pidrone_pkg.msg import Battery, FlightRaw, Mode, RC, State
 from sensor_msgs.msg import Range
 import os
 
@@ -33,6 +33,7 @@ class FlightController(object):
 
     Publishers:
     /pidrone/imu
+    /pidrone/flight_raw (only while subscribed)
     /pidrone/battery
     /pidrone/mode
 
@@ -143,16 +144,18 @@ class FlightController(object):
 
     # Update methods:
     #################
-    def update_imu_message(self):
+    def update_imu_message(self, motors=False):
         """
-        Compute the ROS IMU message by reading data from the board.
+        Compute the ROS IMU message by reading data from the board. With motors,
+        the same request also reads the motor outputs for the raw flight log.
         """
 
-        # Queue both requests before waiting for replies, avoiding an extra
+        # Queue all requests before waiting for replies, avoiding an extra
         # request/response turnaround between attitude and acceleration.
-        replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
+        codes = (MultiWii.ATTITUDE, MultiWii.RAW_IMU) + ((MultiWii.MOTOR,) if motors else ())
+        replies = self.board.getDataBulk([(code, []) for code in codes])
         if any(not isinstance(reply, dict) for reply in replies) or set(
-                reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
+                reply.get('cmd') for reply in replies) != set(codes):
             rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
             return False
 
@@ -232,6 +235,16 @@ class FlightController(object):
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
         return True
+
+    def raw_message(self):
+        """Unfiltered RAW_IMU and MOTOR values from the latest IMU sample."""
+        raw, motor = self.board.rawIMU, self.board.motor
+        msg = FlightRaw()
+        msg.header.stamp = self.imu_message.header.stamp
+        msg.accel = [int(raw[axis]) for axis in ('ax', 'ay', 'az')]
+        msg.gyro = [int(raw[axis]) for axis in ('gx', 'gy', 'gz')]
+        msg.motors = [int(motor[name]) for name in ('m1', 'm2', 'm3', 'm4')]
+        return msg
 
     def update_battery_message(self):
         """
@@ -371,6 +384,7 @@ def main():
     # Publishers
     ###########
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
+    rawpub = rospy.Publisher('/pidrone/flight_raw', FlightRaw, queue_size=10, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
     calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
@@ -411,8 +425,12 @@ def main():
             fc.update_command()
             fc.send_rc_cmd()
 
-            if fc.update_imu_message():
+            # Read motors only while the dashboard logs them, keeping the loop unchanged otherwise.
+            logging = rawpub.get_num_connections() > 0
+            if fc.update_imu_message(motors=logging):
                 imupub.publish(fc.imu_message)
+                if logging:
+                    rawpub.publish(fc.raw_message())
             # 2 Hz leaves margin for the routines' 1-second battery watchdog.
             now = rospy.get_time()
             if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:

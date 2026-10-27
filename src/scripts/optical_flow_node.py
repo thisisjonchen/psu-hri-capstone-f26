@@ -11,6 +11,7 @@ from collections import deque
 import numpy as np
 import rospy
 from geometry_msgs.msg import TwistStamped
+from pidrone_pkg.msg import FlowQuality
 from raspicam_node.msg import MotionVectors
 from sensor_msgs.msg import CameraInfo, Imu, Range
 
@@ -37,6 +38,7 @@ class OpticalFlowNode(object):
         self.range = None
         self.attitude = deque(maxlen=100)
         self.twistpub = rospy.Publisher('pidrone/picamera/twist', TwistStamped, queue_size=1)
+        self.qualitypub = rospy.Publisher('pidrone/picamera/flow_quality', FlowQuality, queue_size=10)
         rospy.Subscriber('raspicam_node/camera_info', CameraInfo, self.camera_cb, queue_size=1)
         rospy.Subscriber('pidrone/imu', Imu, self.imu_cb, queue_size=10)
         rospy.Subscriber('pidrone/range', Range, self.range_cb, queue_size=1)
@@ -80,7 +82,12 @@ class OpticalFlowNode(object):
             return
         x, y = attitude[0], attitude[1]
         height = self.range[0] * (1 - 2 * (x * x + y * y))  # ToF slant range -> vertical height
-        velocity, _ = self.flow.velocity(msg.x, msg.y, msg.mbx, attitude, previous, height)
+        velocity, blocks = self.flow.velocity(msg.x, msg.y, msg.mbx, attitude, previous, height)
+        quality = FlowQuality()
+        quality.header.stamp = msg.header.stamp
+        quality.valid = velocity is not None
+        quality.blocks = blocks if velocity is not None else 0
+        self.qualitypub.publish(quality)
         if velocity is None:
             return
         twist = TwistStamped()

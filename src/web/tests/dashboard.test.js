@@ -49,7 +49,8 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
   for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
     'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status',
-    'peer-relay-toggle', 'peer-relay-status']) elements.set(id, element());
+    'peer-relay-toggle', 'peer-relay-status', 'prearm', 'view-telemetry', 'view-logs', 'control-map', 'flight-logs',
+    'log-drone1', 'log-drone2', 'log-raw', 'log-processed', 'log-status', 'log-csv', 'log-png', 'log-grid']) elements.set(id, element());
   for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
   elements.get('calibration-panel').hidden = true;
   elements.get('calibration-success').hidden = true;
@@ -141,9 +142,10 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/flight-log.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart, makeAprilTagPlan })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart, makeAprilTagPlan, LOG_TOPICS })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -314,6 +316,84 @@ test('two connections keep telemetry, charts, clocks, and cameras isolated', () 
   assert.match(a.field('camera').src, /drone1.local:8080/);
   assert.match(b.field('camera').src, /drone2.local:8080/);
   assert.equal(app.timers.size, 2);
+});
+
+// Pre-Arm helpers: click the button, then advance 250 ms maintenance ticks while the drone streams data.
+function preArmRig() {
+  const app = dashboard();
+  const drone = app.connect('drone1');
+  let secs = 100;
+  const feedback = () => app.elements.get('commandFeedback').textContent;
+  const click = () => app.listeners.click({ target: { closest: () => ({ id: 'prearm', dataset: {} }) } });
+  const armed = () => drone.publishers.mode.messages.some(message => message.mode === 'ARMED');
+  const step = ({ mode = 'DISARMED', range = true, imu = true } = {}) => {
+    app.advanceTime(250);
+    secs += 0.25;
+    app.receive(drone, '/pidrone/mode', { mode });
+    if (range) app.receive(drone, '/pidrone/range', rangeAt(secs, 0.1));
+    const topic = drone.logTopics.find(t => t.name === '/pidrone/imu');
+    if (imu && topic) topic.receive({ ...stamp(secs), orientation: { x: 0, y: 0, z: 0, w: 1 },
+      linear_acceleration: { x: 0.1, y: 0, z: 0 }, angular_velocity: { x: 0, y: 0, z: 0 } });
+    app.maintenanceTimers.forEach(callback => callback());
+  };
+  return { app, drone, feedback, click, armed, step };
+}
+
+test('Pre-Arm records a baseline, arms only after 8 s of fresh data, and stops recording at disarm', () => {
+  const { app, drone, feedback, click, armed, step } = preArmRig();
+  click();
+  assert.match(feedback(), /not started: Drone 1 is not reporting DISARMED/);
+  assert.equal(drone.logTopics.length, 0);
+  step();
+  click();
+  assert.equal(drone.log.state, 'baseline');
+  assert.deepEqual(drone.logTopics.map(t => t.name), app.LOG_TOPICS.map(([, name]) => name));
+  assert.ok(drone.logTopics.every(t => t.throttle_rate === 0));
+  for (let i = 1; i < 32; i++) { step(); assert.equal(armed(), false, 'armed early at step ' + i); }
+  step();
+  assert.equal(drone.publishers.mode.messages.at(-1).mode, 'ARMED');
+  step({ mode: 'ARMED' });
+  assert.equal(drone.log.state, 'flight');
+  assert.ok(drone.log.series['accel.processed.x'].length > 30);
+  const topics = drone.logTopics;
+  step({ mode: 'DISARMED' });
+  assert.equal(drone.log.state, 'stopped');
+  assert.equal(drone.logTopics.length, 0);
+  assert.ok(topics.every(t => t.unsubscribed));
+  const csv = drone.log.csv();
+  assert.match(csv, /^time_s,signal,value,unit\n/);
+  assert.match(csv, /,event,arm,/);
+  assert.match(csv, /,accel\.processed\.x,0\.1,m\/s²/);
+});
+
+test('Pre-Arm cancels without arming on Space, stale ToF or IMU, or disconnect', () => {
+  const { app, drone, feedback, click, armed, step } = preArmRig();
+  step();
+  click();
+  step();
+  assert.equal(app.key('keydown', ' '), true);
+  assert.equal(drone.publishers.mode.messages.at(-1).mode, 'DISARMED');
+  assert.equal(drone.log.state, 'stopped');
+  for (let i = 0; i < 40; i++) step();
+  assert.equal(armed(), false);
+
+  click();
+  for (let i = 0; i < 40; i++) step({ range: false });
+  assert.match(feedback(), /canceled: Drone 1 has no fresh ToF data\. Nothing was armed/);
+  assert.equal(armed(), false);
+
+  step();
+  click();
+  for (let i = 0; i < 40; i++) step({ imu: false });
+  assert.match(feedback(), /canceled: Drone 1 has no fresh IMU data/);
+  assert.equal(armed(), false);
+
+  step();
+  click();
+  step();
+  drone.disconnect();
+  assert.match(feedback(), /canceled: Drone 1 disconnected/);
+  assert.equal(drone.log.state, 'stopped');
 });
 
 test('shared commands reach both bridges and individual commands only their target', () => {

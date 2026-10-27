@@ -6,13 +6,14 @@
   <title>PALS: Paired Aerial Lift System</title>
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/xterm.css">
-  <link rel="stylesheet" href="css/main.css?v=20261019-tag-placeholder">
+  <link rel="stylesheet" href="css/main.css?v=20261027-flight-logs">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
-  <script src="js/main.js?v=20261019-connect-panel" defer></script>
+  <script src="js/flight-log.js?v=20261027-flight-logs" defer></script>
+  <script src="js/main.js?v=20261027-flight-logs" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
   <script src="js/routines.js?v=20261019-terminal-messages" defer></script>
@@ -27,7 +28,10 @@
     <a class="btn btn-outline-secondary icon-button with-label github-link" href="https://github.com/thisisjonchen/psu-hri-capstone-f26" target="_blank" rel="noopener noreferrer" aria-label="View PALS on GitHub" title="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg><span>GitHub</span></a>
     <button class="btn btn-outline-secondary icon-button" id="fullscreen-toggle" type="button" aria-pressed="false" hidden aria-label="Full screen" title="Full screen"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="expand-icon" d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><path class="collapse-icon" d="M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5"/></svg></button></div></div>
     <section class="panel fleet-controls" id="fleetControls" aria-label="Telemetry">
-      <div class="panel-header"><h2>Telemetry</h2></div>
+      <div class="panel-header"><div class="view-tabs" role="tablist" aria-label="Dashboard view">
+        <button type="button" role="tab" id="view-telemetry" aria-selected="true" aria-controls="control-map">Telemetry</button>
+        <button type="button" role="tab" id="view-logs" aria-selected="false" aria-controls="flight-logs">Logs</button>
+      </div></div>
       <div class="flight-controls-layout"><div class="control-cameras">
         <article class="camera-panel" id="drone1-cameraPanel"><div class="camera-viewport"><div class="camera-content"><div class="panel-header"><h3>Drone 1 camera</h3></div>
           <div class="camera-frame"><img id="drone1-camera" data-field="camera" alt="Drone 1 camera" src="nocamera.svg" width="240" height="320">
@@ -54,7 +58,7 @@
           <p class="detection-status"><strong id="drone2-detection" data-state="offline" role="status" aria-live="polite">No tag data</strong></p>
         </div></div></article>
       </div>
-      <section class="control-map" aria-label="Shared XY map">
+      <section class="control-map" id="control-map" aria-label="Shared XY map">
         <div class="panel-header"><div class="section-title"><h3>XY map</h3><details class="section-help"><summary aria-label="Map help">?</summary><div class="help-content" id="target-help"><p>Select a drone, then click or drag a destination. Focus the map and use arrow keys to adjust it; Send target confirms.</p><p>Scan for anchors, assign them to the room corners, then measure and save the layout.</p></div></details></div><div class="map-actions">
           <button class="btn btn-outline-secondary icon-button" id="room-fit" disabled aria-label="Fit room" title="Fit room"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></button>
           <button class="btn btn-outline-secondary" id="room-zoom-in" aria-label="Zoom in on room" disabled>+</button>
@@ -123,6 +127,22 @@
           <p class="map-note target-status" id="target-status" role="status" aria-live="polite"></p>
         </div>
         </div>
+      </section>
+      <section class="flight-logs" id="flight-logs" aria-label="Flight sensor logs" hidden>
+        <div class="panel-header"><div class="log-toolbar">
+          <div class="segmented" role="tablist" aria-label="Logged drone">
+            <button type="button" role="tab" id="log-drone1" aria-selected="true">Drone 1</button>
+            <button type="button" role="tab" id="log-drone2" aria-selected="false">Drone 2</button>
+          </div>
+          <div class="segmented" role="group" aria-label="Signal stage">
+            <button type="button" id="log-raw" aria-pressed="true">Raw</button>
+            <button type="button" id="log-processed" aria-pressed="false">Processed</button>
+          </div>
+          <span class="log-status" id="log-status" role="status"></span>
+          <button class="btn btn-outline-secondary" id="log-csv" type="button" aria-label="Download CSV" title="Download CSV" disabled>CSV</button>
+          <button class="btn btn-outline-secondary" id="log-png" type="button" aria-label="Download PNG" title="Download PNG" disabled>PNG</button>
+        </div></div>
+        <div class="log-grid" id="log-grid"></div>
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
@@ -141,6 +161,7 @@
             </tbody></table></div></details></div>
         <div class="command-buttons" data-controller="shared" aria-label="Shared flight controls">
           <button class="btn btn-outline-secondary" data-command="arm">Arm</button>
+          <button class="btn btn-outline-secondary" id="prearm" type="button" aria-label="Pre-Arm: record an 8 second baseline, then arm">Pre-Arm</button>
           <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
           <button class="btn btn-danger" data-command="disarm">Disarm all</button>
         </div>

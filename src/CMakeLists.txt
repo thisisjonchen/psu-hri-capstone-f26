@@ -58,6 +58,8 @@ add_message_files(
   TagWaypointMap.msg
   AnchorLayout.msg
   PeerState.msg
+  FlightRaw.msg
+  FlowQuality.msg
 
 )
 

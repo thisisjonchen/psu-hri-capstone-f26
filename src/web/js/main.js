@@ -612,7 +612,10 @@ class DroneSession {
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
+    this.rangeReceivedAt = null;
     this.routineReadyAt = null;
+    this.log = new FlightLog();
+    this.logTopics = [];
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
@@ -783,6 +786,7 @@ class DroneSession {
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.detectionReceivedAt = null;
+    this.rangeReceivedAt = null;
     this.setDetection('No tag data', 'offline');
     this.fusedStamp = null;
     this.fusionGeneration = null;
@@ -860,6 +864,9 @@ class DroneSession {
   disconnect(status = 'Disconnected') {
     if ((syncStart && syncStart.ids.includes(this.id)) ||
         (routineFlight && routineFlight.ids.includes(this.id))) awaitSyncStart(null);
+    const inPreArm = preArm && preArm.ids.includes(this.id);
+    // The recorded log stays available for download after a disconnect.
+    this.stopLog('Disconnected');
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.waitUntil = 0;
@@ -879,6 +886,8 @@ class DroneSession {
     this.setStatus(status);
     publishCoordinationSelection();
     updateLayout();
+    // After updateLayout, which clears feedback when the fleet changes.
+    if (inPreArm) cancelPreArm('Pre-Arm canceled: Drone ' + this.id.slice(-1) + ' disconnected. Nothing was armed.');
   }
 
   setupTopics(ros) {
@@ -952,6 +961,8 @@ class DroneSession {
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
+      this.log.updateMode(message.mode);
+      this.refreshLog();
       publishCoordinationSelection();
     });
 
@@ -971,6 +982,7 @@ class DroneSession {
         (message.min_range === undefined || message.range >= message.min_range) &&
         (message.max_range === undefined || message.range <= message.max_range);
       if (valid) this.addPoint('range', time, message.range);
+      this.rangeReceivedAt = valid ? Date.now() : null;
       this.field('height').textContent = valid ? message.range.toFixed(2) + ' m' : '—';
       this.updateVerticalSpeed(time, valid ? message.range : NaN);
       this.render('height');
@@ -994,6 +1006,35 @@ class DroneSession {
     subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => {
       this.updateXY('camera', message.pose, message.header && message.header.frame_id);
     });
+  }
+
+  // Pre-Arm only: every sample of the logged topics, until the recording stops.
+  startLog() {
+    this.stopLogTopics();
+    this.log.start();
+    const ros = this.ros;
+    this.logTopics = LOG_TOPICS.map(([key, name, messageType]) => {
+      const topic = new ROSLIB.Topic({ ros, name, messageType, queue_length: 50, throttle_rate: 0 });
+      topic.subscribe(message => { if (this.ros === ros && this.connected) this.log.receive(key, message); });
+      return topic;
+    });
+  }
+
+  stopLog(reason) {
+    this.log.stop(reason);
+    this.stopLogTopics();
+  }
+
+  stopLogTopics() {
+    if (this.ros && this.ros.isConnected) this.logTopics.forEach(topic => topic.unsubscribe());
+    this.logTopics = [];
+  }
+
+  // A flight recording ends at disarm, or when the FC stops reporting its mode
+  // (a safety exit stops /pidrone/mode without publishing DISARMED).
+  refreshLog() {
+    if (this.log.state === 'flight' && Date.now() - this.modeReceivedAt > 500) this.log.stop('Flight mode stopped updating');
+    if (!this.log.recording && this.logTopics.length) this.stopLogTopics();
   }
 
   time(message) {
@@ -1115,6 +1156,7 @@ class DroneSession {
 
 const drones = {};
 let fleetMap = null;
+let logsView = null;
 let anchorCalibration = null;
 const heldKeys = new Map();
 const movementKeys = { j: 'left', l: 'right', i: 'forward', k: 'backward', w: 'up', s: 'down', a: 'yawLeft', d: 'yawRight' };
@@ -1140,6 +1182,7 @@ function updateLayout() {
     [drone.heightChart, drone.speedChart].forEach(chart => chart.resize());
   });
   if (fleetMap) fleetMap.chart.resize();
+  if (logsView) logsView.resize();
   if (countChanged) {
     stopHeldKeys();
     feedback('');
@@ -1264,6 +1307,7 @@ function receiveRoutineStage(id, message) {
 
 function dispatch(action, target = currentTarget()) {
   if (action === 'disarm' || action === 'stop') awaitSyncStart(null);
+  if (action === 'disarm') cancelPreArm('Pre-Arm canceled by Disarm. Nothing was armed.');
   const sessions = sessionsFor(target);
   const available = sessions.filter(drone => drone.connected);
   // Stop and disarm can still reach a remaining drone if its partner is offline.
@@ -1281,6 +1325,72 @@ function dispatch(action, target = currentTarget()) {
   }[action];
   feedback(label + ' sent to ' + available.map(drone => drone.id).join(' and ') + '.');
   return available;
+}
+
+// Pre-Arm records an 8 s baseline with the drone untouched, then arms; Takeoff stays manual.
+// It arms only if every drone is still connected, DISARMED and sending fresh ToF and IMU data.
+const PRE_ARM_MS = 8000;
+let preArm = null;
+
+function preArmProblem(sessions) {
+  for (const drone of sessions) {
+    const name = 'Drone ' + drone.id.slice(-1);
+    if (!drone.connected) return name + ' is not connected';
+    if (drone.field('flightMode').textContent !== 'DISARMED' || drone.modeReceivedAt === null ||
+        Date.now() - drone.modeReceivedAt > 500) return name + ' is not reporting DISARMED';
+    if (drone.rangeReceivedAt === null || Date.now() - drone.rangeReceivedAt > 500) return name + ' has no fresh ToF data';
+    // IMU arrives only through the log subscription, so allow it a moment to start.
+    if (preArm && Date.now() - preArm.startedAt > 1000 && !drone.log.fresh('imu', 500)) return name + ' has no fresh IMU data';
+  }
+  return '';
+}
+
+function startPreArm() {
+  if (preArm) return cancelPreArm('Pre-Arm canceled. Nothing was armed.');
+  const target = currentTarget();
+  const sessions = sessionsFor(target);
+  const problem = preArmProblem(sessions);
+  if (problem) return feedback('Pre-Arm not started: ' + problem + '.');
+  stopHeldKeys();
+  sessions.forEach(drone => drone.startLog());
+  preArm = { target, ids: sessions.map(drone => drone.id), startedAt: Date.now() };
+  renderPreArm();
+}
+
+function cancelPreArm(message) {
+  if (!preArm) return;
+  sessionsFor(preArm.target).forEach(drone => drone.stopLog('Pre-Arm canceled'));
+  preArm = null;
+  renderPreArm();
+  feedback(message);
+}
+
+function tickPreArm() {
+  if (!preArm) return;
+  const sessions = sessionsFor(preArm.target);
+  // Arming by hand during the countdown keeps recording the flight.
+  if (sessions.some(drone => ['ARMED', 'FLYING'].includes(drone.field('flightMode').textContent))) {
+    preArm = null;
+    renderPreArm();
+    return feedback('Pre-Arm countdown ended: armed before the baseline finished.');
+  }
+  const problem = preArmProblem(sessions);
+  if (problem) return cancelPreArm('Pre-Arm canceled: ' + problem + '. Nothing was armed.');
+  if (Date.now() - preArm.startedAt < PRE_ARM_MS) return renderPreArm();
+  const target = preArm.target;
+  preArm = null;
+  renderPreArm();
+  dispatch('arm', target);
+}
+
+function renderPreArm() {
+  const button = document.getElementById('prearm');
+  const remaining = preArm ? Math.max(0, Math.ceil((PRE_ARM_MS - (Date.now() - preArm.startedAt)) / 1000)) : 0;
+  button.textContent = preArm ? 'Cancel · ' + remaining + ' s' : 'Pre-Arm';
+  button.classList.toggle('prearm-active', !!preArm);
+  button.setAttribute('aria-label', preArm ? 'Cancel Pre-Arm; arming in ' + remaining + ' seconds'
+    : 'Pre-Arm: record an 8 second baseline, then arm');
+  if (preArm) feedback('Pre-Arm: recording baseline, arming in ' + remaining + ' s. Stand clear. Space or Disarm all cancels.');
 }
 
 function stopHeldKeys() {
@@ -1390,12 +1500,15 @@ document.addEventListener('DOMContentLoaded', () => {
   ['drone1', 'drone2'].forEach(id => { drones[id] = new DroneSession(id); });
   fleetMap = new FleetMap();
   anchorCalibration = new AnchorCalibration();
+  logsView = new LogsView(drones, () => fleetMap.chart.resize());
   document.getElementById('peer-relay-toggle').addEventListener('click', () => updatePeerRelay(!peerRelayEnabled));
   updatePeerRelay();
   setInterval(() => updatePeerRelay(), 2000);
   setInterval(() => {
     publishCoordinationSelection();
-    Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); });
+    Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); drone.refreshLog(); });
+    tickPreArm();
+    logsView.refresh();
     fleetMap.refreshAnchors();
     anchorCalibration.refresh();
   }, 250);
@@ -1411,6 +1524,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.dispatchEvent(new CustomEvent('drone-disconnect', { detail: drone.id }));
       } else connectDrone(drone.id);
     }
+    if (button.id === 'prearm') return startPreArm();
     if (!button.dataset.command) return;
     const controller = button.closest('[data-controller]');
     const scope = controller.dataset.controller;
