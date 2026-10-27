@@ -606,6 +606,8 @@ class DroneSession {
     this.id = id;
     this.host = id + '.local';
     this.detectionReceivedAt = null;
+    this.payloadReceivedAt = null;
+    this.payloadStamp = null;
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
@@ -644,6 +646,7 @@ class DroneSession {
       });
     });
     this.field('camera').addEventListener('error', () => {
+      this.clearPayload('Payload camera unavailable');
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
         this.field('camera').src = 'nocamera.svg';
@@ -654,6 +657,7 @@ class DroneSession {
   field(name) {
     if (name === 'camera') return document.getElementById(this.id + '-camera');
     if (name === 'detection') return document.getElementById(this.id + '-detection');
+    if (['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter'].includes(name)) return document.getElementById(this.id + '-' + name);
     return this.root.querySelector('[data-field="' + name + '"]');
   }
   get connected() { return !!(this.ros && this.ros.isConnected); }
@@ -686,6 +690,47 @@ class DroneSession {
       this.detectionReceivedAt = null;
       this.setDetection('No tag data', 'offline');
     }
+    if (this.payloadReceivedAt !== null && Date.now() - this.payloadReceivedAt > 750) this.clearPayload();
+  }
+
+  clearPayload(text = 'No payload data') {
+    this.payloadReceivedAt = null;
+    this.field('payloadOverlay').setAttribute('visibility', 'hidden');
+    this.field('payloadStatus').textContent = text;
+    this.field('payloadStatus').dataset.state = 'offline';
+  }
+
+  updatePayload(message) {
+    const stamp = message.header && message.header.stamp;
+    if (!stamp || !Number.isInteger(stamp.secs) || stamp.secs <= 0 ||
+        !Number.isInteger(stamp.nsecs) || stamp.nsecs < 0 || stamp.nsecs >= 1e9 ||
+        typeof message.camera_online !== 'boolean' || typeof message.detected !== 'boolean') return this.clearPayload();
+    if (!message.camera_online) return this.clearPayload('Payload camera unavailable');
+    const { image_width: width, image_height: height, bbox_x: x, bbox_y: y,
+      bbox_width: w, bbox_height: h, center_x: cx, center_y: cy, area } = message;
+    if (![width, height].every(n => Number.isInteger(n) && n > 0) ||
+        (message.detected && (![x, y, w, h].every(Number.isInteger) ||
+          ![cx, cy, area].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 ||
+          x + w > width || y + h > height || cx < x || cx >= x + w || cy < y || cy >= y + h ||
+          area <= 0 || area > w * h))) return this.clearPayload();
+    const time = stamp.secs + stamp.nsecs / 1e9;
+    // Cached reports must not keep a frozen camera observation alive.
+    if (this.payloadStamp !== null && time <= this.payloadStamp) return;
+    this.payloadStamp = time;
+    this.payloadReceivedAt = Date.now();
+    const status = this.field('payloadStatus');
+    status.textContent = message.detected ? 'Yellow payload detected' : 'No yellow payload detected';
+    status.dataset.state = message.detected ? 'detected' : 'none';
+    const overlay = this.field('payloadOverlay');
+    overlay.setAttribute('visibility', message.detected && this.field('camera').getAttribute('src') !== 'nocamera.svg' ? 'visible' : 'hidden');
+    if (!message.detected) return;
+    // Match the video's object-fit:contain layout, including letterboxing.
+    // ROS observations and the MJPEG video arrive independently: display aid only.
+    overlay.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    const box = this.field('payloadBox');
+    Object.entries({ x, y, width: w, height: h }).forEach(([name, value]) => box.setAttribute(name, value));
+    this.field('payloadCenter').setAttribute('cx', cx);
+    this.field('payloadCenter').setAttribute('cy', cy);
   }
 
   refreshLocalization() {
@@ -784,6 +829,8 @@ class DroneSession {
     this.verticalSampleAt = null;
     this.detectionReceivedAt = null;
     this.setDetection('No tag data', 'offline');
+    this.payloadStamp = null;
+    this.clearPayload();
     this.fusedStamp = null;
     this.fusionGeneration = null;
     this.clearFusion();
@@ -909,6 +956,7 @@ class DroneSession {
       this.subscribers.push(topic);
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
+    subscribe('/pidrone/payload/detection', 'pidrone_pkg/PayloadDetection', message => this.updatePayload(message));
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
     subscribe('/pidrone/apriltag/waypoints', 'pidrone_pkg/TagWaypointMap', message => {
       if (message.map) fleetMap.updateTagMap(this.id, { ...message.map,

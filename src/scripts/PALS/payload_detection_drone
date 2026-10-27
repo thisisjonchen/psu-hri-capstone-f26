@@ -1,0 +1,161 @@
+#!/usr/bin/env python
+"""Detect yellow payload candidates in camera pixels; never command the drone.
+
+ROS Kinetic / Python 2.7 and OpenCV 3 compatible. No depth or map pose is inferred.
+"""
+from __future__ import division, print_function
+
+import threading
+
+import cv2
+import numpy as np
+import rospy
+from localization import monotonic
+from sensor_msgs.msg import CompressedImage
+from pidrone_pkg.msg import PayloadDetection
+
+
+class PayloadNode(object):
+    def __init__(self):
+        self.lower = np.asarray(rospy.get_param('~hsv_lower', [20, 100, 80]), dtype=float)
+        self.upper = np.asarray(rospy.get_param('~hsv_upper', [40, 255, 255]), dtype=float)
+        if (self.lower.shape != (3,) or self.upper.shape != (3,)
+                or not np.all(np.isfinite(self.lower)) or not np.all(np.isfinite(self.upper))
+                or np.any(self.lower < 0) or np.any(self.upper > [179, 255, 255])
+                or np.any(self.lower > self.upper)
+                or np.any(self.lower != np.floor(self.lower))
+                or np.any(self.upper != np.floor(self.upper))):
+            raise ValueError('HSV bounds must be ordered integer triples within [179, 255, 255]')
+        self.lower, self.upper = self.lower.astype(np.uint8), self.upper.astype(np.uint8)
+        self.rate = float(rospy.get_param('~rate', 10))
+        self.timeout = float(rospy.get_param('~camera_timeout', 0.5))
+        self.min_area = float(rospy.get_param('~min_area_fraction', 0.002))
+        self.max_jump = float(rospy.get_param('~max_center_jump_fraction', 0.25))
+        self.track_timeout = float(rospy.get_param('~track_timeout', 0.5))
+        if (not np.all(np.isfinite([self.rate, self.timeout, self.min_area,
+                                    self.max_jump, self.track_timeout]))
+                or not 0 < self.rate <= 30 or self.timeout <= 0
+                or not 0 < self.min_area < 1 or not 0 < self.max_jump <= 1
+                or self.track_timeout <= 0):
+            raise ValueError('Invalid payload rate, freshness, area or association limits')
+        self.kernel = np.ones((3, 3), dtype=np.uint8)
+        self.lock = threading.Lock()
+        self.pending = None
+        self.last_frame_at = None
+        self.last_stamp = None
+        self.previous = None
+        self.previous_at = None
+        self.previous_size = None
+        self.result = PayloadDetection()
+        self.publisher = rospy.Publisher('/pidrone/payload/detection', PayloadDetection, queue_size=1)
+        topic = rospy.get_param('~image_topic', '/raspicam_node/image/compressed')
+        self.subscriber = rospy.Subscriber(topic, CompressedImage, self.image_callback,
+                                           queue_size=1, buff_size=2 ** 20)
+        rospy.loginfo('Yellow payload detection: %s at %.1f Hz (image coordinates only)', topic, self.rate)
+
+    def image_callback(self, message):
+        with self.lock:
+            self.pending = (message, monotonic())
+
+    def reset_track(self):
+        self.previous = self.previous_at = self.previous_size = None
+
+    def detect(self, image, received):
+        height, width = image.shape[:2]
+        if (self.previous_at is not None and
+                (received - self.previous_at > self.track_timeout
+                 or self.previous_size != (width, height))):
+            self.reset_track()
+        mask = cv2.inRange(cv2.cvtColor(image, cv2.COLOR_BGR2HSV), self.lower, self.upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+        # OpenCV 3 returns (image, contours, hierarchy), OpenCV 4 (contours, hierarchy).
+        contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
+        candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area * width * height:
+                continue
+            moments = cv2.moments(contour)
+            if moments['m00'] <= 0:
+                continue
+            center = (moments['m10'] / moments['m00'], moments['m01'] / moments['m00'])
+            candidates.append((area, center, cv2.boundingRect(contour)))
+        if self.previous is not None:
+            limit = self.max_jump ** 2 * (width ** 2 + height ** 2)
+            candidates = [c for c in candidates if self.distance(c[1]) <= limit]
+            candidate = min(candidates, key=lambda c: self.distance(c[1])) if candidates else None
+        else:
+            candidate = max(candidates, key=lambda c: c[0]) if candidates else None
+        if candidate is not None:
+            self.previous = candidate[1]
+            self.previous_at = received
+            self.previous_size = (width, height)
+        return candidate
+
+    def distance(self, center):
+        return sum((a - b) ** 2 for a, b in zip(center, self.previous))
+
+    def offline(self):
+        header = self.result.header
+        self.result = PayloadDetection()
+        self.result.header = header
+        self.last_frame_at = None
+        self.reset_track()
+
+    def step(self):
+        with self.lock:
+            pending, self.pending = self.pending, None
+        if pending is not None:
+            message, received = pending
+            self.result = PayloadDetection()
+            self.result.header = message.header
+            self.last_frame_at = None
+            try:
+                stamp = message.header.stamp.to_sec()
+                age = rospy.Time.now().to_sec() - stamp
+                if (not np.isfinite(stamp) or stamp <= 0 or not 0 <= age <= self.timeout
+                        or monotonic() - received > self.timeout
+                        or (self.last_stamp is not None and stamp <= self.last_stamp)):
+                    raise ValueError('Stale, duplicate or invalid camera timestamp')
+                self.last_stamp = stamp
+                image = cv2.imdecode(np.frombuffer(message.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise ValueError('Invalid compressed camera frame')
+                candidate = self.detect(image, received)
+                self.result.image_height, self.result.image_width = image.shape[:2]
+                if candidate is not None:
+                    self.result.area, center, box = candidate
+                    self.result.center_x, self.result.center_y = center
+                    (self.result.bbox_x, self.result.bbox_y,
+                     self.result.bbox_width, self.result.bbox_height) = box
+                    self.result.detected = True
+                self.result.camera_online = True
+                self.last_frame_at = received
+            except (ValueError, cv2.error, RuntimeError) as error:
+                rospy.logwarn_throttle(5, 'Payload image processing failed: {}'.format(error))
+        stamp = self.result.header.stamp.to_sec()
+        age = rospy.Time.now().to_sec() - stamp
+        if (self.last_frame_at is None or monotonic() - self.last_frame_at > self.timeout
+                or not 0 <= age <= self.timeout):
+            self.offline()
+        # Repeated reports retain the image timestamp; only new images are observations.
+        self.publisher.publish(self.result)
+
+    def run(self):
+        rate = rospy.Rate(self.rate)
+        while not rospy.is_shutdown():
+            self.step()
+            rate.sleep()
+
+
+def main():
+    rospy.init_node('payload_detection')
+    try:
+        PayloadNode().run()
+    except rospy.ROSInterruptException:
+        pass
+
+
+if __name__ == '__main__':
+    main()

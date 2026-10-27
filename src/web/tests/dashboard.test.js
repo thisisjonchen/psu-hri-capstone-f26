@@ -45,6 +45,7 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
     elements.set(id, root);
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
+    for (const name of ['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter']) elements.set(id + '-' + name, element());
   }
   for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
@@ -1000,6 +1001,54 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   for (const callback of app.maintenanceTimers.values()) callback();
   assert.equal(a.field('detection').textContent, 'No tag data');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
+});
+
+test('payload boxes use image coordinates, stay isolated and expire without new observations', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const topic = '/pidrone/payload/detection';
+  const detected = { ...stamp(100), camera_online: true, detected: true,
+    image_width: 240, image_height: 320, bbox_x: 30, bbox_y: 60, bbox_width: 80, bbox_height: 90,
+    center_x: 70, center_y: 105, area: 6800 };
+  app.receive(a, topic, detected);
+  assert.equal(a.field('payloadStatus').textContent, 'Yellow payload detected');
+  assert.equal(a.field('payloadOverlay').visibility, 'visible');
+  assert.equal(a.field('payloadOverlay').viewBox, '0 0 240 320');
+  assert.equal(a.field('payloadBox').x, 30);
+  assert.equal(a.field('payloadBox').height, 90);
+  assert.equal(a.field('payloadCenter').cx, 70);
+  assert.equal(b.field('payloadOverlay').visibility, 'hidden');
+  assert.equal(a.field('detection').textContent, 'No tag data');
+  app.advanceTime(800);
+  app.receive(a, topic, detected); // Repeated source stamp cannot renew freshness.
+  app.receive(b, topic, { ...detected, ...stamp(101) });
+  for (const callback of app.maintenanceTimers.values()) callback();
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  assert.equal(a.field('payloadStatus').textContent, 'No payload data');
+  assert.equal(b.field('payloadOverlay').visibility, 'visible');
+  app.receive(a, topic, { ...detected, ...stamp(102), detected: false });
+  assert.equal(a.field('payloadStatus').textContent, 'No yellow payload detected');
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  app.receive(a, topic, { ...detected, ...stamp(103) });
+  app.receive(a, topic, { ...detected, camera_online: false });
+  assert.equal(a.field('payloadStatus').textContent, 'Payload camera unavailable');
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  for (const invalid of [{ detected: undefined }, { bbox_x: -1 }, { center_x: NaN }, { bbox_width: 300 },
+    { header: { stamp: { secs: 104, nsecs: 1e9 } } }]) {
+    app.receive(a, topic, { ...detected, ...stamp(104), ...invalid });
+    assert.equal(a.field('payloadStatus').textContent, 'No payload data');
+  }
+  app.receive(a, topic, { ...detected, ...stamp(105) });
+  const oldPayload = a.subscribers.find(t => t.name === topic);
+  a.disconnect();
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  a.connect(); a.ros.open();
+  oldPayload.receive({ ...detected, ...stamp(106) });
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  app.receive(a, topic, detected); // Reconnect resets the source-stamp watermark.
+  assert.equal(a.field('payloadOverlay').visibility, 'visible');
+  a.field('camera').listeners.error();
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
 });
 
 test('scan, assignment, measurement and saving work independently of drones', async () => {

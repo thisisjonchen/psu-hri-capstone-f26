@@ -9,7 +9,7 @@ pidrone_node_check() {
         [/fusion_localization]='3 SE' [/raspicam_node]='4 Vision' [/vl53l1x]='5 TOF'
         [/rosbridge_websocket]='6 rosbridge' [/web_video_server]='7 web_vid_serv'
         [/apriltag_detection]='8 AprilTags' [/uwb_localization]='9 UWB'
-        [/apriltag_mapping]='12 TagMap')
+        [/apriltag_mapping]='12 TagMap' [/payload_detection]='14 Payload')
     python "$package_dir/scripts/wait_for_ros_master.py" || return
     echo 'Checking onboard nodes (up to 60 s)...'
     pending=("${!windows[@]}")
@@ -73,6 +73,7 @@ pidrone_screen_node() {
         bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
         video) command=(rosrun web_video_server web_video_server) ;;
         tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
+        payload) command=(roslaunch --wait "$package_dir/launch/payload_detection.launch") ;;
         tagmap) command=(roslaunch --wait "$package_dir/launch/apriltag_mapping.launch") ;;
         uwb)
             command=(roslaunch --wait "$package_dir/launch/uwb_localization.launch")
@@ -80,7 +81,7 @@ pidrone_screen_node() {
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|payload|tagmap|uwb|shell}' >&2
            return 2 ;;
     esac
 

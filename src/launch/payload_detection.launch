@@ -1,0 +1,7 @@
+<launch>
+  <arg name="image_topic" default="/raspicam_node/image/compressed"/>
+  <node pkg="pidrone_pkg" type="payload_detection_drone" name="payload_detection" output="screen" respawn="true" respawn_delay="5">
+    <rosparam command="load" file="$(find pidrone_pkg)/params/payload_detection.yaml"/>
+    <param name="image_topic" value="$(arg image_topic)"/>
+  </node>
+</launch>

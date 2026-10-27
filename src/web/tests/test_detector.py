@@ -1,4 +1,4 @@
-"""Exercise the onboard node with real encoded tags and mocked ROS transport."""
+"""Exercise onboard tag and yellow-payload detectors with mocked ROS transport."""
 import copy
 import runpy
 import sys
@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 SCRIPT = Path(__file__).parents[2] / 'scripts' / 'PALS' / 'apriltag_detection_drone'
+sys.path.insert(0, str(SCRIPT.parents[1]))
 
 
 class TagDetection:
@@ -152,6 +153,143 @@ class DetectorTests(unittest.TestCase):
         self.node.image_callback(self.frame())
         self.node.step()
         self.assertEqual(len(self.references), count)
+
+
+class PayloadDetection:
+    def __init__(self):
+        self.header = SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: 0.0))
+        self.camera_online = self.detected = False
+        for field in ('image_width', 'image_height', 'bbox_x', 'bbox_y', 'bbox_width',
+                      'bbox_height', 'center_x', 'center_y', 'area'):
+            setattr(self, field, 0)
+
+
+class PayloadDetectorTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 100.0
+        self.messages = []
+        self.params = {}
+        ros = ModuleType('rospy')
+        ros.get_param = lambda name, default: self.params.get(name, default)
+        ros.Time = SimpleNamespace(now=lambda: SimpleNamespace(to_sec=lambda: self.now))
+        ros.Publisher = lambda *args, **kwargs: SimpleNamespace(
+            publish=lambda msg: self.messages.append(copy.deepcopy(msg)))
+        ros.Subscriber = Mock()
+        ros.loginfo = ros.logwarn_throttle = Mock()
+        modules = {'rospy': ros}
+        for package, name, cls in [('sensor_msgs', 'CompressedImage', object),
+                                   ('pidrone_pkg', 'PayloadDetection', PayloadDetection)]:
+            modules[package] = ModuleType(package)
+            modules[package + '.msg'] = ModuleType(package + '.msg')
+            setattr(modules[package + '.msg'], name, cls)
+        patcher = patch.dict(sys.modules, modules)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        node_class = runpy.run_path(str(SCRIPT.with_name('payload_detection_drone')))['PayloadNode']
+        node_class.step.__globals__['monotonic'] = lambda: self.now
+        self.node_class = node_class
+        self.node = node_class()
+
+    def frame(self, regions=(), stamp=None):
+        image = np.zeros((320, 240, 3), dtype=np.uint8)
+        for x, y, w, h, color in regions:
+            image[y:y+h, x:x+w] = color
+        data = cv2.imencode('.jpg', image)[1].tobytes()
+        timestamp = self.now if stamp is None else stamp
+        return SimpleNamespace(data=data, header=SimpleNamespace(
+            stamp=SimpleNamespace(to_sec=lambda: timestamp), frame_id='camera'))
+
+    def observe(self, regions=()):
+        self.now += .1
+        self.node.image_callback(self.frame(regions))
+        self.node.step()
+        return self.messages[-1]
+
+    def test_yellow_region_reports_pixels_and_clears_when_absent(self):
+        yellow = (0, 255, 255)
+        msg = self.observe([(40, 80, 80, 100, yellow), (170, 20, 40, 50, (255, 0, 0)),
+                            (190, 270, 5, 5, yellow)])
+        self.assertTrue(msg.camera_online and msg.detected)
+        self.assertEqual((msg.image_width, msg.image_height), (240, 320))
+        self.assertAlmostEqual(msg.center_x, 79.5, delta=2)
+        self.assertAlmostEqual(msg.center_y, 129.5, delta=2)
+        self.assertAlmostEqual(msg.bbox_x, 40, delta=2)
+        self.assertAlmostEqual(msg.bbox_y, 80, delta=2)
+        self.assertAlmostEqual(msg.bbox_width, 80, delta=3)
+        self.assertAlmostEqual(msg.bbox_height, 100, delta=3)
+        self.assertGreater(msg.area, 7000)
+        self.assertEqual(msg.header.stamp.to_sec(), self.now)
+        self.assertEqual(msg.header.frame_id, 'camera')
+        for regions in [[], [(20, 30, 60, 70, (0, 0, 255))], [(40, 80, 5, 5, yellow)]]:
+            msg = self.observe(regions)
+            self.assertTrue(msg.camera_online)
+            self.assertFalse(msg.detected)
+            self.assertEqual((msg.area, msg.bbox_width, msg.center_x), (0, 0, 0))
+
+    def test_association_ignores_a_larger_distractor_and_expires_across_a_gap(self):
+        yellow = (0, 255, 255)
+        self.observe([(20, 20, 30, 30, yellow)])
+        msg = self.observe([(25, 25, 30, 30, yellow), (150, 220, 70, 80, yellow)])
+        self.assertAlmostEqual(msg.center_x, 39.5, delta=2)
+        msg = self.observe([(150, 220, 70, 80, yellow)])
+        self.assertTrue(msg.camera_online)
+        self.assertFalse(msg.detected)  # No cached/predicted coordinates on a miss.
+        self.now += .6
+        msg = self.observe([(150, 220, 70, 80, yellow)])
+        self.assertTrue(msg.detected)
+        self.assertAlmostEqual(msg.center_x, 184.5, delta=2)
+
+    def test_missing_invalid_and_replayed_images_never_renew_observation_time(self):
+        self.node.step()
+        self.assertFalse(self.messages[-1].camera_online)
+        yellow = [(40, 80, 80, 100, (0, 255, 255))]
+        msg = self.observe(yellow)
+        measured_at = msg.header.stamp.to_sec()
+        self.now += .1
+        self.node.step()
+        self.assertTrue(self.messages[-1].detected)
+        self.assertEqual(self.messages[-1].header.stamp.to_sec(), measured_at)
+        self.now += .5
+        self.node.step()
+        self.assertFalse(self.messages[-1].camera_online)
+        self.assertFalse(self.messages[-1].detected)
+        self.assertEqual(self.messages[-1].header.stamp.to_sec(), measured_at)
+        for offset in (-1, .1, None, 0):
+            self.observe(yellow)
+            frame = self.frame(yellow, stamp=0 if offset is None else self.now + offset)
+            self.node.image_callback(frame)
+            self.node.step()
+            self.assertFalse(self.messages[-1].camera_online)
+            self.assertFalse(self.messages[-1].detected)
+        frame = self.frame(yellow)
+        frame.data = b'invalid jpeg'
+        self.now += .1
+        self.node.image_callback(frame)
+        self.node.step()
+        self.assertFalse(self.messages[-1].camera_online)
+        self.now += .1
+        self.node.image_callback(self.frame(yellow))
+        self.now += .6
+        self.node.step()
+        self.assertFalse(self.messages[-1].camera_online)
+        self.now += .1
+        self.node.image_callback(self.frame(yellow))
+        latest = self.frame()
+        self.node.image_callback(latest)
+        self.node.step()
+        self.assertTrue(self.messages[-1].camera_online)
+        self.assertFalse(self.messages[-1].detected)
+        self.assertIsNone(self.node.pending)
+
+    def test_invalid_thresholds_fail_at_startup(self):
+        for name, value in [('~hsv_lower', [40, 100, 80]), ('~rate', float('nan')),
+                            ('~hsv_upper', [180, 255, 255]), ('~min_area_fraction', 0)]:
+            self.params.clear()
+            self.params[name] = value
+            if name == '~hsv_lower':
+                self.params['~hsv_upper'] = [20, 255, 255]
+            with self.assertRaises(ValueError):
+                self.node_class()
 
 
 if __name__ == '__main__':
