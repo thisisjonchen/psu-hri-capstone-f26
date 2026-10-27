@@ -1,25 +1,39 @@
 # Heading is aligned automatically at node startup while disarmed and facing map +Y.
 # Floor tag 5, printed top toward +Y, corrects yaw in all modes when visible.
-# Experimental: sensor replay has not established a flight benefit.
-# Enabled for a controlled flight trial; startup bias is required before use.
-use_imu_acceleration: true
-# Fraction of bias-corrected horizontal acceleration used when prediction is enabled.
-imu_acceleration_gain: 0.25
-velocity_stddev: 0.12
-# Fixed controller velocity blend: 20% optical flow, 80% UWB/IMU when flow is fresh.
-# Without a fresh accepted flow sample, use 100% UWB/IMU. Allowed range: 0 through 1.
-flow_velocity_weight: 0.2
-# Flow uncertainty (m/s) for outlier checks/covariance, not the blend percentage.
-flow_velocity_stddev: 0.4
-# Preserve the earlier camera speed limit and EMA rotation compensation.
-max_flow_speed: 2.0
-angular_compensation: 0.2
-# Process uncertainty for predicted velocity (m/s per sqrt(s)).
+
+# Velocity: IMU acceleration predicts, optical flow corrects; UWB has no input.
+# The balance between them is set by these two noise values, not a fixed blend.
+# IMU acceleration noise (m/s^2 per sqrt(Hz)); larger trusts flow more.
 acceleration_stddev: 0.3
+# Optical-flow velocity noise (m/s), assuming a textured floor; larger trusts the IMU more.
+flow_velocity_stddev: 0.15
+# How quickly the learned acceleration bias may change (m/s^2 per sqrt(s)).
+acceleration_bias_stddev: 0.02
+# Zero-velocity observation noise while disarmed/armed on the ground (m/s).
+zero_velocity_stddev: 0.02
+# Coast on IMU alone this long without a flow/zero-velocity correction (s).
+velocity_timeout: 0.5
+# Consecutive rejected flow samples before resetting velocity to flow.
+flow_max_rejections: 5
+# Velocity is zero within ground_margin (m) of the ground height measured before takeoff;
+# below flow_min_height (m) the IMU coasts alone (like PX4 SENS_FLOW_MINHGT).
+flow_min_height: 0.10
+ground_margin: 0.02
+# Reject flow faster than this (m/s). Rotation is removed in optical_flow_node.
+max_flow_speed: 2.0
+
+# Climb rate: IMU vertical acceleration predicts, tilt-compensated ToF height corrects.
+vertical_acceleration_stddev: 0.3
+vertical_bias_stddev: 0.05
+tof_height_stddev: 0.02
+
+# Room position: UWB corrects only the map->odom offset.
+# Local odometry drift rate (m per sqrt(s)); larger lets UWB pull harder.
 drift_stddev: 0.08
-# Freshness for IMU/height and newly received fixes; XY prediction has a shared 1 s limit.
+# Freshness for IMU/height and newly received fixes; the room pose itself
+# survives UWB gaps up to 1.5 s (localization.fusion.XY_PREDICTION_TIMEOUT).
 sensor_timeout: 0.5
 max_sensor_skew: 0.15
-# 99% chi-square gate for a two-dimensional position innovation.
+# 99% chi-square gate for two-dimensional innovations (flow and UWB).
 innovation_gate: 9.21
 max_innovation: 1.0

@@ -45,10 +45,10 @@ class TagHoldTest(unittest.TestCase):
 
     def advance(self, seconds, x=1):
         self.fusion.ros_now += seconds
-        pose = copy.deepcopy(self.drone.fused_pose)
+        pose = copy.deepcopy(self.drone.local_pose)
         pose.header.stamp = Stamp(self.fusion.ros_now)
         pose.pose.pose.position.x = x
-        self.drone._fused_received(pose)
+        self.drone._local_received(pose)
 
     def test_corrects_toward_locked_offset_within_speed_limit(self):
         self.see()

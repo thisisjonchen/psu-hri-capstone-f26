@@ -30,7 +30,7 @@ class AprilTagMappingNode(object):
         offset = rospy.get_param('~camera_offset_body', [0, 0, 0])
         self.camera_offset = np.asarray(offset, dtype=float)
         self.rotation = camera_rotation(
-            float(rospy.get_param('~camera_pitch_down_deg', 60.0)),
+            float(rospy.get_param('~camera_pitch_down_deg', 45.0)),
             float(rospy.get_param('~camera_azimuth_deg', 0.0)),
             float(rospy.get_param('~camera_image_roll_deg', 0.0)))
         if (self.camera_offset.shape != (3,) or not np.all(np.isfinite(self.camera_offset))

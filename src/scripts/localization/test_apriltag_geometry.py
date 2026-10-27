@@ -77,7 +77,9 @@ class AprilTagMappingTests(unittest.TestCase):
         self.now = 100.0
         self.maps, self.waypoints = [], []
         ros = ModuleType('rospy')
-        ros.get_param = lambda name, default: default
+        # These expectations are worked out for a 60 degree mounting; set it explicitly.
+        params = {'~camera_pitch_down_deg': 60.0}
+        ros.get_param = lambda name, default: params.get(name, default)
         ros.Time = NS(now=lambda: Stamp(self.now), from_sec=Stamp)
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
         ros.Publisher = lambda topic, *args, **kwargs: NS(

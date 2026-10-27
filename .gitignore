@@ -5,3 +5,4 @@
 
 .calibration-state.json*
 .DS_Store
+flow_capture_*/

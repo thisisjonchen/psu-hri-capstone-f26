@@ -8,7 +8,11 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 - `src/scripts/PALS/`: shared drone control, routines, and perception/localization nodes.
 - `src/scripts/localization/`: UWB serial access, sensor validation, fusion, and tests.
 - `src/scripts/flight_controller_node.py` and `h2rMultiWii.py`: flight-controller communication.
-- `src/scripts/pid_controller.py` and `pid_class.py`: control logic.
+- `src/scripts/pid_controller.py`: control loop. Throttle comes from `altitude_controller.py`
+  and roll/pitch from `velocity_controller.py`; `pid_class.py` serves the dashboard position mode.
+- `src/scripts/optical_flow_node.py` and `localization/camera_flow.py`: optical flow from the
+  tilted fisheye camera.
+- `tools/flow_capture.py`: record hand-carried or flight data over SSH and analyze it.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
 - `src/web/`: dashboard, laptop calibration service, and web tests.
 - Bundled libraries contain third-party code; avoid unrelated edits.
@@ -50,11 +54,21 @@ can lag behind the code; verify the actual launch configuration and data path.
   new exception-driven shutdown. Existing baseline fault handling remains separate.
 - Do not arm, fly, calibrate hardware, or send motor commands as part of automated
   verification. A file named `test` may be an executable hardware utility; inspect it first.
-- The current default estimates XY position and velocity from UWB with IMU
-  acceleration prediction, then blends fresh accepted optical-flow velocity into
-  controller feedback (20% flow, 80% UWB/IMU). It uses ToF for height and IMU
-  attitude for frame conversion. Do not assume a textured floor or introduce
-  optical-flow quality gating without a request.
+- XY velocity comes from a Kalman filter in which IMU acceleration predicts and
+  optical flow corrects (zero velocity while disarmed/armed on the ground), with an
+  acceleration-bias state and a standard innovation gate. UWB never affects velocity;
+  it only corrects the room offset over smooth local odometry, so hold and relative
+  moves work without UWB and room waypoints require it. The floor is assumed textured.
+  Below `flow_min_height` the IMU coasts alone. ToF gives height and IMU attitude
+  gives frame conversion.
+- The camera is a fisheye tilted about 45 degrees below horizontal (`apriltag_mapping.yaml`).
+  Optical flow casts each motion-vector block onto the floor using the lens calibration
+  and the attitude at both frames, so rotation cancels; the encoder's vector rows are
+  vertically mirrored relative to the image (`optical_flow.yaml`).
+- Altitude follows the PX4/ArduPilot cascade (height -> climb rate -> thrust, with a
+  thrust curve and a conservative angle boost). Roll/pitch come from a velocity PI
+  with a lean limit in degrees; its integral learns constant pushes and is held, not
+  cleared, while the velocity estimate is unavailable.
 - Heading alignment belongs at fusion-node startup while disarmed and facing map
   +Y, not in individual routines. It does not remove ongoing yaw drift.
 - Preserve an existing hold target through supported sensor gaps. Do not silently

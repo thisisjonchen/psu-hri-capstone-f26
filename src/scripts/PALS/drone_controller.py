@@ -8,6 +8,7 @@ import rosnode
 import rospy
 import tf
 from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty, String
@@ -44,6 +45,7 @@ class Drone(object):
         self.xy_anchor = None
         self.xy_frame = None
         self.fused_pose = None
+        self.local_pose = None
         self.voltage = None
         self.battery_at = 0
         self.low_voltage_at = None
@@ -67,6 +69,8 @@ class Drone(object):
         rospy.Subscriber('/pidrone/range', Range, self._range_received)
         rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped,
                          self._fused_received, queue_size=1)
+        rospy.Subscriber('/pidrone/localization/odometry', Odometry,
+                         self._local_received, queue_size=1)
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
         self.heartbeat = rospy.Timer(
             rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
@@ -100,14 +104,18 @@ class Drone(object):
     def _fused_received(self, msg):
         self.fused_pose = msg
 
-    def _hold_pose(self, required=True, allow_prediction=False):
-        msg = self.fused_pose
-        timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.estimate_timeout
+    def _local_received(self, msg):
+        self.local_pose = msg
+
+    def _hold_pose(self, required=True, allow_prediction=False, local=False):
+        """Local odometry (IMU/flow, no UWB) or the fused room pose (UWB)."""
+        msg = self.local_pose if local else self.fused_pose
+        timeout = XY_PREDICTION_TIMEOUT if allow_prediction and not local else self.estimate_timeout
         if (msg is None or not msg.header.frame_id or
                 not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= timeout):
             if not required:
                 return None
-            raise RuntimeError('Fused position is missing/stale')
+            raise RuntimeError(('Local' if local else 'Fused') + ' position is missing/stale')
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         values = (p.x, p.y, q.x, q.y, q.z, q.w)
         if (any(math.isnan(v) or math.isinf(v) for v in values) or
@@ -232,7 +240,7 @@ class Drone(object):
             if self.voltage < self.MIN_START_V:
                 raise RuntimeError('Battery voltage is too low for synchronized start')
             if hold_xy:
-                self._hold_pose()
+                self._hold_pose(local=True)
             if (self.start_at is not None and self.start_at >= started and
                     (not require_run or self.routine_run is not None)):
                 rospy.loginfo('Synchronized start received')
@@ -258,7 +266,7 @@ class Drone(object):
             self._check_flight('synchronized ' + stage)
             self.twist_pub.publish(self._xy_hold_command())
             # Keep holding through supported gaps, but do not report ready on old fixes.
-            if self._hold_pose(required=False) is not None:
+            if self._hold_pose(required=False, local=True) is not None:
                 if self.stage_release == (self.routine_run, stage):
                     return
                 if time.time() - last_ready >= 0.2:
@@ -277,18 +285,18 @@ class Drone(object):
         raise RuntimeError('Mode {} was not confirmed'.format(name))
 
     def lock_xy(self):
-        """Hold the current fused room position through the velocity PID."""
+        """Hold the current local (IMU/flow odometry) position through the velocity PID."""
         if self.mode not in ('ARMED', 'FLYING'):
             raise RuntimeError('Arm before locking X/Y')
         self._check_sensors()
-        msg = self._hold_pose()
+        msg = self._hold_pose(local=True)
         p = msg.pose.pose.position
         self.xy_anchor = (p.x, p.y)
         self.xy_frame = msg.header.frame_id
         # This routine supplies the position-to-velocity correction; do not add
         # the PID's separate local-position correction on top of it.
         self.position_mode_pub.publish(Bool(False))
-        rospy.loginfo('Fused X/Y hold enabled at %.3f, %.3f', p.x, p.y)
+        rospy.loginfo('Local X/Y hold enabled at %.3f, %.3f', p.x, p.y)
 
     def unlock_xy(self):
         self.xy_anchor = None
@@ -299,20 +307,20 @@ class Drone(object):
         command = Twist()
         if self.xy_anchor is None:
             return command
-        msg = self._hold_pose(required=False, allow_prediction=True)
+        msg = self._hold_pose(required=False, local=True)
         if msg is None:
-            # Preserve the room anchor; stop requesting motion until fusion resumes.
+            # Preserve the anchor; stop requesting motion until odometry resumes.
             return command
         if msg.header.frame_id != self.xy_frame:
-            raise RuntimeError('Fused position frame changed during X/Y hold')
+            raise RuntimeError('Position frame changed during X/Y hold')
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
-        # Fused orientation already expresses the controller's right/forward
-        # axes in the room frame. Use the same conversion as room navigation.
+        # Pose orientation expresses the controller's right/forward axes in
+        # the pose frame. Use the same conversion as room navigation.
         yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
         command.linear.x, command.linear.y = target_velocity(
             self.xy_anchor, (p.x, p.y), yaw, self.xy_hold_gain, self.xy_speed_limit)
         rospy.loginfo_throttle(1,
-            'XY hold: room_error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
+            'XY hold: error=(%.3f, %.3f) m body_command=(%.3f, %.3f) m/s' % (
                 self.xy_anchor[0] - p.x, self.xy_anchor[1] - p.y,
                 command.linear.x, command.linear.y))
         return command
@@ -393,8 +401,9 @@ class Drone(object):
              room_target=None, check=None):
         """Move relative to the drone: x right, y forward, z up (meters).
 
-        Horizontal distance and heading come from the UWB/IMU room pose.
-        Use speed_limit=None for an uncapped proportional velocity request.
+        Relative moves use local IMU/flow odometry; room_target waypoints use
+        the UWB room pose. Use speed_limit=None for an uncapped proportional
+        velocity request.
         """
         if self.mode != 'FLYING':
             raise RuntimeError('Drone must be flying before moving')
@@ -406,6 +415,7 @@ class Drone(object):
         if x == 0 and y == 0 and z == 0 and room_target is None:
             return
         horizontal = math.hypot(x, y)
+        local = room_target is None
         if room_target is not None:
             msg = self._hold_pose()
             if msg.header.frame_id != room_target[2]:
@@ -418,7 +428,7 @@ class Drone(object):
         start_z = self.height
         target_z = start_z + z
         if horizontal:
-            msg = self._hold_pose()
+            msg = self._hold_pose(local=local)
             frame = msg.header.frame_id
             p, q = msg.pose.pose.position, msg.pose.pose.orientation
             start_xy = (p.x, p.y)
@@ -450,9 +460,9 @@ class Drone(object):
                     raise RuntimeError('Movement limit reached without reaching target')
                 ex = ey = 0.0
                 if horizontal:
-                    msg = self._hold_pose(allow_prediction=True)
+                    msg = self._hold_pose(allow_prediction=True, local=local)
                     if msg.header.frame_id != frame:
-                        raise RuntimeError('Fused position frame changed during movement')
+                        raise RuntimeError('Position frame changed during movement')
                     p, q = msg.pose.pose.position, msg.pose.pose.orientation
                     yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
                     ex, ey = rotate(target_xy - (p.x, p.y), -yaw)

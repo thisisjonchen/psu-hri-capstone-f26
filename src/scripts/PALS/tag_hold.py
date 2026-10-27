@@ -81,7 +81,7 @@ class TagHold(object):
         if info is None or (msg.image_width, msg.image_height) != (info.width, info.height):
             rospy.logwarn_throttle(5, 'Tag hold: camera_info does not match detection frames')
             return None
-        pose = self.drone._hold_pose(required=False, allow_prediction=True)
+        pose = self.drone._hold_pose(required=False, local=True)
         if pose is None:
             return None
         q = pose.pose.pose.orientation
@@ -145,5 +145,5 @@ class TagHold(object):
         return self.drone._xy_hold_command()
 
     def finish(self):
-        """Hold the current fused position (e.g. for landing)."""
+        """Hold the current local position (e.g. for landing)."""
         self.drone.lock_xy()
