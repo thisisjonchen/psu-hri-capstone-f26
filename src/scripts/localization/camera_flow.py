@@ -14,7 +14,6 @@ level body heading frame: (right, forward) m/s.
 from __future__ import division
 
 import bisect
-import math
 
 import cv2
 import numpy as np

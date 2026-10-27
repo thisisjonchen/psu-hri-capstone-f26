@@ -7,8 +7,8 @@
            and (for camera recordings) where in the image motion is seen
 
 Usage (from the repository root, props off):
-  python3 tools/flow_capture.py record --drone drone2 --seconds 30
-  python3 tools/flow_capture.py camera --drone drone2 --seconds 30
+  python3 tools/flow_capture.py record --drone drone1 --seconds 30
+  python3 tools/flow_capture.py camera --drone drone1 --seconds 30
   python3 tools/flow_capture.py analyze flow_capture_<time>
 
 Uses the same `ssh <drone>` login as the rest of the tools and runs rostopic in
@@ -32,6 +32,7 @@ TOPICS = {
     'status': '/pidrone/localization/fusion_status',
     'mode': '/pidrone/mode',
     'commands': '/pidrone/fly_commands',
+    'battery': '/pidrone/battery',
 }
 # Raw camera motion vectors: one 16x16-pixel macroblock per value, plus match cost (sad).
 CAMERA_TOPICS = {
@@ -221,6 +222,12 @@ def command_report(data, t0):
         pinned = sum(1 for c in commands if abs(c[i] - 1500) >= extreme - 0.5) / len(commands)
         print('  %-8s at its largest lean (%.1f us) %.0f%% of the time' % (name, extreme, 100 * pinned))
     print('  The steady throttle in a level hover approximates hover_throttle (params/altitude.yaml).')
+    battery = [b for b in series(data.get('battery', []), t0, 'field.vbat') if not math.isnan(b[1])]
+    if battery:
+        start, end = commands[0][0], commands[-1][0]
+        flying = [b[1] for b in battery if start <= b[0] <= end] or [b[1] for b in battery]
+        print('  battery  %.2f V at start of flight, %.2f V lowest, %.2f V at end' % (
+            flying[0], min(flying), flying[-1]))
 
 
 def analyze(folder):
@@ -297,11 +304,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     rec = sub.add_parser('record', help='record while moving the drone by hand')
-    rec.add_argument('--drone', default='drone2')
+    rec.add_argument('--drone', required=True, choices=('drone1', 'drone2'))
     rec.add_argument('--seconds', type=int, default=30)
     rec.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_<time>)')
     cam = sub.add_parser('camera', help='record only the camera topics while moving the drone')
-    cam.add_argument('--drone', default='drone2')
+    cam.add_argument('--drone', required=True, choices=('drone1', 'drone2'))
     cam.add_argument('--seconds', type=int, default=30)
     cam.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_camera_<time>)')
     ana = sub.add_parser('analyze', help='summarize a recording')

@@ -71,7 +71,7 @@ class VelocityControllerTest(unittest.TestCase):
                 self.assertLessEqual(abs(value - 1500), limit + 1e-9)
 
     def test_constant_push_is_cancelled_instead_of_drifting(self):
-        # The drone2 symptom: steady drift in one direction from a constant push.
+        # Seen in flight: steady drift in one direction from a constant push.
         flight = Flight(push_deg=(-1.5, 2.0)).run(25)
         late = flight.velocities[-int(5 * RATE):]
         for axis in (0, 1):

@@ -9,9 +9,9 @@ max_floor_distance: 1.5
 # Fewer tracked floor blocks than this reads as no measurable motion
 # (about 6 cm/s at 0.3 m: one pixel per frame with this lens).
 min_blocks: 8
-# Overall scale, to calibrate against tape-measured motion (step 5).
+# Overall scale; calibrate against tape-measured hand-carried motion.
 flow_gain: 1.0
-# drone2 hand-carry recording (2026-10-26): with vector rows reversed and the
-# vertical component negated, forward/back signs match the motion and a 90 deg
-# turn cancels (0.45 m -> 0.05 m false motion). The image itself is not flipped.
+# The Pi encoder's vector rows are vertically mirrored relative to the camera
+# image on the DD24 (the image itself is not flipped). Without this, forward/back
+# reads inverted and turning reads as sideways motion.
 flip_vectors_vertically: true

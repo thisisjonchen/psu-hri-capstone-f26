@@ -5,7 +5,7 @@ velocity error (m/s) -> PI -> horizontal acceleration (m/s^2) -> lean angle atan
 
 Axes are the controller body frame: x = right (roll), y = forward (pitch).
 Positive roll/pitch commands lean right/forward. Both axes share one tuning.
-Acceleration feed-forward belongs with a planned path (step 8), not here.
+Acceleration feed-forward belongs with a planned trajectory, not here.
 """
 from __future__ import division
 
