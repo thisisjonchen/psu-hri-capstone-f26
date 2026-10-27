@@ -46,3 +46,4 @@ screen -t "routine" /bin/bash -ic 'source scripts/screen_node.sh check; exec /bi
 screen -t "free1"/bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
 screen -t "TagMap" /bin/bash -ic 'source scripts/screen_node.sh tagmap; exec /bin/bash --norc -i'
 screen -t "free2" /bin/bash -ic 'source scripts/screen_node.sh shell; exec /bin/bash --norc -i'
+screen -t "Payload" /bin/bash -ic 'source scripts/screen_node.sh payload; exec /bin/bash --norc -i'

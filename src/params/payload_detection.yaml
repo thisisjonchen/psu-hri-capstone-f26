@@ -1,0 +1,12 @@
+# Starting values only: tune against the actual payload in the working zone.
+# OpenCV uint8 HSV: hue 0..179, saturation/value 0..255.
+hsv_lower: [20, 100, 80]
+hsv_upper: [40, 255, 255]
+# Minimum contour area as a fraction of the complete image.
+min_area_fraction: 0.002
+# Associate candidates within this fraction of the image diagonal.
+# After a gap, discard association and acquire the largest yellow region again.
+max_center_jump_fraction: 0.25
+track_timeout: 0.5
+camera_timeout: 0.5
+rate: 10
