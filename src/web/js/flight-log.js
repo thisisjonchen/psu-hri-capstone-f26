@@ -35,17 +35,26 @@ const LOG_GRAPHS = [
     note: { raw: 'ToF slant range', processed: 'Fused height' } },
   { id: 'velocity', title: 'Horizontal velocity', unit: 'm/s', staged: true, series: [['x', 'x (right)'], ['y', 'y (forward)']],
     note: { raw: 'Optical flow, body frame', processed: 'Fused velocity, body frame' } },
+  { id: 'odometry', title: 'Odometry position', unit: 'm', series: [['x', 'x'], ['y', 'y']],
+    note: 'Local odometry: the position that hold uses' },
   { id: 'position', title: 'UWB position', unit: 'm', staged: true, series: [['x', 'x'], ['y', 'y']],
     note: { raw: 'UWB fix, map frame', processed: 'Fused position, map frame' } },
   { id: 'throttle', title: 'Throttle command', unit: 'PWM', series: [['throttle', 'Throttle']],
     note: 'Command sent to the FC' },
+  { id: 'commands', title: 'Attitude commands', unit: 'PWM', series: [['roll', 'Roll'], ['pitch', 'Pitch'], ['yaw', 'Yaw']],
+    note: 'Commands sent to the FC (1500 = level)' },
   { id: 'motors', title: 'Motor outputs', unit: 'PWM', series: [['m1', 'Motor 1'], ['m2', 'Motor 2'], ['m3', 'Motor 3'], ['m4', 'Motor 4']],
     note: 'Outputs from the FC to the ESCs' },
   { id: 'flow', title: 'Optical-flow blocks', unit: 'blocks', series: [['blocks', 'Blocks']],
-    note: 'Blocks used per camera frame (0 = rejected)' },
+    note: 'Blocks used per camera frame (0 = rejected or zero)' },
+  { id: 'flowstatus', title: 'Optical-flow status', unit: 'state', series: [['status', 'Status']], stepped: true,
+    note: 'Zero means motion below one pixel per frame, reported as 0 m/s',
+    ticks: { min: 0, max: 2, stepSize: 1, callback: value => FLOW_STATUS[value] || '' } },
   { id: 'interval', title: 'Sample interval', unit: 'ms', series: [['imu', 'IMU'], ['flight_raw', 'Raw IMU'], ['range', 'ToF'], ['flow', 'Camera'], ['uwb', 'UWB']],
     note: 'Time between consecutive samples' }
 ];
+// FlowQuality.msg: rejected frames are invalid; valid frames with no blocks saw under one pixel of motion.
+const FLOW_STATUS = ['rejected', 'zero', 'measured'];
 const LOG_UNITS = Object.fromEntries(LOG_GRAPHS.map(graph => [graph.id, graph.unit]));
 
 function stampSeconds(message) {
@@ -183,16 +192,21 @@ class FlightLog {
       const t = this.sample('state', m, false), p = m.pose_with_covariance.pose.position, v = m.twist_with_covariance.twist.linear;
       this.add('height.processed.height', t, p.z);
       this.addAll('velocity.processed', t, { x: v.x, y: v.y });
+      this.addAll('odometry', t, { x: p.x, y: p.y });
     } else if (key === 'flow') {
       const t = this.sample('flow_twist', m, false), v = m.twist.linear;
       this.addAll('velocity.raw', t, { x: v.x, y: v.y });
     } else if (key === 'flow_quality') {
-      this.add('flow.blocks', this.sample('flow', m), m.valid ? m.blocks : 0);
+      const t = this.sample('flow', m);
+      this.add('flow.blocks', t, m.valid ? m.blocks : 0);
+      this.add('flowstatus.status', t, !m.valid ? 0 : m.blocks > 0 ? 2 : 1);
     } else if (key === 'uwb' || key === 'fused') {
       const t = this.sample(key, m, key === 'uwb'), p = m.pose.pose.position;
       this.addAll(key === 'uwb' ? 'position.raw' : 'position.processed', t, { x: p.x, y: p.y });
     } else if (key === 'commands') {
-      this.add('throttle.throttle', this.droneTime(), m.throttle);
+      const t = this.droneTime();
+      this.add('throttle.throttle', t, m.throttle);
+      this.addAll('commands', t, { roll: m.roll, pitch: m.pitch, yaw: m.yaw });
     }
   }
 
@@ -271,7 +285,7 @@ class LogsView {
       type: 'line',
       data: { datasets: graph.series.map(([, label], i) => ({
         label, data: [], borderColor: LOG_COLORS[i], backgroundColor: LOG_COLORS[i],
-        borderWidth: 1.5, pointRadius: 0, pointHitRadius: 4, fill: false, lineTension: 0
+        borderWidth: 1.5, pointRadius: 0, pointHitRadius: 4, fill: false, lineTension: 0, steppedLine: !!graph.stepped
       })) },
       options: {
         responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
@@ -280,7 +294,7 @@ class LogsView {
         scales: {
           xAxes: [{ id: 'log-x', type: 'linear', ticks: { min: 0, max: 10 }, gridLines: { color: '#e4eaf2' },
             scaleLabel: { display: true, labelString: 'Time since Pre-Arm (s)' } }],
-          yAxes: [{ id: 'log-y', ticks: {}, gridLines: { color: '#e4eaf2' } }]
+          yAxes: [{ id: 'log-y', ticks: graph.ticks || {}, gridLines: { color: '#e4eaf2' } }]
         },
         flightLog: () => this.log
       },
