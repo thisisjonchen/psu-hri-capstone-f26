@@ -55,9 +55,9 @@ add_message_files(
   TagDetection.msg
   TagCorners.msg
   TagMap.msg
-  TagWaypointMap.msg
   AnchorLayout.msg
   PeerState.msg
+  FlightReadiness.msg
 
 )
 

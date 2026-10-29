@@ -294,6 +294,8 @@ class FusionNodeTest(unittest.TestCase):
             setattr(sys.modules['std_msgs.msg'], name, NS)
         sys.modules['nav_msgs.msg'].Odometry = lambda: NS(header=NS(), child_frame_id='')
         sys.modules['pidrone_pkg.msg'].State = state
+        sys.modules['pidrone_pkg.msg'].FlightReadiness = lambda: NS(
+            header=NS(stamp=Stamp(0), frame_id=''), mode='', paired=False, ready=False, reason='')
         sys.modules['pidrone_pkg.msg'].TagCorners = NS
         sys.modules['sensor_msgs.msg'].CameraInfo = NS
         sys.modules['pidrone_pkg.msg'].Mode = sys.modules['pidrone_pkg.msg'].RC = NS

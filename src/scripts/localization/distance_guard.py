@@ -11,14 +11,13 @@ STATE_TIMEOUT = 0.5
 
 
 def automatic_coordination(geometry, settings, master_uri):
-    """Identify our separate ROS master, never the Docker container hostname."""
+    """Get the drone identities from ROS_MASTER_URI."""
     config = dict(geometry)
     config.update(settings)
-    if config.get('enabled') is False:
-        return config
+    # Ignore the old switch for disabling paired protection.
+    config.pop('enabled', None)
     host = urlparse(master_uri).hostname
     identities = {'drone1': 'drone2', 'drone2': 'drone1'}
-    # Only accept our known hostnames, including their mDNS form.
     own = host[:-6] if host and host.endswith('.local') else host
     if own not in identities:
         raise ValueError('Cannot identify drone from ROS_MASTER_URI; use drone1/drone2 '
@@ -52,6 +51,20 @@ class DistanceGuard(object):
         self.minimum, self.maximum = minimum, maximum
         self.nominal, self.follow_peer = nominal, follow_peer
         self.gain, self.speed_limit = gain, speed_limit
+
+    def preflight(self, own, peer, margin):
+        """Check separation after allowing for position uncertainty."""
+        distance = math.hypot(own[0] - peer[0], own[1] - peer[1])
+        if not finite(tuple(own) + tuple(peer) + (distance, margin)) or margin < 0:
+            raise ValueError('invalid separation state')
+        minimum, maximum = self.minimum + margin, self.maximum - margin
+        if minimum >= maximum or not minimum <= self.nominal <= maximum:
+            return 'uncertainty_too_large'
+        if distance <= minimum:
+            return 'too_close'
+        if distance >= maximum:
+            return 'too_far'
+        return ''
 
     def filter(self, own, peer, peer_velocity, requested, margin):
         """Limit relative radial velocity; retain tangential route motion if feasible.

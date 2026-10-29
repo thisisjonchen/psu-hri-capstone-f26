@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relay map-frame peer telemetry between drone1 and drone2; never send route commands."""
+"""Relay map-frame peer telemetry between drone1 and drone2."""
 import argparse
 from contextlib import ExitStack
 import json
@@ -22,6 +22,7 @@ TOPICS = {
     'mode': ('/pidrone/mode', 'pidrone_pkg/Mode'),
 }
 PEER_TOPIC = '/pidrone/coordination/peer'
+PREVIEW_TOPIC = '/pidrone/coordination/peer_preview'
 
 
 def stamp(header):
@@ -35,7 +36,8 @@ class Client:
         for key, (topic, kind) in TOPICS.items():
             self.send({'op': 'subscribe', 'id': key, 'topic': topic, 'type': kind,
                        'queue_length': 1, 'throttle_rate': 50})
-        self.send({'op': 'advertise', 'topic': PEER_TOPIC, 'type': 'pidrone_pkg/PeerState'})
+        for topic in (PEER_TOPIC, PREVIEW_TOPIC):
+            self.send({'op': 'advertise', 'topic': topic, 'type': 'pidrone_pkg/PeerState'})
         threading.Thread(target=self.receive, daemon=True).start()
 
     def send(self, message):
@@ -67,8 +69,8 @@ def read_state(snapshot, now, received_now):
             raise ValueError('missing/stale ' + key)
     data = {key: snapshot[key][0] for key in TOPICS}
     pose, odom, anchors = (data[key] for key in ('pose', 'odom', 'anchors'))
-    if not data['ready']['data'] or data['mode']['mode'] != 'FLYING':
-        raise ValueError('both drones need fresh localization and FLYING mode')
+    if not data['ready']['data']:
+        raise ValueError('both drones need fresh localization')
     for message in (pose, odom, anchors):
         if not fresh(stamp(message['header']), now):
             raise ValueError('old/future sensor timestamp; check clock synchronization')
@@ -100,11 +102,15 @@ def read_state(snapshot, now, received_now):
         raise ValueError('invalid anchor geometry')
     oldest = min((pose['header'], odom['header']), key=stamp)
     return {'header': dict(oldest, frame_id=frame), 'pose': pose['pose'], 'velocity': world,
-            'generation': data['generation']['data'], 'layout': layout}
+            'generation': data['generation']['data'], 'layout': layout, 'mode': data['mode']['mode']}
 
 
 def peer_messages(snapshots, now, received_now):
     states = [read_state(snapshot, now, received_now) for snapshot in snapshots]
+    modes = [state['mode'] for state in states]
+    if any(mode not in ('DISARMED', 'ARMED', 'FLYING') for mode in modes):
+        raise ValueError('both drones need a known flight mode')
+    topic = PEER_TOPIC if modes == ['FLYING', 'FLYING'] else PREVIEW_TOPIC
     if (states[0]['layout'] != states[1]['layout'] or
             states[0]['header']['frame_id'] != states[1]['header']['frame_id']):
         raise ValueError('drones must share the same surveyed anchor map')
@@ -114,10 +120,10 @@ def peer_messages(snapshots, now, received_now):
         messages.append({'header': peer['header'], 'pose': peer['pose'], 'velocity': peer['velocity'],
                          'drone_id': 'drone%d' % (2-recipient), 'recipient_id': 'drone%d' % (recipient+1),
                          'recipient_generation': states[recipient]['generation']})
-    return messages
+    return topic, messages
 
 
-def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090'), enabled=None):
+def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
     """Wait for both ROS connections and reconnect until the laptop server stops."""
     from websockets.sync.client import connect
     from websockets.exceptions import WebSocketException
@@ -136,20 +142,16 @@ def run(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090'), en
                 for url in endpoints:
                     if stop.is_set():
                         return
-                    # Drone endpoints are on the local network, outside laptop proxies.
-                    # Allow delayed pongs; STATE_TIMEOUT still rejects stale telemetry after 0.5 s.
+                    # Connect directly to the drones; telemetry still expires after 0.5 s.
                     clients.append(Client(stack.enter_context(connect(
                         url, proxy=None, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=5))))
                 while not stop.is_set():
-                    if enabled is not None and not enabled.is_set():
-                        report('Peer relay disabled.')
-                        stop.wait(.1)
-                        continue
                     try:
-                        messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
+                        topic, messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
                         for client, message in zip(clients, messages):
-                            client.send({'op': 'publish', 'topic': PEER_TOPIC, 'msg': message})
-                        status = 'Relaying peer telemetry; routes remain under their existing controllers.'
+                            client.send({'op': 'publish', 'topic': topic, 'msg': message})
+                        status = ('Relaying preflight peer telemetry.' if topic == PREVIEW_TOPIC
+                                  else 'Relaying flight peer telemetry.')
                     except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
                         status = 'Peer relay paused: ' + str(error)
                     report(status)
@@ -170,7 +172,7 @@ def main():
     try:
         run(stop, (args.drone1, args.drone2))
     except KeyboardInterrupt:
-        print('\nRelay stopped; enabled onboard distance controllers will request XY braking on stale peer data.')
+        print('\nRelay stopped; paired flights will request XY braking on stale peer data.')
     finally:
         stop.set()
     return 0

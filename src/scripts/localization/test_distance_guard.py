@@ -40,6 +40,9 @@ class DistanceControlTest(unittest.TestCase):
                 DistanceGuard(minimum, maximum, nominal, .4, .15)
         command, status = guard.filter((0, 0), (1.5, 0), (0, 0), (.1, 0), .6)
         self.assertEqual((command, status), ((0, 0), 'uncertainty_too_large'))
+        for gap, margin, reason in [(1.5, .12, ''), (.72, .12, 'too_close'),
+                                   (1.88, .12, 'too_far'), (1.5, .6, 'uncertainty_too_large')]:
+            self.assertEqual(guard.preflight((0, 0), (gap, 0), margin), reason)
 
     def test_follower_returns_to_nominal_even_with_opposing_route_requests(self):
         follower = DistanceGuard(1.2, 1.8, 1.5, .4, .15, follow_peer=True)
@@ -79,9 +82,51 @@ class DistancePIDTest(unittest.TestCase):
                   drone_id='drone1', recipient_id='drone2', recipient_generation=0,
                   pose=pose, velocity=NS(x=0, y=0, z=0))
 
-    def test_automatic_identity_and_explicit_solo_configuration(self):
+    def test_paired_preflight_requires_fresh_comparable_positions_and_clearance(self):
+        self.c.current_mode_callback(NS(mode='DISARMED'))
+        self.c.coordination_selection_callback(NS(data=True))
+        self.assertEqual(self.c.flight_readiness().reason, 'peer_state_stale')
+        peer = self.peer()
+        peer.header.stamp = Stamp(self.fixture.ros_now - .1)
+        self.c.peer_preview_callback(peer)
+        report = self.c.flight_readiness()
+        self.assertTrue(report.ready)
+        self.assertTrue(report.paired)
+        self.assertEqual(report.header.stamp.to_sec(), peer.header.stamp.to_sec())
+        self.assertIsNone(self.c.peer_state, 'preflight must not enable the flight guard')
+        peer.recipient_generation = 99
+        self.assertEqual(self.c.flight_readiness().reason, 'reference_mismatch')
+        peer.recipient_generation = 0
+        peer.pose.covariance[0] = .15 ** 2
+        self.assertEqual(self.c.flight_readiness().reason, 'uncertainty_too_large')
+        peer.pose.covariance[0] = .0004
+        self.c.room_ready_callback(NS(data=False))
+        self.assertEqual(self.c.flight_readiness().reason, 'local_position_unavailable')
+        self.c.room_ready_callback(NS(data=True))
+        self.c.current_mode_callback(NS(mode='ARMED'))
+        self.assertFalse(self.c.flight_readiness().ready, 'arming requires a new takeoff check')
+        self.c.peer_preview_callback(peer)
+        self.assertTrue(self.c.flight_readiness().ready)
+        self.fixture.now += .51  # Let the relay time out without advancing ROS time.
+        self.c.peer_preview_callback(peer)
+        self.assertFalse(self.c.flight_readiness().ready)
+
+    def test_solo_preflight_needs_current_selection_and_local_estimate_but_not_uwb(self):
+        self.c.current_mode_callback(NS(mode='DISARMED'))
+        self.c.room_ready_callback(NS(data=False))
+        self.assertEqual(self.c.flight_readiness().reason, 'flight_setup_unavailable')
+        self.c.coordination_selection_callback(NS(data=False))
+        self.assertTrue(self.c.flight_readiness().ready)
+        self.assertFalse(self.c.flight_readiness().paired)
+        self.c.local_ready_callback(NS(data=False))
+        self.assertEqual(self.c.flight_readiness().reason, 'local_estimate_unavailable')
+        self.c.local_ready_callback(NS(data=True))
+        self.fixture.now += 2.1
+        self.assertEqual(self.c.flight_readiness().reason, 'flight_setup_unavailable')
+
+    def test_automatic_identity_and_legacy_flag_cannot_disable_paired_protection(self):
         geometry = {'nominal_separation_m': 1.5, 'payload_drop_m': .5}
-        settings = {'enabled': True, 'min_distance': 1.2, 'max_distance': 1.8}
+        settings = {'enabled': False, 'min_distance': 1.2, 'max_distance': 1.8}
         for own, peer in [('drone1', 'drone2'), ('drone2', 'drone1')]:
             for suffix in ('', '.local'):
                 config = automatic_coordination(geometry, settings, 'http://%s%s:11311' % (own, suffix))
@@ -94,12 +139,15 @@ class DistancePIDTest(unittest.TestCase):
         for uri in ('', 'http://localhost:11311', 'http://container-id:11311'):
             with self.assertRaises(ValueError):
                 automatic_coordination(geometry, settings, uri)
-        settings['enabled'] = False
-        self.fixture.params['/pidrone/coordination'] = automatic_coordination(geometry, settings, '')
+        # Also check parameters left over from an older ROS session.
+        config['enabled'] = False
+        self.fixture.params['/pidrone/coordination'] = config
         controller = self.fixture.controller()
-        self.assertIsNone(controller.coordination_config)
-        self.assertIsNone(controller.distance_guard)
-        self.assertEqual(controller.coordination_status, 'disabled')
+        self.assertIsNotNone(controller.distance_guard)
+        controller.desired_velocity.x = .05
+        controller.calc_error()
+        self.assertEqual(controller.coordination_status, 'peer_state_stale')
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
 
     def test_filters_route_velocity_after_body_conversion_without_replacing_command(self):
         # At map yaw +90 degrees, body +Y points map -X (away from this peer).
@@ -130,6 +178,8 @@ class DistancePIDTest(unittest.TestCase):
             controller.room_pose.pose.covariance[7] = .01
             peer = self.peer()
             peer.drone_id, peer.recipient_id = other, own
+            peer.pose.pose.position.x = controller.room_pose.pose.pose.position.x + 1.
+            peer.header.stamp = Stamp(self.fixture.ros_now - .1)
             controller.peer_state_callback(peer)
             command = helpers.twist()
             command.linear.y = .5
@@ -142,7 +192,23 @@ class DistancePIDTest(unittest.TestCase):
             self.assertIn('filtered=(0.000, 0.000) coordination=uncertainty_too_large', message)
             self.assertEqual(controller.current_mode, 'FLYING')
 
-    def test_base_selection_is_latched_until_disarm_and_missing_selection_is_not_solo(self):
+    def test_preflight_peer_cannot_activate_or_feed_flight_protection(self):
+        self.c.current_mode_callback(NS(mode='DISARMED'))
+        peer = self.peer()
+        self.c.peer_preview_callback(peer)
+        self.c.calc_error()
+        self.assertIsNone(self.c.peer_state)
+        self.assertEqual(self.c.coordination_status, 'inactive')
+        self.c.coordination_selection_callback(NS(data=False))
+        self.c.current_mode_callback(NS(mode='ARMED'))
+        self.c.current_mode_callback(NS(mode='FLYING'))
+        self.c.peer_preview_callback(self.peer())
+        self.c.calc_error()
+        self.assertEqual(self.c.coordination_status, 'solo')
+        self.assertIsNone(self.c.peer_state)
+        self.assertIsNone(self.c.peer_preview)
+
+    def test_solo_flight_enables_protection_on_peer_arrival_and_keeps_it_until_disarm(self):
         self.c.current_mode_callback(NS(mode='DISARMED'))
         self.c.coordination_selection_callback(NS(data=False))
         self.c.current_mode_callback(NS(mode='ARMED'))
@@ -154,11 +220,12 @@ class DistancePIDTest(unittest.TestCase):
         self.c.calc_error()
         self.assertGreater(self.c.pid_error.x, 0)
         self.assertEqual(self.c.coordination_status, 'solo')
-        self.c.current_mode_callback(NS(mode='DISARMED'))
-        self.c.coordination_selection_callback(NS(data=True))
-        self.c.current_mode_callback(NS(mode='ARMED'))
+        self.c.peer_state_callback(self.peer())  # Peer joins the solo flight.
+        self.c.calc_error()
+        self.assertTrue(self.c.coordination_active)
+        self.assertNotEqual(self.c.coordination_status, 'solo')
         self.c.coordination_selection_callback(NS(data=False))  # Peer/base disconnects.
-        self.c.current_mode_callback(NS(mode='FLYING'))
+        self.fixture.now += .6
         self.c.calc_error()
         self.assertTrue(self.c.coordination_active)
         self.assertEqual(self.c.coordination_status, 'peer_state_stale')
@@ -178,7 +245,7 @@ class DistancePIDTest(unittest.TestCase):
         self.c.calc_error()
         self.assertGreater(self.c.pid_error.y, 0)
         self.assertLess(self.c.pid_error.x, 0, 'restore nominal spacing even inside the min/max band')
-        # A frozen ROS clock cannot conceal a dead relay.
+        # Let the relay time out without advancing ROS time.
         self.fixture.now += .6
         self.c.peer_state_callback(peer)
         self.c.calc_error()
@@ -249,7 +316,8 @@ class PeerRelayTest(unittest.TestCase):
 
     def test_peer_state_preserves_oldest_measurement_and_converts_velocity(self):
         snapshots = [self.snapshot(), self.snapshot()]
-        messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
+        topic, messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
+        self.assertEqual(topic, self.module['PEER_TOPIC'])
         for index, message in enumerate(messages):
             self.assertEqual(self.module['stamp'](message['header']), 99.95)
             self.assertEqual(message['header']['frame_id'], 'map')
@@ -257,7 +325,21 @@ class PeerRelayTest(unittest.TestCase):
             self.assertAlmostEqual(message['velocity']['y'], .1)
             self.assertEqual(message['recipient_id'], 'drone%d' % (index+1))
             self.assertEqual(message['drone_id'], 'drone%d' % (2-index))
-        # Fresh network receipts must not refresh the age of old sensor data.
+        for snapshot in snapshots:
+            snapshot['mode'][0]['mode'] = 'DISARMED'
+        topic, preview = self.module['peer_messages'](snapshots, 100.1, 10.1)
+        self.assertEqual(topic, self.module['PREVIEW_TOPIC'])
+        self.assertEqual(preview, messages)
+        for modes in [('FLYING', 'DISARMED'), ('DISARMED', 'FLYING'), ('ARMED', 'ARMED')]:
+            for snapshot, mode in zip(snapshots, modes):
+                snapshot['mode'][0]['mode'] = mode
+            topic, preview = self.module['peer_messages'](snapshots, 100.1, 10.1)
+            self.assertEqual(topic, self.module['PREVIEW_TOPIC'])
+            self.assertEqual(preview, messages)
+        snapshots[0]['mode'][0]['mode'] = 'UNKNOWN'
+        with self.assertRaisesRegex(ValueError, 'known flight mode'):
+            self.module['peer_messages'](snapshots, 100.1, 10.1)
+        # Receiving an old measurement again must not make it fresh.
         snapshots = [{k: (v[0], 11) for k, v in s.items()} for s in snapshots]
         with self.assertRaisesRegex(ValueError, 'timestamp'):
             self.module['peer_messages'](snapshots, 101, 11)

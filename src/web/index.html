@@ -126,7 +126,7 @@
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
-      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p id="peer-relay-status" role="status">Change peer relay before arming. Off disables automatic spacing control; routine synchronization stays on.</p><p><strong>Keyboard shortcuts</strong></p>
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Solo or paired flight is selected automatically from the connected drones before arming. Connect both drones for paired flight. Paired protection stays on through disconnects. Check each drone’s preflight and Separation guard status below.</p><p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
@@ -144,7 +144,7 @@
           <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
           <button class="btn btn-danger" data-command="disarm">Disarm all</button>
         </div>
-        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><button class="btn btn-outline-secondary" id="peer-relay-toggle" type="button" aria-pressed="true" aria-describedby="peer-relay-status" disabled>Peer relay: loading</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
+        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
       </div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
       <div class="routine-terminals">
@@ -162,7 +162,8 @@
           <div class="status-grid" data-field="telemetry" aria-label="Drone 1 status" hidden>
             <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
-            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div><p data-field="preflight" role="status">Preflight unavailable</p></div>
+            <div class="status-card"><p>Separation guard</p><div class="status-value" data-field="coordination" role="status">Unavailable</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
               <summary aria-label="Drone 1 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">
@@ -182,7 +183,8 @@
           <div class="status-grid" data-field="telemetry" aria-label="Drone 2 status" hidden>
             <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
             <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
-            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div></div>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div><p data-field="preflight" role="status">Preflight unavailable</p></div>
+            <div class="status-card"><p>Separation guard</p><div class="status-value" data-field="coordination" role="status">Unavailable</div></div>
             <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
               <summary aria-label="Drone 2 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
               <div class="metric-content"><article class="metric-chart">

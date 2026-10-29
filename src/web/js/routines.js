@@ -1,24 +1,5 @@
 'use strict';
 
-function aprilTagOptions(args) {
-  const options = { drones: 'single' }, words = args.trim().split(/\s+/);
-  for (let i = 0; i < words.length; i++) {
-    if (words[i] === '--fly') continue;
-    const [flag, inline] = words[i].split('=');
-    if (!['--drones', '--tags'].includes(flag)) throw new Error('Use --fly, --drones single|both, and --tags 1,2,3.');
-    options[flag.slice(2)] = inline === undefined ? words[++i] : inline;
-  }
-  if (!['single', 'both'].includes(options.drones) || !/^\d+(,\d+)*$/.test(options.tags || '')) {
-    throw new Error('Choose --drones single or both and an ordered --tags list.');
-  }
-  options.tags = options.tags.split(',').map(Number);
-  if (options.tags.length > 12 || new Set(options.tags).size !== options.tags.length ||
-      options.tags.some(id => !Number.isSafeInteger(id) || id > 2147483647)) {
-    throw new Error('Use up to 12 distinct tag IDs.');
-  }
-  return options;
-}
-
 // Each terminal attaches to its drone's `pidrone` screen session through the laptop
 // server. Connect opens it in start mode: the nodes start in the terminal, so their
 // startup output is visible. Disconnect detaches; routines keep running on the drone.
@@ -237,18 +218,7 @@ class RoutineRunner {
     const args = this.args.value.trim();
     const targets = this.active;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
-    let stages = [], plan = null;
-    if (script === 'prototype-1-apriltag.py') {
-      try {
-        const options = aprilTagOptions(args);
-        if (targets.length !== (options.drones === 'both' ? 2 : 1)) {
-          throw new Error('Connect ' + (options.drones === 'both' ? 'both drones' : 'exactly one drone') + ' for this mode.');
-        }
-        plan = makeAprilTagPlan(targets.map(terminal => terminal.id), options.tags);
-        stages = options.tags.map((_, i) => 'tag-' + i).concat('land');
-      } catch (error) { feedback(error.message); return; }
-    }
-    awaitSyncStart(targets.map(terminal => terminal.id), stages, plan);
+    awaitSyncStart(targets.map(terminal => terminal.id));
     const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));
     if (results.every(result => result.status === 'fulfilled')) confirmSyncStart();
     else awaitSyncStart(null);

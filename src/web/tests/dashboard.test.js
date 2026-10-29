@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // Test command routing without opening network sockets or contacting hardware.
-function dashboard({ discover = true, calibrationFetch = null, relayFetch = null } = {}) {
+function dashboard({ discover = true, calibrationFetch = null } = {}) {
   const listeners = {};
   const events = [];
   const retries = [];
@@ -48,8 +48,7 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
   }
   for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
-    'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status',
-    'peer-relay-toggle', 'peer-relay-status']) elements.set(id, element());
+    'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
   for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
   elements.get('calibration-panel').hidden = true;
   elements.get('calibration-success').hidden = true;
@@ -111,10 +110,6 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
     AbortSignal,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     fetch(url, options = {}) {
-      if (url === '/api/peer-relay') {
-        if (relayFetch) return relayFetch(options);
-        return Promise.resolve({ ok: true, json: async () => ({ enabled: true }) });
-      }
       assert.equal(url, '/api/calibration');
       if (options.method === 'POST') {
         assert.equal(options.headers['X-Calibration-Request'], '1');
@@ -143,7 +138,7 @@ function dashboard({ discover = true, calibrationFetch = null, relayFetch = null
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
   listeners.DOMContentLoaded();
-  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart, makeAprilTagPlan })', context);
+  const api = vm.runInContext('({ drones, fleetMap, anchorCalibration, dispatch, heldKeys, connectDrone, currentTarget, awaitSyncStart, confirmSyncStart })', context);
   const receive = (drone, name, message) => drone.subscribers.find(topic => topic.name === name).receive(message);
   const connect = id => {
     api.drones[id].connect(); api.drones[id].ros.open();
@@ -166,12 +161,14 @@ const anchorsAt = (secs, points = [[0, 0, 2.25], [3, 0, 2.25], [3, 6, 2.25], [0,
   positions: points.map(([x, y, z]) => ({ x, y, z }))
 });
 
-test('coordination selects solo or paired while disarmed and keeps the selection during staggered arming', () => {
+test('connections select solo or paired, and disconnects cannot turn off paired protection after arming', () => {
   const app = dashboard();
   const a = app.connect('drone1');
+  assert.equal(a.publishers.coordination.messages.length, 0, 'wait for a fresh flight mode');
   app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
   assert.equal(last(a, 'coordination').data, false);
   const b = app.connect('drone2');
+  assert.equal(b.publishers.coordination.messages.length, 0, 'wait for the new drone’s flight mode');
   app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
   assert.equal(last(a, 'coordination').data, true);
   assert.equal(last(b, 'coordination').data, true);
@@ -184,55 +181,54 @@ test('coordination selects solo or paired while disarmed and keeps the selection
   app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
   b.connect(); b.ros.open();
   app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
-  assert.equal(last(b, 'coordination').data, false);
+  assert.equal(last(b, 'coordination').data, true);
   const count = b.publishers.coordination.messages.length;
   app.advanceTime(2000);
   app.maintenanceTimers.forEach(callback => callback());
   assert.equal(b.publishers.coordination.messages.length, count);
 });
 
-test('peer relay toggle selects independent control before flight and locks while armed', async () => {
-  let enabled = true;
-  let fail = false;
-  const writes = [];
-  const app = dashboard({ relayFetch: async options => {
-    if (options.method === 'POST') {
-      if (fail) throw new Error('server unavailable');
-      assert.equal(options.headers['X-Routine-Request'], '1');
-      enabled = JSON.parse(options.body).enabled;
-      writes.push(enabled);
-    }
-    return { ok: true, json: async () => ({ enabled }) };
-  } });
-  await new Promise(resolve => setImmediate(resolve));
+test('preflight shows onboard refusal and expires grants at the source timestamp', () => {
+  const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
-  const button = app.elements.get('peer-relay-toggle');
-  assert.equal(button.disabled, false);
-  await button.listeners.click();
-  assert.deepEqual(writes, [false]);
-  assert.equal(last(a, 'coordination').data, false);
-  assert.equal(last(b, 'coordination').data, false);
-  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
-  assert.equal(button.disabled, true);
-  await button.listeners.click();
-  assert.deepEqual(writes, [false]);
-  assert.equal(last(b, 'coordination').data, false);
-  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
-  await button.listeners.click();
-  assert.deepEqual(writes, [false, true]);
-  assert.equal(last(a, 'coordination').data, true);
-  assert.equal(last(b, 'coordination').data, true);
-  app.advanceTime(1600);
-  await button.listeners.click();
-  assert.deepEqual(writes, [false, true], 'stale mode must not allow toggling');
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
-  fail = true;
-  await button.listeners.click();
-  assert.equal(last(a, 'coordination').data, true, 'failed toggle must not select independent control');
-  assert.equal(last(b, 'coordination').data, true);
-  assert.equal(button.disabled, true);
-  assert.match(app.elements.get('peer-relay-status').textContent, /unavailable/);
+  const report = { ...stamp(1), mode: 'DISARMED', paired: true, ready: false, reason: 'uncertainty_too_large' };
+  app.receive(a, '/pidrone/coordination/preflight', report);
+  assert.match(a.field('preflight').textContent, /blocked · uncertainty too large/);
+  report.ready = true;
+  report.reason = 'ready';
+  app.receive(a, '/pidrone/coordination/preflight', report);
+  assert.match(a.field('preflight').textContent, /ready · paired/);
+  app.advanceTime(400);
+  app.receive(a, '/pidrone/coordination/preflight', report);
+  app.advanceTime(101);
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+  app.receive(a, '/pidrone/coordination/preflight', report);
+  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+  a.disconnect();
+  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+});
+
+test('separation status comes from each onboard guard and expires on silence or disconnect', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const status = drone => drone.field('coordination').textContent;
+  assert.equal(status(a), 'Unavailable');
+  app.receive(a, '/pidrone/coordination/status', { data: 'clear' });
+  app.receive(b, '/pidrone/coordination/status', { data: 'disabled' });
+  assert.equal(status(a), 'Active · clear');
+  assert.equal(status(b), 'Disabled on drone');
+  app.receive(a, '/pidrone/coordination/status', { data: 'uncertainty_too_large' });
+  assert.equal(status(a), 'uncertainty too large');
+  app.advanceTime(501);
+  app.maintenanceTimers.forEach(callback => callback());
+  for (const drone of [a, b]) assert.equal(status(drone), 'Unavailable');
+  app.receive(a, '/pidrone/coordination/status', { data: 'clear' });
+  app.receive(b, '/pidrone/coordination/status', { data: 'solo' });
+  a.disconnect();
+  assert.equal(status(a), 'Unavailable');
+  assert.equal(status(b), 'Solo flight');
 });
 
 test('room targets require live fused localization and explicit send, stay isolated, and stop on conflict', () => {
@@ -333,12 +329,11 @@ test('shared commands reach both bridges and individual commands only their targ
   }
 });
 
-for (const enabled of [true, false]) {
-test(`synchronized start waits for both drones with peer relay ${enabled ? 'on' : 'off'}`, async () => {
-  const app = dashboard({ relayFetch: async () => ({ ok: true, json: async () => ({ enabled }) }) });
-  await new Promise(resolve => setImmediate(resolve));
+test('synchronized start waits for both drones with mandatory paired protection', () => {
+  const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  const starts = () => [a, b].map(drone => drone.publishers.routineStart.messages.length);
+  const publishers = [a, b].map(drone => drone.publishers.routineStart);
+  const starts = () => publishers.map(topic => topic.messages.length);
   assert.ok(a.publishers.routineStart.advertised && b.publishers.routineStart.advertised);
   for (const drone of [a, b]) {
     app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
@@ -354,7 +349,7 @@ test(`synchronized start waits for both drones with peer relay ${enabled ? 'on' 
   assert.deepEqual(starts(), [0, 0]); // Wait for both HTTP launches to succeed too.
   app.confirmSyncStart();
   assert.deepEqual(starts(), [1, 1]);
-  for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, enabled);
+  for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, true);
   app.receive(a, '/pidrone/routine/ready', {});
   app.receive(b, '/pidrone/routine/ready', {});
   assert.deepEqual(starts(), [1, 1]);  // Released once per Execute.
@@ -368,46 +363,12 @@ test(`synchronized start waits for both drones with peer relay ${enabled ? 'on' 
   app.dispatch('disarm', 'both');
   for (const drone of [a, b]) app.receive(drone, '/pidrone/routine/ready', {});
   assert.deepEqual(starts(), [1, 1]);
-});
-
-test(`flight stages wait for both drones with peer relay ${enabled ? 'on' : 'off'}`, async () => {
-  const app = dashboard({ relayFetch: async () => ({ ok: true, json: async () => ({ enabled }) }) });
-  await new Promise(resolve => setImmediate(resolve));
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  const begin = () => {
-    app.awaitSyncStart(['drone1', 'drone2'], ['forward', 'land']);
-    for (const drone of [a, b]) {
-      app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
-      app.receive(drone, '/pidrone/routine/ready', {});
-    }
-    app.confirmSyncStart();
-    return JSON.parse(last(a, 'stageRelease').data).run;
-  };
-  const oldRun = begin(), run = begin();
-  const ready = (drone, stage, token = run) => app.receive(drone, '/pidrone/routine/stage_ready',
-    { data: JSON.stringify({ run: token, stage }) });
-  const stage = drone => JSON.parse(last(drone, 'stageRelease').data).stage;
-  ready(a, 'forward'); ready(b, 'forward');
-  assert.equal(stage(a), 'start'); // Both must actually be flying.
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
-  app.advanceTime(600);
-  ready(a, 'forward');
-  ready(b, 'forward', oldRun);
-  assert.equal(stage(a), 'start'); // Stale readiness and earlier run cannot release.
-  ready(b, 'forward');
-  assert.equal(stage(a), 'forward'); assert.equal(stage(b), 'forward');
-  ready(a, 'land'); ready(b, 'forward');
-  assert.equal(stage(a), 'forward'); // One drone is still completing movement.
-  ready(b, 'land');
-  assert.equal(stage(a), 'land'); assert.equal(stage(b), 'land');
-  for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, enabled);
-  const nextRun = begin();
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'FLYING' });
+  app.awaitSyncStart(['drone1', 'drone2']);
+  app.confirmSyncStart();
   b.disconnect();
-  ready(a, 'forward', nextRun);
-  assert.equal(stage(a), 'start');
+  app.receive(a, '/pidrone/routine/ready', {});
+  assert.deepEqual(starts(), [1, 1]); // A lost partner must not release a partial start.
 });
-}
 
 test('an offline partner blocks shared flight commands without queued or partial sends', () => {
   const app = dashboard();
@@ -1275,67 +1236,22 @@ test('mapped AprilTags follow changed positions across drones and clear on gener
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });
 
-test('tag route planning requires per-tag age, matching maps, and freezes the same plan for both drones', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  for (const [i, drone] of [a, b].entries()) {
-    app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
-    app.receive(drone, '/pidrone/localization/generation', { data: 7 });
-    app.receive(drone, '/pidrone/localization/fused', { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' },
-      pose: { pose: { position: { x: 1 + i * .75, y: 2, z: .05 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } });
-  }
-  const report = { header: { stamp: { secs: 100, nsecs: 0 }, frame_id: 'map' }, generation: 7,
-    tag_ids: [1, 2], zones: ['', ''], positions: [{ x: 1.5, y: 3, z: 0 }, { x: 1.5, y: 4, z: 0 }],
-    sample_counts: [3, 3], observed_at: [{ secs: 99, nsecs: 0 }, { secs: 99, nsecs: 0 }] };
-  app.receive(a, '/pidrone/apriltag/waypoints', {map: report, generation: report.generation, observed_at: report.observed_at});
-  const plan = app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]);
-  app.awaitSyncStart(['drone1', 'drone2'], ['tag-0', 'tag-1', 'land'], plan);
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/routine/ready', {});
-  app.confirmSyncStart();
-  assert.deepEqual(JSON.parse(last(a, 'stageRelease').data).plan, JSON.parse(last(b, 'stageRelease').data).plan);
-  assert.equal(JSON.parse(last(a, 'stageRelease').data).plan.points[0].stamp, 99);
-  assert.throws(() => app.makeAprilTagPlan(['drone1'], [1, 2]), /Connect only/);
-  app.fleetMap.waypointReports.drone1.tags[0].observedAt = undefined;
-  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
-  app.fleetMap.waypointReports.drone1.tags[0].observedAt = 99;
-  app.fleetMap.waypointReports.drone1.stamp = 250; // New snapshot cannot freshen old tag observations.
-  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
-  app.fleetMap.waypointReports.drone1.stamp = 100;
-  app.fleetMap.waypointReports.drone1.generation = 6;
-  assert.throws(() => app.makeAprilTagPlan(['drone1', 'drone2'], [1, 2]), /confirmed observation/);
-});
-
-test('forward shares only the start while AprilTag synchronizes each waypoint', async () => {
-  let released, error, sends = [];
+test('routine execution synchronizes start for one or two drones', async () => {
+  let released, sends = [];
   const context = vm.createContext({ document: { addEventListener() {} },
-    makeAprilTagPlan(ids, tags) { return { ids, tags }; },
-    awaitSyncStart(ids, stages, plan) { released = { ids, stages, plan }; },
-    confirmSyncStart() {}, feedback(message) { error = message; } });
+    awaitSyncStart(ids) { released = ids; }, confirmSyncStart() {} });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Runner = vm.runInContext('RoutineRunner', context);
-  for (const mode of ['forward', 'single', 'both']) {
+  for (const ids of [['drone2'], ['drone1', 'drone2']]) {
     const runner = Object.create(Runner.prototype);
-    Object.assign(runner, { select: { value: mode === 'forward' ? 'prototype-1-forward.py' : 'prototype-1-apriltag.py' },
-      args: { value: mode === 'forward' ? '--fly --distance .3' : '--fly --drones ' + mode + ' --tags 1,2' },
-      terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: true, ready: true,
-        execute() { sends.push(id); } })),
+    Object.assign(runner, { select: { value: 'prototype-1-forward.py' },
+      args: { value: '--fly --distance .3' },
+      terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: ids.includes(id), ready: true,
+        execute(script, args) { sends.push({ id, script, args }); } })),
       async run(label, targets, action) { return Promise.allSettled(targets.map(action)); } });
-    if (mode === 'single') {
-      await runner.execute();
-      assert.match(error, /exactly one/);
-      assert.equal(sends.length, 0);
-      runner.terminals[0].enabled = false; // Single works with Drone 2 as well.
-    }
     await runner.execute();
-    assert.deepEqual(Array.from(released.stages), mode === 'forward' ? [] : ['tag-0', 'tag-1', 'land']);
-    assert.deepEqual(Array.from(released.ids), mode === 'single' ? ['drone2'] : ['drone1', 'drone2']);
-    assert.equal(sends.length, mode === 'single' ? 1 : 2);
+    assert.deepEqual(Array.from(released), ids);
+    assert.deepEqual(sends, ids.map(id => ({ id, script: 'prototype-1-forward.py', args: '--fly --distance .3' })));
     sends = [];
-    if (mode === 'both') {
-      runner.terminals[1].enabled = false;
-      await runner.execute();
-      assert.match(error, /both drones/);
-      assert.equal(sends.length, 0);
-    }
   }
 });

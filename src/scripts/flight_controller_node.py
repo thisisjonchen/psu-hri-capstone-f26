@@ -21,8 +21,10 @@ from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
-from pidrone_pkg.msg import Battery, Mode, RC, State
+from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness
 from sensor_msgs.msg import Range
+from localization import monotonic
+from localization.distance_guard import fresh, STATE_TIMEOUT
 import os
 
 
@@ -54,6 +56,9 @@ class FlightController(object):
         self.curr_mode = 'DISARMED'         #initialize as disarmed
         self.prev_mode = 'DISARMED'         #initialize as disarmed
         self.mode_lock = threading.RLock()
+        self.preflight = self.preflight_received = self.preflight_stamp = None
+        self.coordination_selection = self.selection_received = None
+        self.flight_paired = None
         self.calibration_owner = rospy.get_param('/pidrone/localization/calibration_owner', '')
         self.calibration_request = ''
         # Clear the retired flight lock when upgrading an existing ROS session.
@@ -100,11 +105,62 @@ class FlightController(object):
     # ROS subscriber callback methods:
     ##################################
     def desired_mode_callback(self, msg):
-        """ Set the current mode to the desired mode """
+        """Check readiness before accepting an arm or takeoff request."""
         with self.mode_lock:
+            if msg.mode not in ('DISARMED', 'ARMED', 'FLYING'):
+                return
+            if (msg.mode in ('ARMED', 'FLYING') and self.curr_mode != 'FLYING'
+                    and msg.mode != self.curr_mode):
+                reason = self.preflight_failure()
+                if self.curr_mode == 'DISARMED' and msg.mode == 'FLYING':
+                    reason = 'arm_before_takeoff'
+                if reason:
+                    rospy.logwarn_throttle(1, 'Refusing %s: %s' % (msg.mode, reason))
+                    return
+                if self.curr_mode == 'DISARMED':
+                    self.flight_paired = self.preflight.paired
             self.prev_mode = self.curr_mode
             self.curr_mode = msg.mode
+            if self.prev_mode != self.curr_mode:
+                self.preflight = self.preflight_received = self.preflight_stamp = None
+            if self.curr_mode == 'DISARMED':
+                self.flight_paired = None
             self.update_command()
+
+    def coordination_selection_callback(self, msg):
+        with self.mode_lock:
+            if self.curr_mode == 'DISARMED':
+                if self.coordination_selection != msg.data:
+                    self.preflight = self.preflight_received = None
+                self.coordination_selection, self.selection_received = msg.data, monotonic()
+
+    def preflight_callback(self, msg):
+        with self.mode_lock:
+            stamp = msg.header.stamp.to_sec()
+            new_sample = self.preflight_stamp is None or stamp > self.preflight_stamp
+            if msg.ready and not new_sample:
+                return
+            if new_sample:
+                self.preflight_stamp, self.preflight_received = stamp, monotonic()
+            # A refusal still takes effect when its timestamp has not changed.
+            self.preflight = msg
+
+    def preflight_failure(self):
+        report = self.preflight
+        if (report is None or self.preflight_received is None
+                or not fresh(report.header.stamp.to_sec(), rospy.get_time())
+                or not 0 <= monotonic() - self.preflight_received <= STATE_TIMEOUT
+                or report.mode != self.curr_mode):
+            return 'preflight_unavailable'
+        if self.curr_mode == 'DISARMED':
+            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= 2.:
+                return 'flight_setup_unavailable'
+            paired = self.coordination_selection
+        else:
+            paired = self.flight_paired
+        if report.paired != paired:
+            return 'flight_setup_changed'
+        return '' if report.ready else (report.reason or 'preflight_not_ready')
 
     def calibration_owner_callback(self, msg):
         try:
@@ -383,6 +439,8 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
+    rospy.Subscriber('/pidrone/coordination/paired', Bool, fc.coordination_selection_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/preflight', FlightReadiness, fc.preflight_callback, queue_size=1)
     rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
