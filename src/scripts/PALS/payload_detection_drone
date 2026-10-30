@@ -17,7 +17,7 @@ from pidrone_pkg.msg import PayloadDetection
 
 class PayloadNode(object):
     def __init__(self):
-        self.lower = np.asarray(rospy.get_param('~hsv_lower', [20, 100, 80]), dtype=float)
+        self.lower = np.asarray(rospy.get_param('~hsv_lower', [20, 100, 40]), dtype=float)
         self.upper = np.asarray(rospy.get_param('~hsv_upper', [40, 255, 255]), dtype=float)
         if (self.lower.shape != (3,) or self.upper.shape != (3,)
                 or not np.all(np.isfinite(self.lower)) or not np.all(np.isfinite(self.upper))
