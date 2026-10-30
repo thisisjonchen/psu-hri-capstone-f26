@@ -58,6 +58,7 @@ add_message_files(
   AnchorLayout.msg
   PeerState.msg
   FlightReadiness.msg
+  MspImu.msg
 
 )
 

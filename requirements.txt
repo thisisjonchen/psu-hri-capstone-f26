@@ -6,3 +6,5 @@ websockets>=15,<16
 opencv-python
 pupil-apriltags
 pyserial>=3.0
+# Decode ROS recordings on the laptop.
+rosbags>=0.10,<0.12

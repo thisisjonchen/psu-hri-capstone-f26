@@ -21,7 +21,7 @@ from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
-from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness
+from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu
 from sensor_msgs.msg import Range
 from localization import monotonic
 from localization.distance_guard import fresh, STATE_TIMEOUT
@@ -35,6 +35,7 @@ class FlightController(object):
 
     Publishers:
     /pidrone/imu
+    /pidrone/imu_msp (MSP accelerometer and gyro counts)
     /pidrone/battery
     /pidrone/mode
 
@@ -79,6 +80,7 @@ class FlightController(object):
 
         self.imu_message = Imu()
         self.imu_message.header = header
+        self.msp_imu_message = None
 
         # Initialize the Battery Message
         ################################
@@ -204,6 +206,7 @@ class FlightController(object):
         Compute the ROS IMU message by reading data from the board.
         """
 
+        self.msp_imu_message = None
         # Queue both requests before waiting for replies, avoiding an extra
         # request/response turnaround between attitude and acceleration.
         replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
@@ -287,7 +290,30 @@ class FlightController(object):
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
+        raw_reply = next(reply for reply in replies if reply['cmd'] == MultiWii.RAW_IMU)
+        self.msp_imu_message = self.msp_imu_sample(raw_reply)
         return True
+
+    def msp_imu_sample(self, reply):
+        """Build an IMU message from MSP counts and the packet receipt time."""
+        try:
+            values = [reply[key] for key in ('ax', 'ay', 'az', 'gx', 'gy', 'gz')]
+            counts = [int(value) for value in values]
+            stamp = float(reply['timestamp'])
+            if (counts != values or any(v < -32768 or v > 32767 for v in counts)
+                    or not 0 < stamp < 4294967296):
+                raise ValueError('invalid MSP counts or receive time')
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # A bad raw sample should not interrupt the control loop.
+            rospy.logwarn_throttle(1, 'Invalid MSP IMU sample; skipping it')
+            return None
+        message = MspImu()
+        message.header = Header()
+        message.header.frame_id = 'fc_msp'
+        message.header.stamp = rospy.Time.from_sec(stamp)
+        message.accelerometer = counts[:3]
+        message.gyroscope = counts[3:]
+        return message
 
     def update_battery_message(self):
         """
@@ -427,6 +453,7 @@ def main():
     # Publishers
     ###########
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
+    msp_imupub = rospy.Publisher('/pidrone/imu_msp', MspImu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
     calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
@@ -471,6 +498,8 @@ def main():
 
             if fc.update_imu_message():
                 imupub.publish(fc.imu_message)
+                if fc.msp_imu_message is not None:
+                    msp_imupub.publish(fc.msp_imu_message)
             # 2 Hz leaves margin for the routines' 1-second battery watchdog.
             now = rospy.get_time()
             if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:

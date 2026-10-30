@@ -1,0 +1,17 @@
+{
+  "notes": "Fill in the sensor calibration and initial state. Body axes are forward/left/up; sensor offsets are measured from the IMU. Accelerometer offsets exclude gravity.",
+  "acceleration_m_s2_per_count": null,
+  "gyro_rad_s_per_count": null,
+  "acceleration_offset_msp_counts": null,
+  "rotation_body_msp": null,
+  "range_offset_body": null,
+  "range_beam_body": null,
+  "rotation_body_camera": null,
+  "camera_offset_body": null,
+  "initial": {
+    "quaternion": null,
+    "position": null,
+    "velocity": null
+  },
+  "fusion_delay_s": 0.25
+}

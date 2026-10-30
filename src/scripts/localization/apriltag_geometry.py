@@ -12,20 +12,7 @@ import math
 import cv2
 import numpy as np
 
-
-def quaternion_matrix(quaternion):
-    """Return a 3x3 body-to-map rotation matrix for quaternion (x,y,z,w)."""
-    q = np.asarray(quaternion, dtype=float)
-    if q.shape != (4,) or not np.all(np.isfinite(q)):
-        raise ValueError('Invalid quaternion')
-    norm = np.dot(q, q)
-    if norm < 1e-12:
-        raise ValueError('Zero quaternion')
-    x, y, z, w = q / math.sqrt(norm)
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]])
+from localization.rotations import quaternion_matrix
 
 
 def camera_rotation(pitch_down_deg, azimuth_deg=0.0, image_roll_deg=0.0):

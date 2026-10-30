@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Replay recorded IMU, camera, and range measurements through the EKF.
+
+Usage: python3 tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+The calibration profile supplies sensor scales, mounting, and the initial state.
+"""
+import argparse
+from collections import Counter
+import csv
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+from rosbags.typesys import Stores, get_typestore, get_types_from_msg
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
+from localization.ekf import ErrorStateEKF, _array
+from localization.ekf_replay import DelayedEKF
+from localization.ekf_sensors import FloorCamera, FloorRange, mounting_rotation
+from flow_capture import read_ekf_events
+
+
+class CaptureDecoder:
+    def __init__(self):
+        self.store = get_typestore(Stores.EMPTY)
+        self.schemas = {}
+
+    def decode(self, record):
+        name = record['type'].replace('/', '/msg/', 1)
+        key = (name, record['md5sum'])
+        if key not in self.schemas:
+            self.store.register(get_types_from_msg(record['definition'], name))
+            if self.store.generate_msgdef(name)[1] != record['md5sum']:
+                raise ValueError('Recorded schema MD5 mismatch: ' + name)
+            self.schemas[key] = record['definition']
+        elif self.schemas[key] != record['definition']:
+            raise ValueError('Recorded schema changed without an MD5 change')
+        message = self.store.deserialize_ros1(record['payload'], name)
+        header = getattr(message, 'header', None)
+        if header is not None:
+            stamp = header.stamp.sec*10**9 + header.stamp.nanosec
+            if stamp != record['header_stamp_ns']:
+                raise ValueError('Recorded header disagrees with payload timestamp')
+        return message
+
+
+class Replay:
+    def __init__(self, profile):
+        self.profile = profile
+        self.rotation = mounting_rotation(profile['rotation_body_msp'])
+        self.scale = _array([profile['acceleration_m_s2_per_count'], profile['gyro_rad_s_per_count']], (2,))
+        if np.any(self.scale <= 0):
+            raise ValueError('Explicit positive sensor scales are required')
+        self.acceleration_offset = _array(profile['acceleration_offset_msp_counts'], (3,))
+        self.range = FloorRange(profile['range_offset_body'], profile['range_beam_body'])
+        self.camera_rotation = mounting_rotation(profile['rotation_body_camera'])
+        self.camera_offset = _array(profile['camera_offset_body'], (3,))
+        self.ekf = ErrorStateEKF()
+        initial = profile['initial']
+        self.ekf.initialize(0., initial['quaternion'], position=initial['position'], velocity=initial['velocity'])
+        self.timeline = None
+        self.origin_ns = None
+        self.camera = self.camera_signature = None
+        self.counts = Counter()
+
+    def feed(self, record, message, metadata):
+        topic, stamp_ns = record['topic'], record['header_stamp_ns']
+        events = []
+        if topic == '/raspicam_node/camera_info':
+            signature = (message.width, message.height, tuple(message.K), tuple(message.D),
+                         message.distortion_model)
+            if signature != self.camera_signature:
+                settings = metadata.get('parameters', {}).get('/optical_flow_node', {})
+                # Camera offsets here are measured from the IMU.
+                self.camera = FloorCamera(message.K, message.D, message.distortion_model,
+                    (message.width, message.height), self.camera_rotation, self.camera_offset,
+                    frame_interval=1/float(settings['framerate']),
+                    flip_vertically=bool(settings['flip_vectors_vertically']),
+                    max_floor_distance=float(settings.get('max_floor_distance', 1.5)))
+                self.camera_signature = signature
+            return events
+        if stamp_ns is None or stamp_ns <= 0:
+            self.counts['missing_source_stamp'] += 1
+            return events
+        if topic == '/pidrone/imu_msp':
+            force = self.rotation.dot((np.asarray(message.accelerometer)-self.acceleration_offset)*self.scale[0])
+            rate = self.rotation.dot(np.asarray(message.gyroscope)*self.scale[1])
+            if self.timeline is None:
+                self.origin_ns = stamp_ns
+                self.timeline = DelayedEKF(self.ekf, delay=self.profile.get('fusion_delay_s', .25))
+                self.counts['initialized'] += 1
+            else:
+                status, events = self.timeline.add_imu(force, rate, (stamp_ns-self.origin_ns)/1e9)
+                self.counts[status] += 1
+        elif self.timeline is None:
+            self.counts['before_initial_imu'] += 1
+        elif topic == '/pidrone/range':
+            status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9, 'range',
+                lambda f, t, m=message: self.range.correct(f, m.range, .02**2, t, m.min_range, m.max_range))
+            self.counts[status] += 1
+        elif topic == '/raspicam_node/motion_vectors':
+            if self.camera is None:
+                self.counts['missing_camera_calibration'] += 1
+            else:
+                status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9, 'camera',
+                    lambda f, t, m=message, model=self.camera: model.correct(f, m.x, m.y, m.mbx, t))
+                self.counts[status] += 1
+        return events
+
+
+def replay(folder, profile, out):
+    """Save EKF estimates, baseline estimates, and update counts."""
+    runner, decoder = Replay(profile), CaptureDecoder()
+    out.mkdir(parents=True)
+    metadata, outcomes, baselines = {}, Counter(), 0
+    used = {'/pidrone/imu_msp', '/pidrone/range', '/raspicam_node/camera_info',
+            '/raspicam_node/motion_vectors', '/pidrone/state', '/pidrone/localization/odometry'}
+    with (out/'estimates.csv').open('w', newline='') as stream, (out/'baseline.csv').open('w', newline='') as reference:
+        writer, baseline = csv.writer(stream), csv.writer(reference)
+        writer.writerow(['time_s', 'sensor', 'accepted', 'reason', 'nis'] +
+                        ['%s_%s' % (name, axis) for name, axes in
+                         [('p', 'xyz'), ('v', 'xyz'), ('q', 'xyzw'), ('ba', 'xyz'), ('bg', 'xyz')]
+                         for axis in axes] + ['variance_%d' % i for i in range(15)])
+        baseline.writerow(['source_stamp_ns', 'topic', 'pose_frame', 'x', 'y', 'z',
+                           'v_right', 'v_forward', 'v_up'])
+
+        def write_events(events):
+            for event in events:
+                outcomes[event['sensor']+':'+event['reason']] += 1
+                writer.writerow([event['stamp'], event['sensor'], event['accepted'], event['reason'], event['nis']] +
+                    np.concatenate([event[k] for k in ('position', 'velocity', 'quaternion',
+                                                     'acceleration_bias', 'gyro_bias', 'variances')]).tolist())
+
+        for record in read_ekf_events(folder, metadata):
+            if record['topic'] not in used:
+                continue
+            message = decoder.decode(record)
+            if record['topic'] in ('/pidrone/state', '/pidrone/localization/odometry'):
+                if record['topic'] == '/pidrone/state':
+                    p, v = message.pose_with_covariance.pose.position, message.twist_with_covariance.twist.linear
+                else:
+                    p, v = message.pose.pose.position, message.twist.twist.linear
+                baseline.writerow([record['header_stamp_ns'], record['topic'], message.header.frame_id,
+                                   p.x, p.y, p.z, v.x, v.y, v.z])
+                baselines += 1
+            else:
+                write_events(runner.feed(record, message, metadata))
+        if runner.timeline is None:
+            raise ValueError('No raw MSP IMU samples: this capture cannot drive the EKF')
+        events, beyond_imu = runner.timeline.finish()
+        write_events(events)
+    summary = dict(profile=profile, capture_metadata=metadata, origin_ns=runner.origin_ns,
+                   arrivals=dict(runner.counts), updates=dict(outcomes),
+                   measurements_beyond_final_imu=beyond_imu, baseline_samples=baselines,
+                   fault=runner.timeline.fault)
+    (out/'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True)+'\n')
+    if runner.timeline.fault:
+        raise ValueError('Replay stopped: '+runner.timeline.fault+'; see '+str(out/'summary.json'))
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('capture', type=Path)
+    parser.add_argument('--calibration', required=True, type=Path)
+    parser.add_argument('--out', required=True, type=Path)
+    args = parser.parse_args()
+    summary = replay(args.capture, json.loads(args.calibration.read_text()), args.out)
+    print(json.dumps({'updates': summary['updates'], 'arrivals': summary['arrivals'],
+                      'output': str(args.out)}, indent=2))
+
+
+if __name__ == '__main__':
+    main()

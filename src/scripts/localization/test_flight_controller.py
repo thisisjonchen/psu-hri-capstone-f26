@@ -23,7 +23,8 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.missing_reply = None
         self.board = MultiWii.__new__(MultiWii)
         self.board.attitude = dict(cmd=MultiWii.ATTITUDE, angx=0, angy=0, heading=0)
-        self.board.rawIMU = dict(cmd=MultiWii.RAW_IMU, ax=0, ay=0, az=2048)
+        self.board.rawIMU = dict(cmd=MultiWii.RAW_IMU, ax=0, ay=0, az=2048,
+                                 gx=0, gy=0, gz=0, timestamp=0)
         self.board.analog = dict(vbat=120, amperage=0)
 
         def send(size, code, data):
@@ -38,6 +39,8 @@ class FlightControllerLoopTest(unittest.TestCase):
             self.env.ros_now += .002  # Simulate time spent waiting for a reply.
             if code == self.missing_reply:
                 return None
+            if code == MultiWii.RAW_IMU:
+                self.board.rawIMU['timestamp'] = self.env.ros_now
             return {MultiWii.ATTITUDE: self.board.attitude,
                     MultiWii.RAW_IMU: self.board.rawIMU,
                     MultiWii.ANALOG: self.board.analog}.get(code)
@@ -55,6 +58,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         sys.modules['std_msgs.msg'].Header = sys.modules['std_msgs.msg'].String = NS
         sys.modules['geometry_msgs.msg'].Quaternion = NS
         sys.modules['pidrone_pkg.msg'].Battery = NS
+        sys.modules['pidrone_pkg.msg'].MspImu = NS
         sys.modules['sensor_msgs.msg'].Imu = lambda: NS(
             orientation=NS(x=0., y=0., z=0., w=1.),
             angular_velocity=fusion_helpers.vector(), linear_acceleration=fusion_helpers.vector())
