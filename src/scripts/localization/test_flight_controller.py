@@ -6,6 +6,7 @@ import runpy
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace as NS
+from threading import Lock
 from unittest import mock
 
 from h2rMultiWii import MultiWii
@@ -37,17 +38,31 @@ class FlightControllerLoopTest(unittest.TestCase):
             code = self.pending.pop(0)
             self.events.append(('read', code, self.env.ros_now))
             self.env.ros_now += .002  # Simulate time spent waiting for a reply.
+            self.env.now += .002
             if code == self.missing_reply:
                 return None
             if code == MultiWii.RAW_IMU:
                 self.board.rawIMU['timestamp'] = self.env.ros_now
-            return {MultiWii.ATTITUDE: self.board.attitude,
+            if code == MultiWii.MULTIPLE_MSP:
+                self.board.rawIMU['timestamp'] = self.env.ros_now
+                return [None if self.missing_reply == reply['cmd'] else reply
+                        for reply in (self.board.attitude, self.board.rawIMU)]
+            return {MultiWii.SET_RAW_RC: 'Set Raw RC',
+                    MultiWii.ATTITUDE: self.board.attitude,
                     MultiWii.RAW_IMU: self.board.rawIMU,
                     MultiWii.ANALOG: self.board.analog}.get(code)
 
         self.board.send_raw_command = send
+        self.board.create_packet = lambda size, code, data: send(size, code, data) or ''
+        self.board.serial_port_write_lock = Lock()
+        self.board.ser = NS(write=lambda packet: None)
         self.board.receiveDataPacket = receive
-        # Use the real getData/getDataBulk methods and the real FC main loop.
+        def available():
+            while self.pending:
+                code = self.pending[0]
+                yield code, self.board.receiveDataPacket()
+        self.board.receive_available = available
+        # Use the real command batching and FC main loop.
         root = os.path.dirname(os.path.dirname(__file__))
         rospkg, yaml = ModuleType('rospkg'), ModuleType('yaml')
         rospkg.RosPack = lambda: NS(get_path=lambda name: os.path.dirname(root))
@@ -71,12 +86,15 @@ class FlightControllerLoopTest(unittest.TestCase):
         patched_board.start()
         self.addCleanup(patched_board.stop)
         start = self.env.ros_now
-        ros.is_shutdown = lambda: self.env.ros_now >= start + 1.2
+        ros.is_shutdown = lambda: self.env.ros_now >= start + 1.2 and not self.pending
 
-        def sleep():
-            self.env.ros_now += 1 / 60.
+        def wait(readers, writers, errors, timeout):
+            if not self.pending:
+                self.env.ros_now += timeout
+                self.env.now += timeout
+            return (readers if self.pending else [], [], [])
 
-        ros.Rate = lambda hz: NS(sleep=sleep)
+        namespace['main'].__globals__['select'] = NS(select=wait)
 
     def run_loop(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -167,21 +185,27 @@ class FlightControllerLoopTest(unittest.TestCase):
         output = self.run_loop()
         self.assertNotIn('internal error', output)
         transactions = [(kind, code) for kind, code, _ in self.events]
-        expected = [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC),
-                    ('send', MultiWii.ATTITUDE), ('send', MultiWii.RAW_IMU),
-                    ('read', MultiWii.ATTITUDE), ('read', MultiWii.RAW_IMU)]
         imu = self.env.messages['/pidrone/imu']
-        self.assertEqual(len(self.commands) - 1, len(imu))  # Exclude shutdown disarm.
-        for i, event in enumerate(transactions[:-2]):  # Final pair is shutdown disarm.
-            if event == ('send', MultiWii.SET_RAW_RC):
-                self.assertEqual(transactions[i:i+6], expected)
+        self.assertGreater(len(self.env.messages['/pidrone/imu_msp']), len(imu))
+        self.assertGreater(len(imu), 50)
+        batches = {}
+        for kind, code, stamp in self.events[:-2]:
+            if kind == 'send':
+                batches.setdefault(stamp, []).append(code)
+        for batch in batches.values():
+            if MultiWii.SET_RAW_RC in batch:
+                self.assertEqual(batch[0], MultiWii.SET_RAW_RC)
+        rc_times = [t for kind, code, t in self.events[:-2] if kind == 'send' and code == MultiWii.SET_RAW_RC]
+        for first, second in zip(rc_times, rc_times[1:]):
+            self.assertLess(second - first, .03)
         battery_times = [t for kind, code, t in self.events if kind == 'send' and code == MultiWii.ANALOG]
         self.assertGreaterEqual(len(battery_times), 2)
         for first, second in zip(battery_times, battery_times[1:]):
             self.assertGreaterEqual(second - first, .5)
             self.assertLess(second - first, 1.)
         self.assertEqual(len(self.env.messages['/pidrone/battery']), len(battery_times))
-        self.assertEqual(transactions[-2:], expected[:2])
+        self.assertEqual(transactions[-2:],
+                         [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC)])
 
     def test_missing_bulk_reply_skips_imu_and_keeps_loop_running_until_shutdown(self):
         self.missing_reply = MultiWii.RAW_IMU
@@ -200,8 +224,9 @@ class FlightControllerLoopTest(unittest.TestCase):
 
         def turning():  # 1 degree per reply, crossing 359 -> 0 degrees.
             reply = receive()
-            if reply is self.board.attitude:
-                self.board.attitude = dict(reply, heading=(reply['heading'] + 1) % 360)
+            if isinstance(reply, list):
+                self.board.attitude = dict(self.board.attitude,
+                                           heading=(self.board.attitude['heading'] + 1) % 360)
             return reply
         self.board.attitude['heading'] = 340
         self.board.receiveDataPacket = turning

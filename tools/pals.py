@@ -3,6 +3,7 @@
 
   ssh-setup   create a key and install it on the drones using their default password
   provision   pin serial ports and build on the drones (nodes start from the dashboard)
+  flash-fc    install the bundled Betaflight USB firmware and 250 Hz serial setting
   dashboard   start the dashboard server and open it in the browser
 """
 import argparse
@@ -115,10 +116,13 @@ def dashboard(port):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('ssh-setup', 'provision', 'dashboard'))
-    parser.add_argument('--drone', choices=('drone1', 'drone2'), help='only this drone (default: both)')
+    parser.add_argument('command', choices=('ssh-setup', 'provision', 'flash-fc', 'dashboard'))
+    parser.add_argument('--drone', choices=('drone1', 'drone2'),
+                        help='target drone; required for flash-fc, otherwise defaults to both')
     parser.add_argument('--port', type=int, default=8000, help='dashboard port')
     args = parser.parse_args()
+    if args.command == 'flash-fc' and not args.drone:
+        parser.error('flash-fc requires --drone drone1 or --drone drone2')
     ensure_venv()
     sys.path.insert(0, str(WEB))
     targets = [args.drone] if args.drone else ['drone1', 'drone2']
@@ -127,6 +131,12 @@ def main():
             sys.exit(1)
     elif args.command == 'provision':
         provision(targets)
+    elif args.command == 'flash-fc':
+        from flash_fc import flash
+        try:
+            flash(args.drone)
+        except (RuntimeError, OSError, EOFError) as error:
+            parser.exit(1, 'flash-fc: %s\n' % error)
     else:
         dashboard(args.port)
 

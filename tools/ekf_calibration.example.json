@@ -1,5 +1,5 @@
 {
-  "notes": "Fill in the sensor calibration and initial state. Body axes are forward/left/up; sensor offsets are measured from the IMU. Accelerometer offsets exclude gravity.",
+  "notes": "Fill in the sensor calibration and initial state. Body axes are forward/left/up; sensor offsets are measured from the IMU. Accelerometer offsets exclude gravity. Initial biases use body axes, m/s^2 and rad/s; zero is an uncalibrated starting guess.",
   "acceleration_m_s2_per_count": null,
   "gyro_rad_s_per_count": null,
   "acceleration_offset_msp_counts": null,
@@ -11,7 +11,9 @@
   "initial": {
     "quaternion": null,
     "position": null,
-    "velocity": null
+    "velocity": null,
+    "acceleration_bias": [0.0, 0.0, 0.0],
+    "gyro_bias": [0.0, 0.0, 0.0]
   },
   "fusion_delay_s": 0.25
 }

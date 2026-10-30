@@ -58,7 +58,10 @@ class Replay:
         self.camera_offset = _array(profile['camera_offset_body'], (3,))
         self.ekf = ErrorStateEKF()
         initial = profile['initial']
-        self.ekf.initialize(0., initial['quaternion'], position=initial['position'], velocity=initial['velocity'])
+        self.ekf.initialize(0., initial['quaternion'], position=initial['position'],
+            velocity=initial['velocity'],
+            acceleration_bias=initial.get('acceleration_bias', (0., 0., 0.)),
+            gyro_bias=initial.get('gyro_bias', (0., 0., 0.)))
         self.timeline = None
         self.origin_ns = None
         self.camera = self.camera_signature = None

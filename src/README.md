@@ -22,6 +22,46 @@ Assuming that the base environment is already set up on the DD24 by following th
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
+## Betaflight telemetry setup
+
+To install the USB timing firmware and save the 250 Hz serial setting together,
+run from the laptop with the drone disarmed and props removed:
+
+```sh
+python3 tools/pals.py flash-fc --drone drone1
+```
+
+Use `--drone drone2` for drone2. The command backs up the selected drone, preserves
+its configuration, and verifies the update. See the
+[firmware instructions](../tools/firmware/betaflight/README.md#apply-to-a-drone) for
+supported versions and the Pi-side code needed for 100 Hz IMU delivery.
+
+Drone2 uses a SpeedyBee F405 V3 with a custom Betaflight 2026.6.1 build
+(`usb2ms001`, based on `6dbc4218f`, board config `749fff1`, MSP API 1.48).
+The firmware flushes USB replies every 2 ms. Its saved MSP serial service rate
+is 250 Hz:
+
+```text
+set serial_update_rate_hz = 250
+save
+```
+
+Apply this in the Betaflight CLI while disarmed, with the Pi's flight-controller
+node stopped so it releases the USB port. `save` persists the setting and reboots
+the flight controller. After reconnecting, verify it with
+`get serial_update_rate_hz`, then restart the Pi's flight-controller node.
+
+The serial setting controls how often Betaflight services serial traffic. The
+USB interval is a compiled firmware change, preserved in the
+[patch and build instructions](../tools/firmware/betaflight/README.md). Flashing a stock
+image removes that change; restoring the CLI settings alone does not restore it.
+
+The Pi requests fresh MSP accelerometer and gyro counts for `/pidrone/imu_msp`
+at 100 Hz, while the existing `/pidrone/imu` attitude messages and RC commands
+run at 60 Hz. IMU message timestamps mark reception on the Pi, not acquisition
+inside the flight controller. These delivery settings do not change the gyro
+sampling or PID loop rates. They have been applied to drone2; drone1 is unverified.
+
 ## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
 1. Use the drone's dashboard terminal, or `ssh duckie@[drone].local` (password **quackquack**).

@@ -7,6 +7,7 @@ import threading
 import rospy
 import rospkg
 import signal
+import select
 import numpy as np
 
 print("tf import")
@@ -67,6 +68,10 @@ class FlightController(object):
         # store the command to send to the flight controller
         self.command = cmds.disarm_cmd      #initialize as disarmed
         self.last_command = cmds.disarm_cmd
+        now = monotonic()
+        self.next_rc = self.next_imu = self.next_attitude = self.next_battery = now
+        self.imu_pending = self.battery_pending = None
+        self.last_rc_ack = now
         # store the mode publisher
         self.modepub = None
         # store the time for angular velocity calculations
@@ -80,7 +85,6 @@ class FlightController(object):
 
         self.imu_message = Imu()
         self.imu_message.header = header
-        self.msp_imu_message = None
 
         # Initialize the Battery Message
         ################################
@@ -201,24 +205,81 @@ class FlightController(object):
 
     # Update methods:
     #################
-    def update_imu_message(self):
-        """
-        Compute the ROS IMU message by reading data from the board.
-        """
+    @staticmethod
+    def next_poll(deadline, now, hz):
+        return deadline + (int(max(0., now - deadline) * hz) + 1) / hz
 
-        self.msp_imu_message = None
-        # Queue both requests before waiting for replies, avoiding an extra
-        # request/response turnaround between attitude and acceleration.
-        replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
-        if any(not isinstance(reply, dict) for reply in replies) or set(
-                reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
+    def poll(self):
+        """Schedule RC and telemetry independently on the same serial connection."""
+        now = monotonic()
+        received = []
+        for code, reply in self.board.receive_available():
+            if code == MultiWii.SET_RAW_RC:
+                if reply == 'Set Raw RC':
+                    self.last_rc_ack = now
+                else:
+                    rospy.logwarn_throttle(1, 'Invalid RC acknowledgment from flight controller')
+            elif code in (MultiWii.RAW_IMU, MultiWii.MULTIPLE_MSP):
+                if self.imu_pending is not None and code == self.imu_pending[0]:
+                    self.imu_pending = None
+                    received.append((code, reply))
+            elif code == MultiWii.ANALOG and self.battery_pending is not None:
+                self.battery_pending = None
+                received.append((code, reply))
+
+        if self.imu_pending is not None and now - self.imu_pending[1] >= 1.:
+            rospy.logwarn_throttle(1, 'IMU response timed out; skipping sample')
+            self.imu_pending = None
+        if self.battery_pending is not None and now - self.battery_pending >= 1.:
+            rospy.logwarn_throttle(1, 'Battery response timed out; skipping sample')
+            self.battery_pending = None
+        if now - self.last_rc_ack >= 1.:
+            rospy.logwarn_throttle(1, 'Missing RC acknowledgment from flight controller')
+
+        requests = []
+        command = self.command
+        rc_due = now >= self.next_rc
+        command_sent = rc_due or command != self.last_command
+        if command_sent:
+            assert len(command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got " + str(len(command))
+            requests.append((MultiWii.SET_RAW_RC, command))
+            if rc_due:
+                self.next_rc = self.next_poll(self.next_rc, now, 60.)
+        if now >= self.next_imu and self.imu_pending is None:
+            if now >= self.next_attitude:
+                code, args = MultiWii.MULTIPLE_MSP, [MultiWii.ATTITUDE, MultiWii.RAW_IMU]
+                self.next_attitude = self.next_poll(self.next_attitude, now, 60.)
+            else:
+                code, args = MultiWii.RAW_IMU, []
+            requests.append((code, args))
+            self.imu_pending = (code, now)
+            self.next_imu = self.next_poll(self.next_imu, now, 100.)
+        if now >= self.next_battery and self.battery_pending is None:
+            requests.append((MultiWii.ANALOG, []))
+            self.battery_pending = now
+            self.next_battery = now + .5
+        if requests:
+            self.board.send_commands(requests)
+        if command_sent and command != self.last_command:
+            print('new command sent:', command)
+            self.last_command = command
+        return command_sent, received
+
+    def update_imu_message(self, replies):
+        """Build the legacy IMU message from a fresh attitude/acceleration pair."""
+        if (not isinstance(replies, list) or len(replies) != 2
+                or any(not isinstance(reply, dict) for reply in replies)
+                or set(reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU))):
             rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
             return False
 
+        attitude = next(reply for reply in replies if reply['cmd'] == MultiWii.ATTITUDE)
+        raw = next(reply for reply in replies if reply['cmd'] == MultiWii.RAW_IMU)
+
         # calculate values to update imu_message:
-        roll = np.deg2rad(self.board.attitude['angx'])
-        pitch = -np.deg2rad(self.board.attitude['angy'])
-        heading = np.deg2rad(self.board.attitude['heading'])
+        roll = np.deg2rad(attitude['angx'])
+        pitch = -np.deg2rad(attitude['angy'])
+        heading = np.deg2rad(attitude['heading'])
         # Note that at pitch angles near 90 degrees, the roll angle reading can
         # fluctuate a lot
         # transform heading (similar to yaw) to standard math conventions, which
@@ -238,9 +299,9 @@ class FlightController(object):
         # transform euler angles into quaternion
         quaternion = tf.transformations.quaternion_from_euler(roll, pitch, heading)
         # calculate the linear accelerations
-        lin_acc_x = self.board.rawIMU['ax'] * self.accRawToMss - self.accZeroX
-        lin_acc_y = self.board.rawIMU['ay'] * self.accRawToMss - self.accZeroY
-        lin_acc_z = self.board.rawIMU['az'] * self.accRawToMss - self.accZeroZ
+        lin_acc_x = raw['ax'] * self.accRawToMss - self.accZeroX
+        lin_acc_y = raw['ay'] * self.accRawToMss - self.accZeroY
+        lin_acc_z = raw['az'] * self.accRawToMss - self.accZeroZ
 
         # Rotate the IMU frame to align with our convention for the drone's body
         # frame. IMU: x is forward, y is left, z is up. We want: x is right,
@@ -290,8 +351,6 @@ class FlightController(object):
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
-        raw_reply = next(reply for reply in replies if reply['cmd'] == MultiWii.RAW_IMU)
-        self.msp_imu_message = self.msp_imu_sample(raw_reply)
         return True
 
     def msp_imu_sample(self, reply):
@@ -315,15 +374,9 @@ class FlightController(object):
         message.gyroscope = counts[3:]
         return message
 
-    def update_battery_message(self):
-        """
-        Compute the ROS battery message by reading data from the board.
-        """
-        # extract vbat, amperage
-        self.board.getData(MultiWii.ANALOG)
-        # Update Battery message:
-        self.battery_message.vbat = self.board.analog['vbat'] * 0.10
-        self.battery_message.amperage = self.board.analog['amperage']
+    def update_battery_message(self, reply):
+        self.battery_message.vbat = reply['vbat'] * 0.10
+        self.battery_message.amperage = reply['amperage']
 
     def update_command(self):
         ''' Set command values if the mode is ARMED or DISARMED '''
@@ -356,15 +409,6 @@ class FlightController(object):
                 print('The USB is unplugged. Please check connection.')
                 raise
         return board
-
-    def send_rc_cmd(self):
-        """ Send commands to the flight controller board """
-        assert len(self.command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
-        self.board.send_raw_command(8, MultiWii.SET_RAW_RC, self.command)
-        self.board.receiveDataPacket()
-        if (self.command != self.last_command):
-            print('new command sent:', self.command)
-            self.last_command = self.command
 
     def near_zero(self, n):
         """ Set a number to zero if it is below a threshold value """
@@ -480,9 +524,6 @@ def main():
     print("Started flight-controller node!")
 
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
-    # set the loop rate (Hz)
-    r = rospy.Rate(60)
-    last_battery_at = None
     try:
         while not rospy.is_shutdown():
             # if the current mode is anything other than disarmed
@@ -492,30 +533,39 @@ def main():
                 print("mode", fc.curr_mode)
                 break
                 
-            # Deliver the current command before waiting for sensor telemetry.
             fc.update_command()
-            fc.send_rc_cmd()
+            command_sent, replies = fc.poll()
+            for code, reply in replies:
+                if code == MultiWii.ANALOG:
+                    if isinstance(reply, dict):
+                        fc.update_battery_message(reply)
+                        batpub.publish(fc.battery_message)
+                    else:
+                        rospy.logwarn_throttle(1, 'Invalid battery response; skipping sample')
+                    continue
+                if code == MultiWii.MULTIPLE_MSP:
+                    if not fc.update_imu_message(reply):
+                        continue
+                    imupub.publish(fc.imu_message)
+                    raw = next(sample for sample in reply if sample['cmd'] == MultiWii.RAW_IMU)
+                else:
+                    if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.RAW_IMU:
+                        rospy.logwarn_throttle(1, 'Invalid IMU response; skipping sample')
+                        continue
+                    raw = reply
+                msp_message = fc.msp_imu_sample(raw)
+                if msp_message is not None:
+                    msp_imupub.publish(msp_message)
 
-            if fc.update_imu_message():
-                imupub.publish(fc.imu_message)
-                if fc.msp_imu_message is not None:
-                    msp_imupub.publish(fc.msp_imu_message)
-            # 2 Hz leaves margin for the routines' 1-second battery watchdog.
-            now = rospy.get_time()
-            if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:
-                fc.update_battery_message()
-                batpub.publish(fc.battery_message)
-                last_battery_at = rospy.get_time()
+            if command_sent:
+                fc.modepub.publish(fc.curr_mode)
+                with fc.mode_lock:
+                    calibration_pub.publish(Bool(data=False))
+                    calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
+                                                                         'request': fc.calibration_request})))
 
-            # publish the current mode of the drone
-            fc.modepub.publish(fc.curr_mode)
-            with fc.mode_lock:
-                calibration_pub.publish(Bool(data=False))
-                calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
-                                                                     'request': fc.calibration_request})))
-
-            # sleep for the remainder of the loop time
-            r.sleep()
+            # Wake on a reply, or wait up to 5 ms before checking commands again.
+            select.select([fc.board.ser], [], [], .005)
             
     except SerialException:
         print('\nCannot connect to the flight controller board.')

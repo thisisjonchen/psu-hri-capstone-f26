@@ -1,0 +1,43 @@
+{
+  "source_commit": "6dbc4218fd6bc33bf16ea32c670304d4f89321d5",
+  "config_revision": "749fff1",
+  "compiler": "Arm GNU Toolchain 13.3.Rel1, GCC 13.3.1",
+  "firmware_revision": "usb2ms001",
+  "serial_update_rate_hz": 250,
+  "board": "SPEEDYBEEF405V3",
+  "version": "2026.6.1",
+  "file": "betaflight_2026.6.1_SPEEDYBEEF405V3_usb2ms001.dfu",
+  "sha256": "b965e3bc8e8e57d5bd7a8425f14ba29fc423081297e81ccc0cbbd016a6493e83",
+  "supported_images": [
+    {
+      "revision": "6dbc4218f",
+      "regions": [
+        {
+          "address": 134217728,
+          "size": 392,
+          "sha256": "f2cfff17be0320f8d3a5a27f0f409be358197bccf2541e9878d9b30206bded85"
+        },
+        {
+          "address": 134250496,
+          "size": 452572,
+          "sha256": "419240afc45e6fbe6f00257bd4ea9da98f39fbb455e9a0dbca425f23e69f686a"
+        }
+      ]
+    },
+    {
+      "revision": "usb2ms001",
+      "regions": [
+        {
+          "address": 134217728,
+          "size": 392,
+          "sha256": "c914345b251d2937302f54642b57458d7e2f5f5139e5ce88573ed69211866660"
+        },
+        {
+          "address": 134250496,
+          "size": 452380,
+          "sha256": "47225044038ec1086348aa01752c5f5f89c70ac86b27dcaedfda41453cc6617f"
+        }
+      ]
+    }
+  ]
+}
