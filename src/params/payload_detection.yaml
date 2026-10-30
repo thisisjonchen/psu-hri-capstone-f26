@@ -1,6 +1,7 @@
 # Starting values only: tune against the actual payload in the working zone.
 # OpenCV uint8 HSV: hue 0..179, saturation/value 0..255.
-hsv_lower: [20, 100, 80]
+# Allow dim yellow plastic; hue and saturation still reject gray background.
+hsv_lower: [20, 100, 40]
 hsv_upper: [40, 255, 255]
 # Minimum contour area as a fraction of the complete image.
 min_area_fraction: 0.002

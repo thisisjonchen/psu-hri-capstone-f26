@@ -220,7 +220,14 @@ class PayloadDetectorTests(unittest.TestCase):
         self.assertGreater(msg.area, 7000)
         self.assertEqual(msg.header.stamp.to_sec(), self.now)
         self.assertEqual(msg.header.frame_id, 'camera')
-        for regions in [[], [(20, 30, 60, 70, (0, 0, 255))], [(40, 80, 5, 5, yellow)]]:
+        # Dim yellow plastic from the reported camera scene is below V=80.
+        msg = self.observe([(40, 80, 80, 100, (13, 63, 60))])
+        self.assertTrue(msg.camera_online and msg.detected)
+        self.assertAlmostEqual(msg.center_x, 79.5, delta=2)
+        self.assertAlmostEqual(msg.center_y, 129.5, delta=2)
+        for regions in [[], [(20, 30, 60, 70, (0, 0, 255))],
+                        [(40, 80, 80, 100, (63, 63, 63))],
+                        [(40, 80, 80, 100, (5, 25, 24))], [(40, 80, 5, 5, yellow)]]:
             msg = self.observe(regions)
             self.assertTrue(msg.camera_online)
             self.assertFalse(msg.detected)
