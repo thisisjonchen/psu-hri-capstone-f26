@@ -16,12 +16,10 @@ the range and camera models. Default noise values still need flight tuning.
 """
 from __future__ import division
 
-import math
-import copy
 import numpy as np
 
-from localization.rotations import (skew, quaternion_matrix, quaternion_multiply,
-                                    quaternion_exp, right_jacobian)
+from localization import ekf_native
+from localization.rotations import skew, quaternion_matrix
 
 
 def _array(value, shape):
@@ -48,72 +46,6 @@ def _error_transforms(position, velocity, rotation):
     to_invariant[6:9, 6:9] = rotation
     to_public[6:9, 6:9] = rotation.T
     return to_invariant, to_public
-
-
-def _multiply(a, b):
-    ax, ay, az, aw = a
-    bx, by, bz, bw = b
-    return (aw*bx+ax*bw+ay*bz-az*by, aw*by-ax*bz+ay*bw+az*bx,
-            aw*bz+ax*by-ay*bx+az*bw, aw*bw-ax*bx-ay*by-az*bz)
-
-
-def _nominal_step(p, v, q, force, rate, gravity, step):
-    # Scalar arithmetic avoids temporary arrays in the short output roll-forward.
-    rx, ry, rz = rate
-    angle = math.sqrt(rx*rx + ry*ry + rz*rz)
-    scale = step/4 if angle < 1e-12 else math.sin(angle*step/4)/angle
-    half = (rx*scale, ry*scale, rz*scale, math.cos(angle*step/4))
-    mid_q = _multiply(q, half)
-    x, y, z, w = mid_q
-    fx, fy, fz = force
-    tx, ty, tz = 2*(y*fz-z*fy), 2*(z*fx-x*fz), 2*(x*fy-y*fx)
-    ax = fx+w*tx+y*tz-z*ty+gravity[0]
-    ay = fy+w*ty+z*tx-x*tz+gravity[1]
-    az = fz+w*tz+x*ty-y*tx+gravity[2]
-    px, py, pz = p
-    vx, vy, vz = v
-    p = (px+vx*step+.5*ax*step*step,
-         py+vy*step+.5*ay*step*step,
-         pz+vz*step+.5*az*step*step)
-    v = (vx+ax*step, vy+ay*step, vz+az*step)
-    x, y, z, w = _multiply(mid_q, half)
-    norm = math.sqrt(x*x + y*y + z*z + w*w)
-    q = (x/norm, y/norm, z/norm, w/norm)
-    return p, v, q, mid_q, (ax, ay, az)
-
-
-def _inertial_step(p, v, q, force, rate, gravity, step):
-    values = [tuple(map(float, a)) for a in (p, v, q, force, rate, gravity)]
-    next_p, next_v, next_q, mid_q, acceleration = _nominal_step(*(values+[step]))
-    acceleration = np.asarray(acceleration)
-    mid_p = p + v*step/2 + acceleration*step**2/8
-    mid_v = v + acceleration*step/2
-    return (np.asarray(next_p), np.asarray(next_v), np.asarray(next_q),
-            mid_p, mid_v, quaternion_matrix(mid_q))
-
-
-def _propagate_covariance(covariance, p, v, rotation, gravity, density, step):
-    dynamics = np.zeros((15, 15))
-    cross_p, cross_v = skew(p), skew(v)
-    dynamics[:3, 3:6] = np.eye(3)
-    dynamics[:3, 12:15] = -cross_p.dot(rotation)
-    dynamics[3:6, 6:9] = skew(gravity)
-    dynamics[3:6, 9:12] = -rotation
-    dynamics[3:6, 12:15] = -cross_v.dot(rotation)
-    dynamics[6:9, 12:15] = -rotation
-    a = dynamics*step
-    a2 = a.dot(a)
-    a3 = a2.dot(a)
-    transition = np.eye(15) + a + a2/2 + a3/6
-    half = np.eye(15) + a/2 + a2/8 + a3/48
-    gyro_map = np.vstack((cross_p, cross_v, np.eye(3)))
-    noise = density.copy()
-    noise[:9, :9] = density[6, 6]*gyro_map.dot(gyro_map.T)
-    noise[3:6, 3:6] += density[3:6, 3:6]
-    # Combine the two terms with the same transition in Simpson's noise integral.
-    noise *= step/6
-    return (transition.dot(covariance + noise).dot(transition.T)
-            + 4*half.dot(noise).dot(half.T) + noise)
 
 
 class ErrorStateEKF(object):
@@ -154,16 +86,6 @@ class ErrorStateEKF(object):
         transform = _error_transforms(self.position, self.velocity,
                                       quaternion_matrix(self.quaternion))[1]
         return np.einsum('ij,ij->i', transform.dot(self._covariance), transform)
-
-    def body_navigation_variances(self):
-        """Variances of origin-relative position and velocity expressed in the body.
-
-        A common rotation of the local frame changes neither quantity, so global
-        heading uncertainty does not masquerade as lost navigation precision.
-        """
-        rotation = quaternion_matrix(self.quaternion)
-        return np.concatenate([np.einsum('ij,ij->j', rotation,
-            self._covariance[start:start+3, start:start+3].dot(rotation)) for start in (0, 3)])
 
     def initialize(self, stamp, quaternion, position=(0., 0., 0.),
                    velocity=(0., 0., 0.), acceleration_bias=(0., 0., 0.),
@@ -212,63 +134,14 @@ class ErrorStateEKF(object):
             return False, 'non_increasing_stamp'
         if dt > self.max_gap:
             return False, 'imu_gap'
-        # Keep integration steps at 10 ms or less.
-        steps = max(1, int(math.ceil(dt/.01 - 1e-10)))
-        step = dt/steps
-        p, v, q, covariance = (self.position.copy(), self.velocity.copy(),
-                                self.quaternion.copy(), self._covariance.copy())
-        for _ in range(steps):
-            p, v, q, mid_p, mid_v, rotation = _inertial_step(
-                p, v, q, force, rate, self.gravity, step)
-            covariance = _propagate_covariance(covariance, mid_p, mid_v, rotation,
-                                               self.gravity, self.noise, step)
-        if not all(np.all(np.isfinite(x)) for x in (p, v, q, covariance)):
+        state = np.concatenate((self.position, self.velocity, self.quaternion))
+        covariance = self._covariance.copy()
+        if ekf_native.predict(state, covariance, force, rate, self.gravity, self.noise, dt):
             return False, 'numerical_failure'
-        self.position, self.velocity, self.quaternion = p, v, q
-        self._covariance = .5*(covariance + covariance.T)
+        self.position, self.velocity, self.quaternion = state[:3].copy(), state[3:6].copy(), state[6:].copy()
+        self._covariance = covariance
         self.stamp = stamp
         return True, 'predicted'
-
-    def project(self, intervals):
-        """Roll a snapshot to the last queued IMU stamp without changing fusion.
-
-        Every IMU interval contributes to the nominal output. Its covariance is
-        propagated once about the midpoint of the short output horizon.
-        """
-        result = copy.copy(self)
-        for name in ('position', 'velocity', 'quaternion', 'acceleration_bias', 'gyro_bias'):
-            setattr(result, name, getattr(self, name).copy())
-        result._covariance = self._covariance.copy()
-        result._measurement_stamps = self._measurement_stamps.copy()
-        if not intervals:
-            return result
-        duration = intervals[-1][0]-self.stamp
-        if not 0 < duration <= .5:
-            raise ValueError('Output horizon must be in (0, 0.5] seconds')
-        midpoint, middle = self.stamp+duration/2, None
-        p, v, q, gravity = [tuple(map(float, a)) for a in
-                            (result.position, result.velocity, result.quaternion, self.gravity)]
-        stamp = self.stamp
-        for end, force, rate in intervals:
-            if not stamp < end <= intervals[-1][0] or end-stamp > self.max_gap:
-                raise ValueError('Invalid output IMU interval')
-            force = tuple(map(float, force-self.acceleration_bias))
-            rate = tuple(map(float, rate-self.gyro_bias))
-            stops = [midpoint, end] if stamp < midpoint < end else [end]
-            for stop in stops:
-                steps = max(1, int(math.ceil((stop-stamp)/.01-1e-10)))
-                step = (stop-stamp)/steps
-                for _ in range(steps):
-                    p, v, q = _nominal_step(p, v, q, force, rate, gravity, step)[:3]
-                stamp = stop
-                if stamp == midpoint:
-                    middle = (p, v, quaternion_matrix(q))
-        result.position, result.velocity, result.quaternion = map(np.asarray, (p, v, q))
-        result.stamp = stamp
-        covariance = _propagate_covariance(self._covariance, middle[0], middle[1], middle[2],
-                                           self.gravity, self.noise, duration)
-        result._covariance = .5*(covariance+covariance.T)
-        return result
 
     def correct_zero_velocity(self, stamp, variance=.02**2):
         """Fuse v=0 when the caller has established that the drone is stationary."""
@@ -319,18 +192,13 @@ class ErrorStateEKF(object):
         if self.stamp <= self._measurement_stamps.get(sensor, -1):
             return self._reject('repeated_measurement')
 
-        _, to_public = _error_transforms(
-            self.position, self.velocity, quaternion_matrix(self.quaternion))
-        prior = self._covariance
-        observation = observation.dot(to_public)
         innovation = measured - predicted
-        total = observation.dot(prior).dot(observation.T) + noise
-        try:
-            nis = float(innovation.dot(np.linalg.solve(total, innovation)))
-            gain = np.linalg.solve(total, observation.dot(prior)).T
-        except np.linalg.LinAlgError:
-            return self._reject('numerical_failure')
-        if not np.isfinite(nis):
+        state = np.concatenate((self.position, self.velocity, self.quaternion,
+                                self.acceleration_bias, self.gyro_bias))
+        covariance = self._covariance.copy()
+        status, total, nis = ekf_native.correct(state, covariance, innovation,
+                                               observation, noise, gate)
+        if status == 2:
             return self._reject('numerical_failure')
         # Use state time so timestamp rounding cannot admit a sample twice.
         self._measurement_stamps[sensor] = self.stamp
@@ -339,22 +207,10 @@ class ErrorStateEKF(object):
                                 reason='corrected' if nis <= gate else 'innovation_rejected')
         if nis > gate:
             return False, 'innovation_rejected'
-        delta = gain.dot(innovation)
-        remainder = np.eye(len(prior)) - gain.dot(observation)
-        covariance = (remainder.dot(prior).dot(remainder.T)
-                      + gain.dot(noise).dot(gain.T))  # Joseph form.
-        correction = quaternion_exp(delta[6:9])
-        rotation = quaternion_matrix(correction)
-        translation = right_jacobian(-delta[6:9])
-        p = rotation.dot(self.position) + translation.dot(delta[:3])
-        v = rotation.dot(self.velocity) + translation.dot(delta[3:6])
-        q = quaternion_multiply(correction, self.quaternion)
-        if not np.all(np.isfinite(delta)) or not np.all(np.isfinite(covariance)):
+        if status:
             return self._reject('numerical_failure')
-        self.position, self.velocity = p, v
-        self.quaternion = q/np.linalg.norm(q)
-        self.acceleration_bias += delta[9:12]
-        self.gyro_bias += delta[12:15]
-        covariance = .5*(covariance + covariance.T)
+        self.position, self.velocity = state[:3].copy(), state[3:6].copy()
+        self.quaternion = state[6:10].copy()
+        self.acceleration_bias, self.gyro_bias = state[10:13].copy(), state[13:16].copy()
         self._covariance = covariance
         return True, 'corrected'

@@ -10,8 +10,8 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 - `src/scripts/flight_controller_node.py` and `h2rMultiWii.py`: flight-controller communication.
 - `src/scripts/pid_controller.py`: control loop. Throttle comes from `altitude_controller.py`
   and roll/pitch from `velocity_controller.py`; `pid_class.py` serves the dashboard position mode.
-- `src/scripts/PALS/ekf_localization_node` and `localization/ekf_live.py`: live local estimation.
-- `src/scripts/localization/ekf_sensors.py`: camera-image tracking and ToF corrections.
+- `src/native/ekf_node.cpp` and `live_ekf.cpp`: live EKF, camera tracking and ToF corrections.
+- `tools/replay_ekf.py` and `src/scripts/localization/ekf_*.py`: offline replay using shared native math.
 - `tools/flow_capture.py`: record hand-carried or flight data over SSH and analyze it.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
 - `src/web/`: dashboard, laptop calibration service, and web tests.

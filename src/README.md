@@ -22,6 +22,9 @@ Assuming that the base environment is already set up on the DD24 by following th
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
+Driver corrections: [ToF I²C error handling](../tools/tof/README.md) and
+[camera motion-vector processing](../tools/camera/README.md).
+
 ## Betaflight telemetry setup
 
 To install the USB timing firmware and save the 250 Hz serial setting together,
@@ -64,6 +67,18 @@ sampling or PID loop rates. They have been applied to drone2; drone1 is unverifi
 
 ## EKF recording and replay
 
+Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
+each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
+The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
+
+```sh
+cmake -S src/native -B .venv/ekf-native
+cmake --build .venv/ekf-native
+```
+
+Add `.venv/ekf-native` to `LD_LIBRARY_PATH` (`DYLD_LIBRARY_PATH` on macOS)
+before running Python.
+
 Record from the laptop with props removed:
 
 ```sh
@@ -74,6 +89,8 @@ Captures require IMU, JPEGs, camera calibration and ToF, and include published
 estimates. Data is buffered on the Pi, downloaded, then removed there. Allow about
 70 MB for a 40-second capture. IMU timestamps mark host receipt; camera timestamps
 mark driver callbacks, not sensor acquisition.
+`camera_delay_s` subtracts the camera's delay relative to IMU timestamps during
+fusion; it leaves recorded timestamps unchanged.
 
 Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
 

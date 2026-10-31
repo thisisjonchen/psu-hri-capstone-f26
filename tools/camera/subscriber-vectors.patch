@@ -1,0 +1,202 @@
+diff --git a/src/raspicam_node.cpp b/src/raspicam_node.cpp
+index 1cda501..19a5638 100644
+--- a/src/raspicam_node.cpp
++++ b/src/raspicam_node.cpp
+@@ -404,118 +404,101 @@ static void image_encoder_buffer_callback(MMAL_PORT_T* port, MMAL_BUFFER_HEADER_
+  * @param buffer mmal buffer header pointer
+  */
+ static void video_encoder_buffer_callback(MMAL_PORT_T* port, MMAL_BUFFER_HEADER_T* buffer) {
+-  // We pass our own memory and other stuff in via the userdata field.
+   PORT_USERDATA* pData = port->userdata;
+ 
+   if (buffer->flags & MMAL_BUFFER_HEADER_FLAG_CODECSIDEINFO) {
+-    // Frame information
+-    motion_vectors.msg.header.seq = pData->frame;
+-    motion_vectors.msg.header.frame_id = camera_frame_id;
+-    motion_vectors.msg.header.stamp = ros::Time::now();
+-
+-    // Number of 16*16px macroblocks
+-    motion_vectors.msg.mbx = pData->pstate.width / 16;
+-    if (pData->pstate.width % 16)
+-      motion_vectors.msg.mbx++;
+-
+-    motion_vectors.msg.mby = pData->pstate.height / 16;
+-    if (pData->pstate.height % 16)
+-      motion_vectors.msg.mby++;
+-
+-    mmal_buffer_header_mem_lock(buffer);
+-
+-    // Motion vector data
+-    struct __attribute__((__packed__)) imv {
+-      int8_t x;
+-      int8_t y;
+-      uint16_t sad;
+-    }* imv = reinterpret_cast<struct imv*>(buffer->data);
+-
+-    size_t num_elements = buffer->length / sizeof(struct imv);
+-    motion_vectors.msg.x.resize(num_elements);
+-    motion_vectors.msg.y.resize(num_elements);
+-    motion_vectors.msg.sad.resize(num_elements);
+-    
+-    motion_vectors_raw.msg = motion_vectors.msg;
+-    
+-    // Initialize camera parameters if not done already
+-    cv::Mat D = cv::Mat(c_info.D.size(), 1, CV_64F, c_info.D.data());
+-    cv::Mat_<double> K = cv::Mat_<double>(3, 3, c_info.K.data());
+-    cv::Mat P = cv::Mat_<double>(3, 4, c_info.P.data());
+-    cv::Mat R = cv::Mat_<double>(3, 3, c_info.R.data());
+-
+-    // Assuming the motion vectors are relative to macroblocks, compute original positions
+-    std::vector<cv::Point2d> original_positions;
+-    for (int by = 0; by < motion_vectors.msg.mby; ++by) {
+-        for (int bx = 0; bx < motion_vectors.msg.mbx; ++bx) {
+-            // Calculate original position of each macroblock (e.g., top-left corner)
+-            cv::Point2d block_top_left(bx * 16, by * 16); // Assuming 16x16 macroblocks
+-            original_positions.push_back(block_top_left);
++    const unsigned int frame = pData->frame++;
++    const bool processed = motion_vectors.pub->getPublisher().getNumSubscribers() > 0;
++    const bool raw = motion_vectors_raw.pub->getPublisher().getNumSubscribers() > 0;
++    if (processed || raw) {
++      const ros::Time stamp = ros::Time::now();
++      const int columns = (pData->pstate.width + 15) / 16;
++      const int rows = (pData->pstate.height + 15) / 16;
++      struct __attribute__((__packed__)) imv {
++        int8_t x;
++        int8_t y;
++        uint16_t sad;
++      };
++      mmal_buffer_header_mem_lock(buffer);
++      const imv* vectors = reinterpret_cast<const imv*>(buffer->data);
++      const size_t count = buffer->length / sizeof(imv);
++
++      if (raw) {
++        auto& msg = motion_vectors_raw.msg;
++        msg.header.seq = frame;
++        msg.header.frame_id = camera_frame_id;
++        msg.header.stamp = stamp;
++        msg.mbx = columns;
++        msg.mby = rows;
++        msg.x.resize(count);
++        msg.y.resize(count);
++        msg.sad.resize(count);
++        for (size_t i = 0; i < count; ++i) {
++          msg.x[i] = vectors[i].x;
++          msg.y[i] = vectors[i].y;
++          msg.sad[i] = vectors[i].sad;
+         }
+-    }
+-
+-    for (size_t i = 0; i < num_elements; i++) {
+-      motion_vectors_raw.msg.x[i] = imv->x;
+-      motion_vectors_raw.msg.y[i] = imv->y;
+-      motion_vectors_raw.msg.sad[i] = imv->sad;
+-
+-      // Compute the absolute positions of the head and tail of the motion vector
+-      cv::Point2d tail = original_positions[i];
+-      cv::Point2d head = tail + cv::Point2d(imv->x, imv->y);
+-      
+-      cv::Point2d points[2] = {tail, head};
+-
+-      for (int j = 0; j < 2; j++) {
+-        // Undistort both points
+-        std::vector<cv::Point2d> distorted_point = {cv::Point2d(points[j].x, points[j].y)};
+-        std::vector<cv::Point2d> rectified_point;
+-        cv::undistortPoints(distorted_point, rectified_point, K, D, R, P);
+-
+-        // Convert to normalized coordinates using pixel2normalized function
+-        cv::Point2d normalized_point = pixel2normalized(K, rectified_point[0].x, rectified_point[0].y);
+-
+-        // Apply homography
+-        cv::Mat p_point(3, 1, CV_64F);
+-        p_point.at<double>(0, 0) = normalized_point.x;
+-        p_point.at<double>(1, 0) = normalized_point.y;
+-        p_point.at<double>(2, 0) = 1;
+-
+-        cv::Mat projected_point = homography * p_point;
+-
+-        // Convert back to pixel coordinates
+-        cv::Point2d px_coord = normalized2pixel(K, projected_point.at<double>(0, 0) / projected_point.at<double>(2, 0), projected_point.at<double>(1, 0) / projected_point.at<double>(2, 0));
++      }
+ 
+-        if (j == 0) {
+-          motion_vectors.msg.x[i] = px_coord.x;
+-          motion_vectors.msg.y[i] = px_coord.y;
+-        } else {
+-          motion_vectors.msg.x[i] -= px_coord.x;
+-          motion_vectors.msg.y[i] -= px_coord.y;
++      if (processed) {
++        auto& msg = motion_vectors.msg;
++        msg.header.seq = frame;
++        msg.header.frame_id = camera_frame_id;
++        msg.header.stamp = stamp;
++        msg.mbx = columns;
++        msg.mby = rows;
++        msg.x.assign(count, 0);
++        msg.y.assign(count, 0);
++        msg.sad.assign(count, 0);
++        cv::Mat D = cv::Mat(c_info.D.size(), 1, CV_64F, c_info.D.data());
++        cv::Mat_<double> K = cv::Mat_<double>(3, 3, c_info.K.data());
++        cv::Mat P = cv::Mat_<double>(3, 4, c_info.P.data());
++        cv::Mat R = cv::Mat_<double>(3, 3, c_info.R.data());
++
++        for (size_t i = 0; i < count; ++i) {
++          // The encoder includes one padding column at the end of every row.
++          const size_t x = i % (columns + 1), y = i / (columns + 1);
++          if (x >= static_cast<size_t>(columns) || y >= static_cast<size_t>(rows))
++            continue;
++          const cv::Point2d tail(x * 16, y * 16);
++          const cv::Point2d head = tail + cv::Point2d(vectors[i].x, vectors[i].y);
++          const cv::Point2d points[2] = {tail, head};
++          for (int j = 0; j < 2; ++j) {
++            std::vector<cv::Point2d> distorted_point = {points[j]};
++            std::vector<cv::Point2d> rectified_point;
++            cv::undistortPoints(distorted_point, rectified_point, K, D, R, P);
++            cv::Point2d normalized_point = pixel2normalized(K, rectified_point[0].x, rectified_point[0].y);
++            cv::Mat p_point(3, 1, CV_64F);
++            p_point.at<double>(0, 0) = normalized_point.x;
++            p_point.at<double>(1, 0) = normalized_point.y;
++            p_point.at<double>(2, 0) = 1;
++            cv::Mat projected_point = homography * p_point;
++            cv::Point2d px_coord = normalized2pixel(K, projected_point.at<double>(0, 0) / projected_point.at<double>(2, 0), projected_point.at<double>(1, 0) / projected_point.at<double>(2, 0));
++            if (j == 0) {
++              msg.x[i] = px_coord.x;
++              msg.y[i] = px_coord.y;
++            } else {
++              msg.x[i] -= px_coord.x;
++              msg.y[i] -= px_coord.y;
++            }
++          }
+         }
+       }
+-
+-      imv++;
++      mmal_buffer_header_mem_unlock(buffer);
++      if (processed)
++        motion_vectors.pub->publish(motion_vectors.msg);
++      if (raw)
++        motion_vectors_raw.pub->publish(motion_vectors_raw.msg);
+     }
+-
+-    mmal_buffer_header_mem_unlock(buffer);
+-
+-    motion_vectors.pub->publish(motion_vectors.msg);
+-    motion_vectors_raw.pub->publish(motion_vectors_raw.msg);
+-    pData->frame++;
+   }
+ 
+-  // release buffer back to the pool
++  // Return every encoder buffer, including frames with no subscribers.
+   mmal_buffer_header_release(buffer);
+-
+-  // and send one back to the port (if still open)
+   if (port->is_enabled) {
+     MMAL_STATUS_T status;
+-
+     MMAL_BUFFER_HEADER_T* new_buffer = mmal_queue_get(pData->pstate.video_encoder_pool->queue);
+-
+     if (new_buffer)
+       status = mmal_port_send_buffer(port, new_buffer);
+-
+     if (!new_buffer || status != MMAL_SUCCESS) {
+       vcos_log_error("Unable to return a buffer to the video encoder port");
+       ROS_ERROR("Unable to return a buffer to the video encoder port");

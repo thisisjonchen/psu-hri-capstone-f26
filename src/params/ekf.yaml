@@ -1,5 +1,3 @@
-# Drone2: SpeedyBee F405 V3 / BMI270, Betaflight 2026.6.1.
-# Shared with drone1 by assumption. MSP values are firmware-processed counts.
 acceleration_m_s2_per_count: 0.00478515625
 gyro_rad_s_per_count: 0.0010652644360316954
 acceleration_offset_msp_counts: [0.0, 0.0, 0.0]
@@ -14,3 +12,5 @@ rotation_body_camera:
   - [0.0, -0.7071067811865476, -0.7071067811865475]
 camera_offset_body: [0.0, 0.0, 0.0]
 fusion_delay_s: 0.25
+# JPEG callback delay relative to the IMU timestamps.
+camera_delay_s: 0.04

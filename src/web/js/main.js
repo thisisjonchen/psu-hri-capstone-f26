@@ -619,6 +619,7 @@ class DroneSession {
     this.latestTime = 0;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
+    this.rangeStamp = null;
     this.series = {};
     this.xyFrames = {};
     this.xyReceivedAt = {};
@@ -789,6 +790,7 @@ class DroneSession {
     this.positionMode = false;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
+    this.rangeStamp = null;
     this.detectionReceivedAt = null;
     this.setDetection('No tag data', 'offline');
     this.fusedStamp = null;
@@ -999,10 +1001,14 @@ class DroneSession {
     });
     subscribe('/pidrone/range', 'sensor_msgs/Range', message => {
       const time = this.time(message);
-      const valid = Number.isFinite(message.range) && message.range >= 0 &&
+      const valid = Number.isFinite(time) && Number.isFinite(message.range) && message.range >= 0 &&
         (message.min_range === undefined || message.range >= message.min_range) &&
         (message.max_range === undefined || message.range <= message.max_range);
-      if (valid) this.addPoint('range', time, message.range);
+      if (valid) {
+        if (this.rangeStamp !== null && time <= this.rangeStamp) return;
+        this.rangeStamp = time;
+        this.addPoint('range', time, message.range);
+      }
       this.field('height').textContent = valid ? message.range.toFixed(2) + ' m' : '—';
       this.updateVerticalSpeed(time, valid ? message.range : NaN);
       this.render('height');
@@ -1047,7 +1053,10 @@ class DroneSession {
   }
 
   refreshVerticalSpeed() {
-    if (this.verticalSampleAt !== null && Date.now() - this.verticalSampleAt > 500) this.clearVerticalSpeed();
+    if (this.verticalSampleAt !== null && Date.now() - this.verticalSampleAt > 500) {
+      this.field('height').textContent = '—';
+      this.clearVerticalSpeed();
+    }
   }
 
   updateVerticalSpeed(time, height) {

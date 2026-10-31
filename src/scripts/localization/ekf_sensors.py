@@ -11,6 +11,7 @@ import numpy as np
 from localization.camera_flow import undistort
 from localization.rotations import quaternion_matrix, skew
 from localization.ekf import _array
+from localization import ekf_native
 
 
 def mounting_rotation(value):
@@ -35,7 +36,8 @@ class FloorRange(object):
         rotation = quaternion_matrix(quaternion)
         center = position + rotation.dot(self.offset)
         direction = rotation.dot(self.beam)
-        if center[2] <= self.floor_z or direction[2] >= -.1:
+        # Range can correct a height prediction that has crossed below the floor.
+        if direction[2] >= -.1:
             raise ValueError('Range beam does not reach the floor reliably')
         distance = (self.floor_z-center[2])/direction[2]
         observation = np.zeros((1, 15))
@@ -148,51 +150,19 @@ class FloorCamera(object):
             return ekf._reject('camera_below_min_height')
         return None
 
-    def _floor_geometry(self, position, quaternion, rays):
-        rotation = quaternion_matrix(quaternion)
-        height = (position+rotation.dot(self.offset))[2]-self.floor_z
-        body_rays = rays.dot(self.rotation.T)
-        directions = body_rays.dot(rotation.T)
-        down = directions[:, 2] < -1e-3
-        depth = height/np.where(down, -directions[:, 2], 1.)
-        reach = np.linalg.norm(depth[:, None]*directions[:, :2], axis=1)
-        indices = np.flatnonzero(down & (height >= self.min_height) & (reach <= self.max_floor_distance))
-        return indices, rotation, height, body_rays[indices], directions[indices]
-
     def linearize(self, position, velocity, quaternion, gyro_bias, angular_rate, rays):
         """Predict backward normalized-image rates and their 15-state Jacobians."""
-        indices, rotation, height, body_rays, directions = self._floor_geometry(position, quaternion, rays)
-        rays = rays[indices]
-        inverse_depth = -directions[:, 2]/height
-        projection = np.zeros((len(indices), 2, 3))
-        projection[:, 0, 0], projection[:, 1, 1] = 1., 1.
-        projection[:, :, 2] = -rays[:, :2]
-        camera_projection = projection.dot(self.rotation.T)
-        ray_skew = np.cross(np.eye(3), rays[:, None, :])
-        angular_projection = -np.einsum('nij,njk->nik', projection, ray_skew).dot(self.rotation.T)
-        rate = angular_rate-gyro_bias
-        body_velocity = rotation.T.dot(velocity)
-        sensor_velocity = body_velocity + np.cross(rate, self.offset)
-        translated = camera_projection.dot(sensor_velocity)
-        prediction = inverse_depth[:, None]*translated + angular_projection.dot(rate)
-        observation = np.zeros((len(indices), 2, 15))
-        observation[:, :, 2] = -inverse_depth[:, None]*translated/height
-        observation[:, :, 3:6] = inverse_depth[:, None, None]*camera_projection.dot(rotation.T)
-        height_jacobian = -rotation[2].dot(skew(self.offset))
-        depth_jacobian = (np.einsum('j,njk->nk', rotation[2], np.cross(np.eye(3), body_rays[:, None, :]))
-                          - inverse_depth[:, None]*height_jacobian)/height
-        observation[:, :, 6:9] = (inverse_depth[:, None, None]*camera_projection.dot(skew(body_velocity))
-                                  + translated[:, :, None]*depth_jacobian[:, None, :])
-        observation[:, :, 12:15] = (inverse_depth[:, None, None]*camera_projection.dot(skew(self.offset))
-                                    - angular_projection)
-        return indices, prediction, observation
+        return ekf_native.camera_linearize(position, velocity, quaternion, gyro_bias,
+            angular_rate, self.rotation, self.offset, rays, self.floor_z,
+            self.min_height, self.max_floor_distance)
 
     def correct_image(self, ekf, sample, stamp, angular_rate):
         rejected = self._check_pair(ekf, sample, stamp, angular_rate)
         if rejected is not None:
             return rejected
         start, end, previous, image = sample
-        indices = self._floor_geometry(ekf.position, ekf.quaternion, self.rays)[0]
+        indices = ekf_native.camera_indices(ekf.position, ekf.quaternion, self.rotation,
+            self.offset, self.rays, self.floor_z, self.min_height, self.max_floor_distance)
         if len(indices) < 8:
             return ekf._reject('too_few_camera_matches')
         # Spread candidates across the floor, with room for tracking failures.
@@ -251,9 +221,13 @@ class FloorCamera(object):
         if len(keep) < 8:
             return ekf._reject('too_few_camera_matches')
         # Fuse one flow vector; gyro uncertainty is shared by all image matches.
-        observation = np.mean(observation[keep], axis=0)
-        noise = np.sum(noises[keep], axis=0)/len(keep)**2
+        information = np.linalg.inv(noises[keep])
+        noise = np.linalg.inv(np.sum(information, axis=0))
+        weights = np.einsum('ij,njk->nik', noise, information)
+        observation = np.einsum('nij,njk->ik', weights, observation[keep])
+        measured = np.einsum('nij,nj->i', weights, measured[keep])
+        predicted = np.einsum('nij,nj->i', weights, predicted[keep])
         gyro_projection = observation[:, 12:15]
         noise += gyro_projection.dot(gyro_projection.T)*ekf.noise[6, 6]/duration
-        return ekf._correct(np.mean(measured[keep], axis=0), np.mean(predicted[keep], axis=0),
+        return ekf._correct(measured, predicted,
                             observation, noise, stamp, 'camera', 9.21)

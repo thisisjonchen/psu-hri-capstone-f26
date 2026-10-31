@@ -63,6 +63,9 @@ class Replay:
         self.range = FloorRange(profile['range_offset_body'], profile['range_beam_body'])
         self.camera_rotation = mounting_rotation(profile['rotation_body_camera'])
         self.camera_offset = _array(profile['camera_offset_body'], (3,))
+        self.camera_delay = float(profile.get('camera_delay_s', 0.))
+        if not 0 <= self.camera_delay <= float(profile.get('fusion_delay_s', .25)):
+            raise ValueError('Camera delay must fit within the fusion delay')
         self.stationary_intervals = []
         for interval in profile.get('stationary_intervals_s', []):
             start, end = _array(interval, (2,))
@@ -131,7 +134,8 @@ class Replay:
                 self.counts['missing_camera_calibration'] += 1
             else:
                 if topic.endswith('image/compressed'):
-                    sample, reason = self.camera.image_pair(message.data, (stamp_ns-self.origin_ns)/1e9)
+                    image_stamp = stamp_ns-int(round(self.camera_delay*1e9))
+                    sample, reason = self.camera.image_pair(message.data, (image_stamp-self.origin_ns)/1e9)
                     correct = self.camera.correct_image
                 else:
                     sample, reason = self.camera.vector_pair(message.x, message.y, message.mbx,

@@ -8,6 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   geometry_msgs
+  sensor_msgs
+  nav_msgs
   std_msgs
   message_generation
 )
@@ -132,6 +134,8 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
+add_subdirectory(native)
+
 ## Declare a C++ library
 # add_library(pidrone_pkg
 #   src/${PROJECT_NAME}/pidrone_pkg.cpp
@@ -167,7 +171,6 @@ catkin_install_python(PROGRAMS
   scripts/PALS/apriltag_mapping_node
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
-  scripts/PALS/ekf_localization_node
   scripts/tof_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

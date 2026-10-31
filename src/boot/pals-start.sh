@@ -16,8 +16,11 @@ if [[ "${1:-}" != status ]]; then
 fi
 
 session_running() {
-    docker exec "$container" screen -wipe >/dev/null 2>&1
-    docker exec "$container" screen -ls 2>/dev/null |
+    # A large descriptor limit makes these screen queries expensive.
+    docker exec "$container" bash -c '
+        ulimit -Sn 1024 || exit 1
+        screen -wipe >/dev/null 2>&1
+        exec screen -ls' 2>/dev/null |
         grep -Eq "[0-9]+\.$session[[:space:]].*\((Attached|Detached|Multi)"
 }
 

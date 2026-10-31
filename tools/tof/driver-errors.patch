@@ -1,0 +1,77 @@
+--- a/vl53l1x/src/i2c.cpp
++++ b/vl53l1x/src/i2c.cpp
+@@ -38,11 +38,11 @@
+ 	reg = htons(reg); // little endian to big endian
+ 
+ 	// write register number
+-	if (write(fd, &reg, sizeof(reg)) < 0) {
++	if (write(fd, &reg, sizeof(reg)) != static_cast<ssize_t>(sizeof(reg))) {
+ 		return false;
+ 	}
+ 
+-	return read(fd, pdata, count);
++	return read(fd, pdata, count) == static_cast<ssize_t>(count);
+ }
+ 
+ bool i2c_readRegisterByte(int reg, uint8_t *pdata)
+@@ -52,7 +52,7 @@
+ 
+ bool i2c_readRegisterWord(uint16_t reg, uint16_t *pdata)
+ {
+-	if (i2c_readRegisterMulti(reg, 2, pdata) < 0) {
++	if (!i2c_readRegisterMulti(reg, 2, pdata)) {
+ 		return false;
+ 	}
+ 	*pdata = ntohs(*pdata); // big endian to little endian
+@@ -68,7 +68,7 @@
+ 	memcpy(buf, &reg, sizeof(reg));
+ 	memcpy(buf + sizeof(reg), pdata, count);
+ 
+-	return write(fd, buf, count + sizeof(reg)) > 0;
++	return write(fd, buf, count + sizeof(reg)) == static_cast<ssize_t>(count + sizeof(reg));
+ }
+ 
+ bool i2c_writeRegisterByte(uint16_t reg, uint8_t value)
+--- a/vl53l1x/src/vl53l1x.cpp
++++ b/vl53l1x/src/vl53l1x.cpp
+@@ -123,6 +123,7 @@
+ 	ROS_INFO("VL53L1X: ranging");
+ 
+ 	VL53L1_RangingMeasurementData_t measurement_data;
++	bool restart_failed = false;
+ 
+ 	// Main loop
+ 	ros::Rate r(poll_rate);
+@@ -132,14 +133,29 @@
+ 
+ 		// Check the data is ready
+ 		uint8_t data_ready = 0;
+-		VL53L1_GetMeasurementDataReady(&dev, &data_ready);
++		VL53L1_Error ready_error = VL53L1_GetMeasurementDataReady(&dev, &data_ready);
++		if (ready_error != VL53L1_ERROR_NONE) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: data-ready read failed: %d", ready_error);
++			continue;
++		}
+ 		if (!data_ready) {
+ 			continue;
+ 		}
+ 
+ 		// Read measurement
+-		VL53L1_GetRangingMeasurementData(&dev, &measurement_data);
+-		VL53L1_ClearInterruptAndStartMeasurement(&dev);
++		VL53L1_Error read_error = VL53L1_GetRangingMeasurementData(&dev, &measurement_data);
++		const bool recovering = restart_failed;
++		VL53L1_Error restart_error = VL53L1_ClearInterruptAndStartMeasurement(&dev);
++		restart_failed = restart_error != VL53L1_ERROR_NONE;
++		if (restart_failed) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: measurement restart failed: %d", restart_error);
++		}
++		if (read_error != VL53L1_ERROR_NONE) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: measurement read failed: %d", read_error);
++			continue;
++		}
++		// Discard the pending result until its interrupt has been acknowledged.
++		if (restart_failed || recovering) continue;
+ 
+ 		// Publish measurement data
+ 		data.header.stamp = range.header.stamp;

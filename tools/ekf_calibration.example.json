@@ -16,5 +16,6 @@
     "gyro_bias": [0.0, 0.0, 0.0]
   },
   "fusion_delay_s": 0.25,
+  "camera_delay_s": 0.04,
   "stationary_intervals_s": []
 }

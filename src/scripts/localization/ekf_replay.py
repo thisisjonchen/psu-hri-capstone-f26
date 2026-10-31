@@ -13,11 +13,10 @@ from localization.ekf import _array, _stamp
 
 
 class DelayedEKF(object):
-    def __init__(self, ekf, delay=.25, record_states=True):
+    def __init__(self, ekf, delay=.25):
         if ekf.stamp is None or not np.isfinite(delay) or not 0 <= delay <= 2:
             raise ValueError('Initialize the EKF and choose a delay in [0, 2] s')
         self.ekf, self.delay = ekf, delay
-        self.record_states = record_states
         self.last_imu = ekf.stamp
         self.closed_through = ekf.stamp-1e-9
         self.imu, self.measurements = deque(), []
@@ -120,8 +119,7 @@ class DelayedEKF(object):
                     break
             if end == stamp:
                 self.imu.popleft()
-                if self.record_states:
-                    events.append(self._event('imu', True, 'predicted'))
+                events.append(self._event('imu', True, 'predicted'))
             while self.measurements and self.measurements[0][0] == stamp:
                 _, sensor, _, update = heapq.heappop(self.measurements)
                 self.pending_keys.remove((sensor, stamp))
@@ -137,18 +135,11 @@ class DelayedEKF(object):
         self.measurements, self.pending_keys = [], set()
         return events, remaining
 
-    def current_state(self):
-        """Return an output at the newest IMU stamp, retaining the fusion horizon."""
-        if self.fault:
-            return None
-        return self.ekf.project(list(self.imu))
-
     def _event(self, sensor, accepted, reason):
         f = self.ekf
         event = dict(stamp=f.stamp, sensor=sensor, accepted=accepted, reason=reason)
-        if self.record_states:
-            event.update(position=f.position.copy(), velocity=f.velocity.copy(), quaternion=f.quaternion.copy(),
-                         acceleration_bias=f.acceleration_bias.copy(), gyro_bias=f.gyro_bias.copy(),
-                         variances=f.covariance_diagonal(),
-                         nis=None if sensor == 'imu' else (f.last_update or {}).get('nis'))
+        event.update(position=f.position.copy(), velocity=f.velocity.copy(), quaternion=f.quaternion.copy(),
+                     acceleration_bias=f.acceleration_bias.copy(), gyro_bias=f.gyro_bias.copy(),
+                     variances=f.covariance_diagonal(),
+                     nis=None if sensor == 'imu' else (f.last_update or {}).get('nis'))
         return event

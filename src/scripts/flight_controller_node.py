@@ -523,8 +523,11 @@ def main():
 
     print("Started flight-controller node!")
 
+    published_mode, last_mode_at = None, None
+    published_calibration = None
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
     try:
+        calibration_pub.publish(Bool(data=False))
         while not rospy.is_shutdown():
             # if the current mode is anything other than disarmed
             # preform as safety check
@@ -558,11 +561,17 @@ def main():
                     msp_imupub.publish(msp_message)
 
             if command_sent:
-                fc.modepub.publish(fc.curr_mode)
                 with fc.mode_lock:
-                    calibration_pub.publish(Bool(data=False))
-                    calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
-                                                                         'request': fc.calibration_request})))
+                    now = monotonic()
+                    # Report transitions immediately; repeat unchanged modes at 10 Hz.
+                    if fc.curr_mode != published_mode or now - last_mode_at >= .1:
+                        fc.modepub.publish(fc.curr_mode)
+                        published_mode, last_mode_at = fc.curr_mode, now
+                    calibration = (fc.calibration_owner, fc.calibration_request)
+                    if calibration != published_calibration:
+                        calibration_owner_pub.publish(String(data=json.dumps({'owner': calibration[0],
+                                                                             'request': calibration[1]})))
+                        published_calibration = calibration
 
             # Wake on a reply, or wait up to 5 ms before checking commands again.
             select.select([fc.board.ser], [], [], .005)

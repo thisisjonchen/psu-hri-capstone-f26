@@ -29,6 +29,7 @@ from localization.rotations import quaternion_matrix
 class FusionLocalizationNode(object):
     def __init__(self):
         self.lock = threading.RLock()
+        self.updated = threading.Event()
         self.ekf_odom = None
         self.ekf_history = deque()
         self.ekf_ready, self.ekf_ready_at = False, None
@@ -71,6 +72,10 @@ class FusionLocalizationNode(object):
         self.layout_stamp = None
         self.generation = 0
         self.last_time = None
+        self.last_status_at = None
+        self.published_ready = None
+        self.last_ready_at = None
+        self.published_generation = None
         self.reason = 'Waiting for UWB'
         self.local_reason = 'Waiting for EKF readiness'
         self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
@@ -79,7 +84,7 @@ class FusionLocalizationNode(object):
         self.status_pub = rospy.Publisher('pidrone/localization/fusion_status', DiagnosticArray, queue_size=1)
         self.local_pub = rospy.Publisher('pidrone/localization/local_ready', Bool, queue_size=1)
         self.ready_pub = rospy.Publisher('pidrone/localization/ready', Bool, queue_size=1)
-        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1)
+        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1, latch=True)
         self.broadcaster = tf.TransformBroadcaster()
         self.subscribers = [
             rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
@@ -138,6 +143,7 @@ class FusionLocalizationNode(object):
             self.ekf_history.append((stamp, np.array([p.x, p.y])))
             while self.ekf_history and stamp - self.ekf_history[0][0] > 2.:
                 self.ekf_history.popleft()
+            self.updated.set()
 
     def local_odom(self):
         p = self.ekf_odom.pose.pose.position
@@ -325,11 +331,21 @@ class FusionLocalizationNode(object):
                       else 'Waiting for disarmed mode and fresh EKF attitude to align heading' if self.room.yaw_offset is None
                       else 'Four surveyed anchors required' if self.layout is None
                       else 'UWB missing or stale' if self.reason == 'OK' else self.reason)
-            self.local_pub.publish(Bool(data=local_ready))
-            self.ready_pub.publish(Bool(data=ready))
-            self.generation_pub.publish(UInt32(data=self.generation))
+            ready_at = monotonic()
+            readiness = (local_ready, ready)
+            # Send changes immediately and keep the dashboard's heartbeat fresh.
+            if readiness != self.published_ready or ready_at - self.last_ready_at >= .1:
+                self.local_pub.publish(Bool(data=local_ready))
+                self.ready_pub.publish(Bool(data=ready))
+                self.published_ready, self.last_ready_at = readiness, ready_at
+            if self.generation != self.published_generation:
+                self.generation_pub.publish(UInt32(data=self.generation))
+                self.published_generation = self.generation
             if height and attitude_ready:
                 self.publish_estimates(local_ready, ready, now)
+            status_at = monotonic()
+            if self.last_status_at is not None and status_at - self.last_status_at < .5:
+                return
             status = DiagnosticStatus()
             status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof+camera'
             status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
@@ -349,6 +365,7 @@ class FusionLocalizationNode(object):
             diagnostics.header.stamp = rospy.Time.from_sec(now)
             diagnostics.status = [status]
             self.status_pub.publish(diagnostics)
+            self.last_status_at = status_at
 
     def publish_estimates(self, local_ready, ready, now):
         odometry = self.ekf_odom
@@ -423,10 +440,11 @@ class FusionLocalizationNode(object):
 def main():
     rospy.init_node('fusion_localization')
     node = FusionLocalizationNode()
-    rate = rospy.Rate(60)
     while not rospy.is_shutdown():
+        # Wake for fresh EKF output, or check freshness during a sensor gap.
+        node.updated.wait(1 / 60.)
+        node.updated.clear()
         node.step()
-        rate.sleep()
 
 
 if __name__ == '__main__':
