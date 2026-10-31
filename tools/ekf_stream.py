@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Record EKF inputs and baseline estimates over SSH for flow_capture.py.
+"""Record EKF inputs and published estimates over SSH for flow_capture.py.
 
 Runs on ROS Kinetic with Python 2.7. Messages are saved in callback order.
 """
@@ -13,7 +13,8 @@ import threading
 
 TOPICS = (
     '/pidrone/imu_msp', '/pidrone/range',
-    '/raspicam_node/motion_vectors', '/raspicam_node/camera_info',
+    '/raspicam_node/image/compressed',
+    '/raspicam_node/camera_info',
     '/pidrone/state', '/pidrone/localization/odometry',
 )
 
@@ -66,8 +67,10 @@ def stream_ros(seconds):
     metadata = dict(started_ns=rospy.Time.now().to_nsec(),
                     multiwii_yaml=calibration_yaml,
                     parameters=dict((name, rospy.get_param(name, {})) for name in
-                                    ('/optical_flow_node', '/fusion_localization', '/raspicam_node')),
+                                    ('/ekf_localization', '/fusion_localization', '/raspicam_node')),
                     imu_stamp='MSP packet host receipt; acquisition time unavailable',
+                    camera_images='Original JPEG images from image/compressed',
+                    camera_stamp='Driver callback time; exposure time unavailable',
                     order='serialized recorder callbacks; not hardware acquisition order')
     writer = CaptureWriter(output, metadata)
     lock = threading.Lock()
@@ -110,6 +113,13 @@ def stream_ros(seconds):
         with lock:
             state['accepting'] = False
             reason = 'error' if state['failed'] else ('shutdown' if rospy.is_shutdown() else 'duration')
+            missing = [topic for topic in ('/pidrone/imu_msp', '/pidrone/range',
+                                          '/raspicam_node/image/compressed',
+                                          '/raspicam_node/camera_info')
+                       if not writer.counts[topic]]
+            if reason == 'duration' and missing:
+                state['failed'], reason = True, 'missing_data'
+                print('Capture missing required data: ' + ', '.join(missing), file=sys.stderr)
             writer.finish(reason)
         for subscriber in subscribers:
             subscriber.unregister()

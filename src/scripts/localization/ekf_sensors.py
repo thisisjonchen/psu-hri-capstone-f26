@@ -5,6 +5,7 @@ The camera's optical axes are right/down/forward.
 """
 from __future__ import division
 
+import cv2
 import numpy as np
 
 from localization.camera_flow import undistort
@@ -57,14 +58,15 @@ class FloorRange(object):
 
 
 class FloorCamera(object):
-    """Predict block motion between camera frames using their poses and the floor.
+    """Fuse image-motion rates using velocity, attitude and height above the floor.
 
-    The EKF retains the previous pose and its uncertainty. Pixel noise is
-    provisional until measured from recordings.
+    Pixels are unrectified. Raw encoder vectors remain available for comparison.
+    Each pair measures average flow at its midpoint. Pixel noise is provisional
+    until measured from recordings; no previous camera pose is an EKF state.
     """
     def __init__(self, camera_matrix, distortion, model, image_size,
                  rotation_body_camera, offset_body, frame_interval=1/30.,
-                 flip_vertically=True, floor_z=0., pixel_stddev=1.5,
+                 flip_vertically=False, floor_z=0., pixel_stddev=1.5,
                  min_height=.1, max_floor_distance=1.5):
         width, height = image_size
         if width <= 0 or height <= 0 or width % 16 or height % 16:
@@ -89,103 +91,169 @@ class FloorCamera(object):
         u, v = np.meshgrid(np.arange(self.columns)*16+8., np.arange(self.rows)*16+8.)
         self.centers = np.column_stack((u.ravel(), v.ravel()))
         self.rays = undistort(self.centers, *self.camera)
+        self.previous_image = None
+        self.image_stamp = None
 
-    def _reference(self, ekf):
-        ekf.clone_camera_pose()
-        ekf.camera_clone['model_id'] = id(self)
+    def image_pair(self, encoded, stamp):
+        """Retain the actual images and timestamps used by each flow measurement."""
+        if not np.isfinite(stamp) or (self.image_stamp is not None and stamp <= self.image_stamp):
+            return None, 'repeated_camera_frame'
+        try:
+            image = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        except (cv2.error, TypeError, ValueError):
+            image = None
+        previous, start = self.previous_image, self.image_stamp
+        self.previous_image, self.image_stamp = image, stamp
+        if image is None or image.shape != (self.rows*16, self.columns*16):
+            self.previous_image = None
+            return None, 'invalid_camera_image'
+        if previous is None or stamp-start > .2:
+            return None, 'camera_reference_initialized'
+        return (start, stamp, previous, image), None
 
-    def linearize(self, position, quaternion, previous_position, previous_quaternion, ray):
-        """Project a floor point into the previous frame and return its Jacobian.
-
-        Columns cover the 15 current-state errors and six previous-pose errors.
-        """
-        rotation, previous = quaternion_matrix(quaternion), quaternion_matrix(previous_quaternion)
-        center = position + rotation.dot(self.offset)
-        body_ray = self.rotation.dot(ray)
-        direction = rotation.dot(body_ray)
-        if center[2]-self.floor_z < self.min_height or direction[2] >= -1e-3:
-            raise ValueError('No nearby floor')
-        length = (self.floor_z-center[2])/direction[2]
-        if np.linalg.norm(length*direction[:2]) > self.max_floor_distance:
-            raise ValueError('Distant floor')
-        point = center + length*direction
-        in_previous_body = previous.T.dot(point-previous_position)
-        in_camera = self.rotation.T.dot(in_previous_body-self.offset)
-        x, y, z = in_camera
-        if z <= 1e-3:
-            raise ValueError('Point behind previous camera')
-        projection = np.array([[1/z, 0., -x/z**2], [0., 1/z, -y/z**2]])
-        intersection = np.eye(3) - np.outer(direction, [0., 0., 1.])/direction[2]
-        camera_from_world = self.rotation.T.dot(previous.T)
-        observation = np.zeros((2, 21))
-        observation[:, :3] = projection.dot(camera_from_world).dot(intersection)
-        observation[:, 6:9] = -projection.dot(camera_from_world).dot(intersection).dot(rotation).dot(
-            skew(self.offset) + length*skew(body_ray))
-        observation[:, 15:18] = -projection.dot(camera_from_world)
-        observation[:, 18:21] = projection.dot(self.rotation.T).dot(skew(in_previous_body))
-        return in_camera[:2]/z, observation
-
-    def correct(self, ekf, vectors_x, vectors_y, mbx, stamp):
-        if ekf.stamp is None:
-            return ekf._reject('not_initialized')
-        if not np.isfinite(stamp) or abs(stamp-ekf.stamp) > 1e-6:
-            return ekf._reject('measurement_not_at_state_time')
-        clone = ekf.camera_clone
-        if clone is not None and stamp <= clone['stamp']+1e-6:
-            return ekf._reject('repeated_camera_frame')
+    def vector_pair(self, vectors_x, vectors_y, mbx, stamp):
+        if not np.isfinite(stamp) or (self.image_stamp is not None and stamp <= self.image_stamp):
+            return None, 'repeated_camera_frame'
+        start, self.image_stamp = self.image_stamp, stamp
         try:
             shape = ((self.columns+1)*self.rows,)
             x, y = _array(vectors_x, shape), _array(vectors_y, shape)
             if mbx != self.columns:
                 raise ValueError('Invalid vector width')
         except (ValueError, TypeError):
-            return ekf._reject('invalid_camera_vectors')
+            return None, 'invalid_camera_vectors'
+        if start is None or abs(stamp-start-self.interval) > .2*self.interval:
+            return None, 'camera_reference_initialized'
         x, y = x.reshape(self.rows, mbx+1)[:, :mbx], y.reshape(self.rows, mbx+1)[:, :mbx]
         if self.flip:
             x, y = x[::-1], -y[::-1]
-        pixels = self.centers + np.column_stack((x.ravel(), y.ravel()))
-        # Encoder vectors match adjacent frames, so restart after a gap.
-        if (clone is None or clone.get('model_id') != id(self)
-                or abs(stamp-clone['stamp']-self.interval) > .2*self.interval):
-            self._reference(ekf)
-            return ekf._reject('camera_reference_initialized')
+        flow = np.column_stack((x.ravel(), y.ravel()))
+        valid = np.any(flow != 0, axis=1)
+        return (start, stamp, self.centers[valid], (self.centers+flow)[valid]), None
+
+    def _check_pair(self, ekf, sample, stamp, angular_rate):
+        if ekf.stamp is None:
+            return ekf._reject('not_initialized')
+        start, end = sample[:2]
+        if (not np.isfinite(stamp) or abs(stamp-ekf.stamp) > 1e-6
+                or abs(stamp-(start+end)/2) > 1e-6 or not 0 < end-start <= .2):
+            return ekf._reject('measurement_not_at_state_time')
+        if angular_rate is None:
+            return ekf._reject('missing_camera_imu')
+        rotation = quaternion_matrix(ekf.quaternion)
+        height = (ekf.position+rotation.dot(self.offset))[2]-self.floor_z
+        velocity = ekf.velocity + rotation.dot(np.cross(angular_rate-ekf.gyro_bias, self.offset))
+        # Both ends of the flow interval must clear the floor-height limit.
+        if height-abs(velocity[2])*(end-start)/2 < self.min_height:
+            return ekf._reject('camera_below_min_height')
+        return None
+
+    def _floor_geometry(self, position, quaternion, rays):
+        rotation = quaternion_matrix(quaternion)
+        height = (position+rotation.dot(self.offset))[2]-self.floor_z
+        body_rays = rays.dot(self.rotation.T)
+        directions = body_rays.dot(rotation.T)
+        down = directions[:, 2] < -1e-3
+        depth = height/np.where(down, -directions[:, 2], 1.)
+        reach = np.linalg.norm(depth[:, None]*directions[:, :2], axis=1)
+        indices = np.flatnonzero(down & (height >= self.min_height) & (reach <= self.max_floor_distance))
+        return indices, rotation, height, body_rays[indices], directions[indices]
+
+    def linearize(self, position, velocity, quaternion, gyro_bias, angular_rate, rays):
+        """Predict backward normalized-image rates and their 15-state Jacobians."""
+        indices, rotation, height, body_rays, directions = self._floor_geometry(position, quaternion, rays)
+        rays = rays[indices]
+        inverse_depth = -directions[:, 2]/height
+        projection = np.zeros((len(indices), 2, 3))
+        projection[:, 0, 0], projection[:, 1, 1] = 1., 1.
+        projection[:, :, 2] = -rays[:, :2]
+        camera_projection = projection.dot(self.rotation.T)
+        ray_skew = np.cross(np.eye(3), rays[:, None, :])
+        angular_projection = -np.einsum('nij,njk->nik', projection, ray_skew).dot(self.rotation.T)
+        rate = angular_rate-gyro_bias
+        body_velocity = rotation.T.dot(velocity)
+        sensor_velocity = body_velocity + np.cross(rate, self.offset)
+        translated = camera_projection.dot(sensor_velocity)
+        prediction = inverse_depth[:, None]*translated + angular_projection.dot(rate)
+        observation = np.zeros((len(indices), 2, 15))
+        observation[:, :, 2] = -inverse_depth[:, None]*translated/height
+        observation[:, :, 3:6] = inverse_depth[:, None, None]*camera_projection.dot(rotation.T)
+        height_jacobian = -rotation[2].dot(skew(self.offset))
+        depth_jacobian = (np.einsum('j,njk->nk', rotation[2], np.cross(np.eye(3), body_rays[:, None, :]))
+                          - inverse_depth[:, None]*height_jacobian)/height
+        observation[:, :, 6:9] = (inverse_depth[:, None, None]*camera_projection.dot(skew(body_velocity))
+                                  + translated[:, :, None]*depth_jacobian[:, None, :])
+        observation[:, :, 12:15] = (inverse_depth[:, None, None]*camera_projection.dot(skew(self.offset))
+                                    - angular_projection)
+        return indices, prediction, observation
+
+    def correct_image(self, ekf, sample, stamp, angular_rate):
+        rejected = self._check_pair(ekf, sample, stamp, angular_rate)
+        if rejected is not None:
+            return rejected
+        start, end, previous, image = sample
+        indices = self._floor_geometry(ekf.position, ekf.quaternion, self.rays)[0]
+        if len(indices) < 8:
+            return ekf._reject('too_few_camera_matches')
+        # Spread candidates across the floor, with room for tracking failures.
+        if len(indices) > 48:
+            indices = indices[np.linspace(0, len(indices)-1, 48).astype(int)]
+        points = self.centers[indices].astype(np.float32).reshape(-1, 1, 2)
+        settings = dict(winSize=(15, 15), maxLevel=2, minEigThreshold=1e-4,
+                        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, .01))
+        try:
+            back, found_back, error_back = cv2.calcOpticalFlowPyrLK(image, previous, points, None, **settings)
+            forward, found_forward, error_forward = cv2.calcOpticalFlowPyrLK(previous, image, back, None, **settings)
+            valid = ((found_back.ravel() != 0) & (found_forward.ravel() != 0)
+                     & (np.linalg.norm(forward[:, 0]-points[:, 0], axis=1) <= 1.)
+                     & (error_back.ravel() <= 15.) & (error_forward.ravel() <= 15.))
+            valid &= (np.all(np.isfinite(back[:, 0]), axis=1)
+                      & (back[:, 0, 0] >= 0) & (back[:, 0, 0] < self.columns*16)
+                      & (back[:, 0, 1] >= 0) & (back[:, 0, 1] < self.rows*16))
+        except cv2.error:
+            return ekf._reject('camera_tracking_failed')
+        pixels, indices = back[valid, 0], indices[valid]
+        if len(indices) > 24:
+            selected = np.linspace(0, len(indices)-1, 24).astype(int)
+            indices, pixels = indices[selected], pixels[selected]
+        return self._correct_flow(ekf, self.centers[indices], pixels, end-start, stamp, angular_rate)
+
+    def correct_vectors(self, ekf, sample, stamp, angular_rate):
+        rejected = self._check_pair(ekf, sample, stamp, angular_rate)
+        if rejected is not None:
+            return rejected
+        return self._correct_flow(ekf, sample[2], sample[3], sample[1]-sample[0], stamp, angular_rate)
+
+    def _correct_flow(self, ekf, current_pixels, pixels, duration, stamp, angular_rate):
+        if len(pixels) < 8:
+            return ekf._reject('too_few_camera_matches')
+        rays = undistort(current_pixels, *self.camera)
         previous_rays = undistort(pixels, *self.camera)
-        # Local lens Jacobians convert pixel-match noise to normalized-ray noise.
-        pixel_dx = (undistort(pixels+[.01, 0], *self.camera)[:, :2]-previous_rays[:, :2])/.01
-        pixel_dy = (undistort(pixels+[0, .01], *self.camera)[:, :2]-previous_rays[:, :2])/.01
-        prior = ekf.joint_covariance()
-        candidates = []
-        for i, ray in enumerate(self.rays):
-            # Zero encoder vectors are ambiguous (subpixel motion or no match).
-            if not (x.ravel()[i] or y.ravel()[i]):
-                continue
-            if not (0 <= pixels[i, 0] < self.columns*16 and 0 <= pixels[i, 1] < self.rows*16):
-                continue
-            try:
-                predicted, observation = self.linearize(ekf.position, ekf.quaternion,
-                    clone['position'], clone['quaternion'], ray)
-                jacobian = np.column_stack((pixel_dx[i], pixel_dy[i]))
-                noise = self.pixel_stddev**2 * jacobian.dot(jacobian.T)
-                residual = previous_rays[i, :2]-predicted
-                total = observation.dot(prior).dot(observation.T)+noise
-                nis = residual.dot(np.linalg.solve(total, residual))
-                if np.isfinite(nis) and nis <= 9.21:
-                    candidates.append((previous_rays[i, :2], predicted, observation, noise))
-            except (ValueError, np.linalg.LinAlgError):
-                continue
-        if len(candidates) < 8:
-            result = ekf._reject('too_few_camera_matches')
-        else:
-            selected = np.linspace(0, len(candidates)-1, min(12, len(candidates))).astype(int)
-            chosen = [candidates[i] for i in selected]
-            measured = np.concatenate([item[0] for item in chosen])
-            predicted = np.concatenate([item[1] for item in chosen])
-            observation = np.vstack([item[2] for item in chosen])
-            noise = np.zeros((len(measured), len(measured)))
-            for i, item in enumerate(chosen):
-                noise[2*i:2*i+2, 2*i:2*i+2] = item[3]
-            # Allow a mean squared normalized residual of nine after per-block gating.
-            result = ekf._correct(measured, predicted, observation, noise, stamp,
-                                  'camera', 9*len(measured))
-        self._reference(ekf)
-        return result
+        indices, predicted, observation = self.linearize(ekf.position, ekf.velocity, ekf.quaternion,
+            ekf.gyro_bias, angular_rate, (rays+previous_rays)/2)
+        if len(indices) < 8:
+            return ekf._reject('too_few_camera_matches')
+        measured = (previous_rays[indices, :2]-rays[indices, :2])/duration
+        pixels, previous_rays = pixels[indices], previous_rays[indices]
+        jacobians = np.empty((len(indices), 2, 2))
+        jacobians[:, :, 0] = (undistort(pixels+[.01, 0], *self.camera)[:, :2]-previous_rays[:, :2])/.01
+        jacobians[:, :, 1] = (undistort(pixels+[0, .01], *self.camera)[:, :2]-previous_rays[:, :2])/.01
+        noises = (self.pixel_stddev/duration)**2*np.einsum('nik,njk->nij', jacobians, jacobians)
+        residuals = measured-predicted
+        centered = residuals-np.median(residuals, axis=0)
+        try:
+            scores = np.einsum('ni,ni->n', centered, np.linalg.solve(noises, centered[:, :, None])[:, :, 0])
+        except np.linalg.LinAlgError:
+            return ekf._reject('camera_numerical_failure')
+        inside = ((pixels[:, 0] >= 0) & (pixels[:, 0] < self.columns*16)
+                  & (pixels[:, 1] >= 0) & (pixels[:, 1] < self.rows*16))
+        keep = np.flatnonzero(inside & np.isfinite(scores) & (scores <= 9.21))
+        if len(keep) < 8:
+            return ekf._reject('too_few_camera_matches')
+        # Fuse one flow vector; gyro uncertainty is shared by all image matches.
+        observation = np.mean(observation[keep], axis=0)
+        noise = np.sum(noises[keep], axis=0)/len(keep)**2
+        gyro_projection = observation[:, 12:15]
+        noise += gyro_projection.dot(gyro_projection.T)*ekf.noise[6, 6]/duration
+        return ekf._correct(np.mean(measured[keep], axis=0), np.mean(predicted[keep], axis=0),
+                            observation, noise, stamp, 'camera', 9.21)

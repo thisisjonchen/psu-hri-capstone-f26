@@ -167,7 +167,7 @@ catkin_install_python(PROGRAMS
   scripts/PALS/apriltag_mapping_node
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
-  scripts/optical_flow_node.py
+  scripts/PALS/ekf_localization_node
   scripts/tof_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -3,7 +3,7 @@
 
   record   stream the topics from the drone to CSV files on this laptop
   camera   record only the camera: raw motion vectors, flow output, height, IMU
-  ekf      capture raw MSP counts, camera/range and baseline outputs in one stream
+  ekf      capture raw MSP counts, JPEGs, range and published estimates
   analyze  summarize a recording: rates, height, velocities, distances, sign check,
            and (for camera recordings) where in the image motion is seen
 
@@ -48,16 +48,19 @@ CAMERA_TOPICS = {
 
 
 def record_ekf(drone, seconds, out_dir):
-    """Run a subscriber in the existing container; write data only on this laptop."""
+    """Buffer on the Pi so an SSH stall cannot block camera recording callbacks."""
     if not 0 < seconds <= 3600:
         raise ValueError('seconds must be in (0, 3600]')
     out_dir.mkdir(parents=True)
     worker = Path(__file__).with_name('ekf_stream.py').read_bytes()
-    command = "docker exec -i pidrone_pkg bash -ic 'exec python -u - %d'" % seconds
-    print('Connecting to %s for a %d-second capture; remain stationary initially.' % (drone, seconds))
+    command = ("pals_capture=$(mktemp /tmp/pals-ekf.XXXXXX) || exit 1; "
+               "trap 'rm -f \"$pals_capture\"' EXIT; "
+               "docker exec -i pidrone_pkg bash -ic 'exec python -u - %d' > \"$pals_capture\"; "
+               "pals_status=$?; cat \"$pals_capture\" || exit $?; exit \"$pals_status\"") % seconds
+    print('Recording on %s for %d seconds; download follows. Remain stationary initially.' % (drone, seconds))
     with (out_dir / 'events.jsonl').open('wb') as output, (out_dir / 'capture.stderr').open('wb') as errors:
         result = subprocess.run(['ssh', drone, command], input=worker, stdout=output,
-                                stderr=errors, timeout=seconds + 30)
+                                stderr=errors, timeout=seconds + 120)
     if result.returncode:
         raise RuntimeError('Capture failed; see %s' % (out_dir / 'capture.stderr'))
     print('Saved capture to %s' % out_dir)
@@ -397,7 +400,7 @@ def main():
     cam.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_camera_<time>)')
     ana = sub.add_parser('analyze', help='summarize a recording')
     ana.add_argument('folder', type=Path)
-    ekf = sub.add_parser('ekf', help='capture EKF inputs and baseline outputs in callback order')
+    ekf = sub.add_parser('ekf', help='capture IMU, images and other EKF inputs in callback order')
     ekf.add_argument('--drone', required=True, choices=('drone1', 'drone2'))
     ekf.add_argument('--seconds', type=int, default=30)
     ekf.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_ekf_<time>)')

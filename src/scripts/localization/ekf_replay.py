@@ -13,19 +13,24 @@ from localization.ekf import _array, _stamp
 
 
 class DelayedEKF(object):
-    def __init__(self, ekf, delay=.25):
+    def __init__(self, ekf, delay=.25, record_states=True):
         if ekf.stamp is None or not np.isfinite(delay) or not 0 <= delay <= 2:
             raise ValueError('Initialize the EKF and choose a delay in [0, 2] s')
         self.ekf, self.delay = ekf, delay
+        self.record_states = record_states
         self.last_imu = ekf.stamp
         self.closed_through = ekf.stamp-1e-9
         self.imu, self.measurements = deque(), []
+        self.angular_rates = deque()
         self.pending_keys = set()
         self.sequence = 0
         self.fault = None
+        self.stationary_angle = np.zeros(3)
+        self.stationary_duration = 0.
+        self.was_stationary = False
 
-    def add_imu(self, force, rate, stamp):
-        """Queue an IMU sample covering the preceding interval and process ready data."""
+    def add_imu(self, force, rate, stamp, stationary=False):
+        """Queue an IMU interval and optional externally confirmed rest constraint."""
         if self.fault:
             return self.fault, []
         try:
@@ -37,9 +42,45 @@ class DelayedEKF(object):
         if stamp-self.last_imu > self.ekf.max_gap:
             self.fault = 'imu_gap'
             return self.fault, []
+        dt = stamp-self.last_imu
+        self.angular_rates.append((self.last_imu, stamp, rate))
+        while self.angular_rates and self.angular_rates[0][1] < stamp-self.delay-.4:
+            self.angular_rates.popleft()
         self.imu.append((stamp, force, rate))
         self.last_imu = stamp
+        if stationary:
+            self.add_measurement(stamp, 'zero_velocity',
+                                 lambda ekf, t: ekf.correct_zero_velocity(t))
+            if self.was_stationary:
+                self.stationary_angle += rate*dt
+                self.stationary_duration += dt
+                if self.stationary_duration >= .2:
+                    duration = self.stationary_duration
+                    mean_rate = self.stationary_angle/duration
+                    self.add_measurement(stamp, 'stationary_gyro',
+                        lambda ekf, t, rate=mean_rate, dt=duration:
+                            ekf.correct_stationary_gyro(rate, dt, t))
+                    self.stationary_angle[:] = 0.
+                    self.stationary_duration = 0.
+        else:
+            self.stationary_angle[:] = 0.
+            self.stationary_duration = 0.
+        self.was_stationary = stationary
         return 'queued', self._drain(stamp-self.delay)
+
+    def mean_angular_rate(self, start, end):
+        """Average the recorded IMU intervals covering a camera frame pair."""
+        if (end <= start or not self.angular_rates
+                or start < self.angular_rates[0][0] or end > self.angular_rates[-1][1]):
+            return None
+        angle = np.zeros(3)
+        for first, last, rate in self.angular_rates:
+            overlap = min(last, end)-max(first, start)
+            if overlap > 0:
+                angle += overlap*rate
+            if last >= end:
+                break
+        return angle/(end-start)
 
     def add_measurement(self, stamp, sensor, update):
         """Queue update(ekf, stamp); the callback must retain its measurement data."""
@@ -79,7 +120,8 @@ class DelayedEKF(object):
                     break
             if end == stamp:
                 self.imu.popleft()
-                events.append(self._event('imu', True, 'predicted'))
+                if self.record_states:
+                    events.append(self._event('imu', True, 'predicted'))
             while self.measurements and self.measurements[0][0] == stamp:
                 _, sensor, _, update = heapq.heappop(self.measurements)
                 self.pending_keys.remove((sensor, stamp))
@@ -95,10 +137,18 @@ class DelayedEKF(object):
         self.measurements, self.pending_keys = [], set()
         return events, remaining
 
+    def current_state(self):
+        """Return an output at the newest IMU stamp, retaining the fusion horizon."""
+        if self.fault:
+            return None
+        return self.ekf.project(list(self.imu))
+
     def _event(self, sensor, accepted, reason):
         f = self.ekf
-        return dict(stamp=f.stamp, sensor=sensor, accepted=accepted, reason=reason,
-                    position=f.position.copy(), velocity=f.velocity.copy(), quaternion=f.quaternion.copy(),
-                    acceleration_bias=f.acceleration_bias.copy(), gyro_bias=f.gyro_bias.copy(),
-                    variances=np.diag(f.covariance).copy(),
-                    nis=None if sensor == 'imu' else (f.last_update or {}).get('nis'))
+        event = dict(stamp=f.stamp, sensor=sensor, accepted=accepted, reason=reason)
+        if self.record_states:
+            event.update(position=f.position.copy(), velocity=f.velocity.copy(), quaternion=f.quaternion.copy(),
+                         acceleration_bias=f.acceleration_bias.copy(), gyro_bias=f.gyro_bias.copy(),
+                         variances=f.covariance_diagonal(),
+                         nis=None if sensor == 'imu' else (f.last_update or {}).get('nis'))
+        return event

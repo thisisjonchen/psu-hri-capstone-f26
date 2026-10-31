@@ -1,0 +1,9 @@
+<launch>
+  <!-- Start disarmed, resting on the floor; allow eight seconds to initialize. -->
+  <arg name="calibration" default="$(find pidrone_pkg)/params/ekf.yaml"/>
+  <arg name="body_frame" default="pidrone_body"/>
+  <node pkg="pidrone_pkg" type="ekf_localization_node" name="ekf_localization" output="screen" required="true">
+    <rosparam command="load" file="$(arg calibration)" ns="calibration"/>
+    <param name="body_frame" value="$(arg body_frame)"/>
+  </node>
+</launch>

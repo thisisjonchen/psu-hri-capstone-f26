@@ -6,7 +6,7 @@
 pidrone_node_check() {
     local name nodes pending=() missing=()
     local -A windows=([/flight_controller_node]='1 FC' [/pid_controller]='2 PID'
-        [/fusion_localization]='3 SE' [/raspicam_node]='4 Vision' [/vl53l1x]='5 TOF'
+        [/fusion_localization]='3 SE' [/ekf_localization]='3 SE' [/raspicam_node]='4 Vision' [/vl53l1x]='5 TOF'
         [/rosbridge_websocket]='6 rosbridge' [/web_video_server]='7 web_vid_serv'
         [/apriltag_detection]='8 AprilTags' [/uwb_localization]='9 UWB'
         [/apriltag_mapping]='12 TagMap')
@@ -60,7 +60,6 @@ pidrone_screen_node() {
         pid) command=(python -u pid_controller.py) ;;
         se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch") ;;
         vision) command=(roslaunch --wait "$package_dir/launch/raspicam_node.launch") ;;
-        flow) command=(python -u optical_flow_node.py) ;;
         tof)
             if [[ ! -r "$HOME/catkin_ws/install/setup.bash" ]]; then
                 echo 'TOF startup failed: missing ~/catkin_ws/install/setup.bash' >&2
@@ -80,7 +79,7 @@ pidrone_screen_node() {
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|flow|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
            return 2 ;;
     esac
 

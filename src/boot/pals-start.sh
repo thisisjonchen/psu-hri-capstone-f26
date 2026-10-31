@@ -53,8 +53,8 @@ case "${1:-}" in
         # The old offset stays on the parameter server, so clear it to see the new capture.
         # [e] keeps pgrep -f from matching this script's own bash command line.
         docker exec "$container" bash -ic '
-            for _ in $(seq 20); do pgrep -f "fusion_localization_nod[e]" >/dev/null || break; sleep 0.5; done
-            pgrep -f "fusion_localization_nod[e]" >/dev/null && { echo "Fusion did not stop; check the SE window."; exit 1; }
+            for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
+            pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null && { echo "Localization did not stop; check the SE window."; exit 1; }
             rosparam delete /fusion_localization/room_yaw_offset >/dev/null 2>&1
             screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"
             for _ in $(seq 60); do

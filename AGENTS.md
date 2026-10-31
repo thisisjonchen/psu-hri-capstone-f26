@@ -10,8 +10,8 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 - `src/scripts/flight_controller_node.py` and `h2rMultiWii.py`: flight-controller communication.
 - `src/scripts/pid_controller.py`: control loop. Throttle comes from `altitude_controller.py`
   and roll/pitch from `velocity_controller.py`; `pid_class.py` serves the dashboard position mode.
-- `src/scripts/optical_flow_node.py` and `localization/camera_flow.py`: optical flow from the
-  tilted fisheye camera.
+- `src/scripts/PALS/ekf_localization_node` and `localization/ekf_live.py`: live local estimation.
+- `src/scripts/localization/ekf_sensors.py`: camera-image tracking and ToF corrections.
 - `tools/flow_capture.py`: record hand-carried or flight data over SSH and analyze it.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
 - `src/web/`: dashboard, laptop calibration service, and web tests.
@@ -30,6 +30,7 @@ can lag behind the code; verify the actual launch configuration and data path.
   push, deploy, or restart hardware processes unless requested or already authorized.
 - Explain the result, relevant verification, and remaining uncertainty concisely.
   Separate measured observations from hypotheses and software checks from flight results.
+- Keep Markdown edits brief: current usage and essential limitations, without experiment history.
 - For experiments, change one relevant variable at a time and reuse existing logs
   and recordings before asking the user to repeat a completed test.
 
@@ -54,17 +55,16 @@ can lag behind the code; verify the actual launch configuration and data path.
   new exception-driven shutdown. Existing baseline fault handling remains separate.
 - Do not arm, fly, calibrate hardware, or send motor commands as part of automated
   verification. A file named `test` may be an executable hardware utility; inspect it first.
-- XY velocity comes from a Kalman filter in which IMU acceleration predicts and
-  optical flow corrects (zero velocity while disarmed/armed on the ground), with an
-  acceleration-bias state and a standard innovation gate. UWB never affects velocity;
-  it only corrects the room offset over smooth local odometry, so hold and relative
-  moves work without UWB and room waypoints require it. The floor is assumed textured.
-  Below `flow_min_height` the IMU coasts alone. ToF gives height and IMU attitude
-  gives frame conversion.
-- The camera is a fisheye tilted about 45 degrees below horizontal (`apriltag_mapping.yaml`).
-  Optical flow casts each motion-vector block onto the floor using the lens calibration
-  and the attitude at both frames, so rotation cancels; the encoder's vector rows are
-  vertically mirrored relative to the image (`optical_flow.yaml`).
+- The EKF is the sole runtime motion estimator: MSP IMU predicts position, velocity,
+  attitude and biases; camera-image tracking and ToF correct it. Ground-rest aiding
+  requires quiet IMU data and fresh floor range. The fusion node adapts EKF output
+  for the controller and handles room alignment; it runs no second motion filter.
+  UWB only corrects the room offset, so hold and relative moves work without UWB
+  and room waypoints require it. The floor is assumed textured.
+- The camera is a fisheye tilted about 45 degrees below horizontal (`ekf.yaml`).
+  The EKF tracks original JPEG images and models floor geometry and angular motion.
+  Encoder vectors are disabled. Both drones share drone2's calibration by assumption;
+  drone1's scales are not independently verified.
 - Altitude follows the PX4/ArduPilot cascade (height -> climb rate -> thrust, with a
   thrust curve and a conservative angle boost). Roll/pitch come from a velocity PI
   with a lean limit in degrees; its integral learns constant pushes and is held, not

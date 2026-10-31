@@ -15,9 +15,9 @@ Assuming that the base environment is already set up on the DD24 by following th
    python3 tools/pals.py dashboard
    ```
    Open `http://localhost:8000` if it does not open automatically.
-3. Place each drone disarmed, stationary, and facing the top of the map (+Y).
+3. Place each drone disarmed on a level floor, stationary and facing the top of the map (+Y).
 4. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
-5. Under **Routines**, select a script, enter its arguments, and click **Run**.
+5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
 6. Read all instructions carefully and be ready to disarm at all times.
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
@@ -61,6 +61,31 @@ at 100 Hz, while the existing `/pidrone/imu` attitude messages and RC commands
 run at 60 Hz. IMU message timestamps mark reception on the Pi, not acquisition
 inside the flight controller. These delivery settings do not change the gyro
 sampling or PID loop rates. They have been applied to drone2; drone1 is unverified.
+
+## EKF recording and replay
+
+Record from the laptop with props removed:
+
+```sh
+python3 tools/flow_capture.py ekf --drone drone2 --seconds 40
+```
+
+Captures require IMU, JPEGs, camera calibration and ToF, and include published
+estimates. Data is buffered on the Pi, downloaded, then removed there. Allow about
+70 MB for a 40-second capture. IMU timestamps mark host receipt; camera timestamps
+mark driver callbacks, not sensor acquisition.
+
+Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
+
+```sh
+.venv/bin/python tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+```
+
+The profile supplies sensor geometry, scales and initial state. Use
+`stationary_intervals_s` only for known periods without translation or rotation;
+leave it empty when rest is unknown. Replay does not affect flight control.
+For older captures containing `motion_vectors_raw`, use `--camera encoder`.
+New captures use JPEGs and omit encoder vectors.
 
 ## Changing Branches
 If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.

@@ -3,6 +3,11 @@
 
 Usage: python3 tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
 The calibration profile supplies sensor scales, mounting, and the initial state.
+Camera input defaults to JPEG images; --camera encoder compares raw encoder vectors.
+Image-pair flow rates are fused at their midpoint using the matching IMU interval.
+Optional stationary_intervals_s lists verified periods at rest as [start, end)
+seconds since the first IMU stamp, for zero velocity and gyro-bias updates.
+Disarmed hand-carried motion is not stationary.
 """
 import argparse
 from collections import Counter
@@ -46,8 +51,10 @@ class CaptureDecoder:
 
 
 class Replay:
-    def __init__(self, profile):
+    def __init__(self, profile, camera_source='images'):
         self.profile = profile
+        self.camera_topic = {'images': '/raspicam_node/image/compressed',
+                             'encoder': '/raspicam_node/motion_vectors_raw'}[camera_source]
         self.rotation = mounting_rotation(profile['rotation_body_msp'])
         self.scale = _array([profile['acceleration_m_s2_per_count'], profile['gyro_rad_s_per_count']], (2,))
         if np.any(self.scale <= 0):
@@ -56,6 +63,13 @@ class Replay:
         self.range = FloorRange(profile['range_offset_body'], profile['range_beam_body'])
         self.camera_rotation = mounting_rotation(profile['rotation_body_camera'])
         self.camera_offset = _array(profile['camera_offset_body'], (3,))
+        self.stationary_intervals = []
+        for interval in profile.get('stationary_intervals_s', []):
+            start, end = _array(interval, (2,))
+            if (start < 0 or end <= start
+                    or (self.stationary_intervals and start < self.stationary_intervals[-1][1])):
+                raise ValueError('Stationary intervals must be ordered, nonoverlapping [start, end) seconds')
+            self.stationary_intervals.append((start, end))
         self.ekf = ErrorStateEKF()
         initial = profile['initial']
         self.ekf.initialize(0., initial['quaternion'], position=initial['position'],
@@ -70,16 +84,24 @@ class Replay:
     def feed(self, record, message, metadata):
         topic, stamp_ns = record['topic'], record['header_stamp_ns']
         events = []
+        if topic == '/raspicam_node/motion_vectors':
+            if self.camera_topic.endswith('motion_vectors_raw'):
+                raise ValueError('Processed motion_vectors cannot drive the EKF camera model. '
+                                 'Encoder replay requires an older capture containing motion_vectors_raw.')
+            return events
+        if topic == self.camera_topic:
+            self.counts['camera_received'] += 1
         if topic == '/raspicam_node/camera_info':
             signature = (message.width, message.height, tuple(message.K), tuple(message.D),
                          message.distortion_model)
             if signature != self.camera_signature:
-                settings = metadata.get('parameters', {}).get('/optical_flow_node', {})
+                parameters = metadata.get('parameters', {})
+                settings = parameters.get('/optical_flow_node', {})
+                frame_rate = parameters.get('/raspicam_node', {}).get('framerate', settings.get('framerate'))
                 # Camera offsets here are measured from the IMU.
                 self.camera = FloorCamera(message.K, message.D, message.distortion_model,
                     (message.width, message.height), self.camera_rotation, self.camera_offset,
-                    frame_interval=1/float(settings['framerate']),
-                    flip_vertically=bool(settings['flip_vectors_vertically']),
+                    frame_interval=1/float(frame_rate),
                     max_floor_distance=float(settings.get('max_floor_distance', 1.5)))
                 self.camera_signature = signature
             return events
@@ -94,7 +116,9 @@ class Replay:
                 self.timeline = DelayedEKF(self.ekf, delay=self.profile.get('fusion_delay_s', .25))
                 self.counts['initialized'] += 1
             else:
-                status, events = self.timeline.add_imu(force, rate, (stamp_ns-self.origin_ns)/1e9)
+                stamp = (stamp_ns-self.origin_ns)/1e9
+                stationary = any(start <= stamp < end for start, end in self.stationary_intervals)
+                status, events = self.timeline.add_imu(force, rate, stamp, stationary=stationary)
                 self.counts[status] += 1
         elif self.timeline is None:
             self.counts['before_initial_imu'] += 1
@@ -102,23 +126,35 @@ class Replay:
             status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9, 'range',
                 lambda f, t, m=message: self.range.correct(f, m.range, .02**2, t, m.min_range, m.max_range))
             self.counts[status] += 1
-        elif topic == '/raspicam_node/motion_vectors':
+        elif topic == self.camera_topic:
             if self.camera is None:
                 self.counts['missing_camera_calibration'] += 1
             else:
-                status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9, 'camera',
-                    lambda f, t, m=message, model=self.camera: model.correct(f, m.x, m.y, m.mbx, t))
+                if topic.endswith('image/compressed'):
+                    sample, reason = self.camera.image_pair(message.data, (stamp_ns-self.origin_ns)/1e9)
+                    correct = self.camera.correct_image
+                else:
+                    sample, reason = self.camera.vector_pair(message.x, message.y, message.mbx,
+                                                             (stamp_ns-self.origin_ns)/1e9)
+                    correct = self.camera.correct_vectors
+                if sample is None:
+                    self.counts[reason] += 1
+                    return events
+                update = lambda f, t, s=sample, apply=correct: apply(
+                    f, s, t, self.timeline.mean_angular_rate(s[0], s[1]))
+                status = self.timeline.add_measurement((sample[0]+sample[1])/2, 'camera', update)
                 self.counts[status] += 1
         return events
 
 
-def replay(folder, profile, out):
+def replay(folder, profile, out, camera_source='images'):
     """Save EKF estimates, baseline estimates, and update counts."""
-    runner, decoder = Replay(profile), CaptureDecoder()
+    runner, decoder = Replay(profile, camera_source), CaptureDecoder()
     out.mkdir(parents=True)
     metadata, outcomes, baselines = {}, Counter(), 0
     used = {'/pidrone/imu_msp', '/pidrone/range', '/raspicam_node/camera_info',
-            '/raspicam_node/motion_vectors', '/pidrone/state', '/pidrone/localization/odometry'}
+            runner.camera_topic, '/raspicam_node/motion_vectors',
+            '/pidrone/state', '/pidrone/localization/odometry'}
     with (out/'estimates.csv').open('w', newline='') as stream, (out/'baseline.csv').open('w', newline='') as reference:
         writer, baseline = csv.writer(stream), csv.writer(reference)
         writer.writerow(['time_s', 'sensor', 'accepted', 'reason', 'nis'] +
@@ -151,9 +187,13 @@ def replay(folder, profile, out):
                 write_events(runner.feed(record, message, metadata))
         if runner.timeline is None:
             raise ValueError('No raw MSP IMU samples: this capture cannot drive the EKF')
+        if not runner.counts['camera_received'] or runner.camera is None:
+            raise ValueError('Replay requires camera calibration and '+runner.camera_topic+
+                             '; use --camera encoder for recordings with raw vectors only.')
         events, beyond_imu = runner.timeline.finish()
         write_events(events)
-    summary = dict(profile=profile, capture_metadata=metadata, origin_ns=runner.origin_ns,
+    summary = dict(profile=profile, camera_source=camera_source, camera_model='flow_rates',
+                   capture_metadata=metadata, origin_ns=runner.origin_ns,
                    arrivals=dict(runner.counts), updates=dict(outcomes),
                    measurements_beyond_final_imu=beyond_imu, baseline_samples=baselines,
                    fault=runner.timeline.fault)
@@ -168,8 +208,10 @@ def main():
     parser.add_argument('capture', type=Path)
     parser.add_argument('--calibration', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--camera', choices=('images', 'encoder'), default='images',
+                        help='camera measurement source (default: images)')
     args = parser.parse_args()
-    summary = replay(args.capture, json.loads(args.calibration.read_text()), args.out)
+    summary = replay(args.capture, json.loads(args.calibration.read_text()), args.out, args.camera)
     print(json.dumps({'updates': summary['updates'], 'arrivals': summary['arrivals'],
                       'output': str(args.out)}, indent=2))
 

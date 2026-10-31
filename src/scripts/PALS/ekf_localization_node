@@ -1,0 +1,142 @@
+#!/usr/bin/env python
+"""Estimate local motion from IMU, camera tracking and ToF."""
+import threading
+from collections import deque
+
+import cv2
+import numpy as np
+import rospy
+from nav_msgs.msg import Odometry
+from pidrone_pkg.msg import Mode, MspImu, State
+from sensor_msgs.msg import CameraInfo, CompressedImage, Range
+from std_msgs.msg import Bool
+
+from localization import monotonic
+from localization.ekf_live import LiveEKF, body_output
+
+
+class EKFLocalizationNode(object):
+    def __init__(self):
+        cv2.setNumThreads(1)
+        self.estimator = LiveEKF(rospy.get_param('~calibration'))
+        self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        self.condition, self.queue = threading.Condition(), deque()
+        self.overflow = False
+        self.last_output_stamp = None
+        self.last_estimate = None
+        self.state_pub = rospy.Publisher('pidrone/ekf/state', State, queue_size=1)
+        self.odom_pub = rospy.Publisher('pidrone/ekf/odometry', Odometry, queue_size=1)
+        self.ready_pub = rospy.Publisher('pidrone/ekf/local_ready', Bool, queue_size=1)
+        self.subscribers = [rospy.Subscriber(topic, cls, self.receive, callback_args=kind,
+                                            queue_size=100, buff_size=2**20, tcp_nodelay=True)
+            for kind, topic, cls in (
+                ('imu', 'pidrone/imu_msp', MspImu), ('range', 'pidrone/range', Range),
+                ('image', 'raspicam_node/image/compressed', CompressedImage),
+                ('camera', 'raspicam_node/camera_info', CameraInfo),
+                ('mode', 'pidrone/mode', Mode))]
+
+    def receive(self, message, kind):
+        with self.condition:
+            if len(self.queue) >= 256:
+                self.overflow = True
+            else:
+                self.queue.append((kind, message, rospy.get_time()))
+            self.condition.notify()
+
+    def process(self, kind, msg, received):
+        f = self.estimator
+        if kind == 'mode':
+            f.set_mode(msg.mode, received)
+        elif kind == 'camera':
+            f.set_camera(msg.width, msg.height, msg.K, msg.D, msg.distortion_model)
+        elif kind == 'imu':
+            f.add_imu(msg.header.stamp.to_nsec(), msg.accelerometer, msg.gyroscope, received)
+        elif kind == 'range':
+            f.add_range(msg.header.stamp.to_nsec(), msg.range, msg.min_range, msg.max_range)
+        elif kind == 'image':
+            f.add_image(msg.header.stamp.to_nsec(), msg.data)
+
+    def publish_readiness(self, estimate=None):
+        f = self.estimator
+        ready = f.ready(rospy.get_time(), self.last_estimate if estimate is None else estimate)
+        if not ready:
+            rospy.loginfo_throttle(5, 'EKF: '+f.reason)
+        self.ready_pub.publish(ready)
+
+    def publish(self):
+        f = self.estimator
+        with self.condition:
+            queued_imu = [(msg.header.stamp.to_nsec(), msg.accelerometer, msg.gyroscope)
+                          for kind, msg, _ in self.queue if kind == 'imu']
+        latest_ns = max([f.last_imu or 0]+[sample[0] for sample in queued_imu])
+        # Repeated or stale inputs never produce a newly stamped estimate.
+        latest = None if f.origin_ns is None else (latest_ns-f.origin_ns)/1e9
+        if (f.timeline is None or f.fault or not f.range_ready(rospy.get_time())
+                or (self.last_output_stamp is not None and latest <= self.last_output_stamp)
+                or not 0 <= rospy.get_time()-latest_ns/1e9 <= .15):
+            self.publish_readiness()
+            return
+        if latest-f.timeline.ekf.stamp > .5:
+            self.ready_pub.publish(False)
+            return
+        estimate = f.output(queued_imu)
+        q, velocity, rate, pose_cov, twist_cov = body_output(estimate, estimate.angular_rate)
+        if not all(np.all(np.isfinite(v)) for v in
+                   (estimate.position, q, velocity, rate, pose_cov, twist_cov)):
+            f.fail('Nonfinite output; restart the EKF node on the floor')
+            self.ready_pub.publish(False)
+            return
+        msg = State()
+        stamp_ns = f.origin_ns+int(round(estimate.stamp*1e9))
+        msg.header.stamp = rospy.Time(stamp_ns//10**9, stamp_ns % 10**9)
+        msg.header.frame_id = 'ekf_odom'
+        pose, twist = msg.pose_with_covariance, msg.twist_with_covariance
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = estimate.position
+        pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = q
+        twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z = velocity
+        twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z = rate
+        pose.covariance, twist.covariance = pose_cov.ravel().tolist(), twist_cov.ravel().tolist()
+        odom = Odometry()
+        odom.header, odom.child_frame_id = msg.header, self.body_frame
+        odom.pose, odom.twist = pose, twist
+        # Recheck IMU and accepted range age after projection and message construction.
+        now = rospy.get_time()
+        if not 0 <= now-stamp_ns/1e9 <= .15 or not f.range_ready(now):
+            self.publish_readiness(estimate)
+            return
+        self.state_pub.publish(msg)
+        self.odom_pub.publish(odom)
+        self.last_estimate = estimate
+        self.publish_readiness(estimate)
+        self.last_output_stamp = estimate.stamp
+
+    def run(self):
+        period = 1/30.
+        next_publish = monotonic()
+        while not rospy.is_shutdown():
+            with self.condition:
+                if not self.queue and not self.overflow:
+                    self.condition.wait(max(0., min(.02, next_publish-monotonic())))
+                overflow = self.overflow
+                pending = list(self.queue)
+                self.queue.clear()
+            if overflow:
+                self.estimator.fail('Input queue overflow; restart the EKF node')
+            try:
+                for sample in pending:
+                    if not self.estimator.fault:
+                        self.process(*sample)
+                now = monotonic()
+                if now >= next_publish:
+                    self.publish()
+                    now = monotonic()
+                    next_publish += (int((now-next_publish)/period)+1)*period
+            except (ValueError, TypeError, ArithmeticError, np.linalg.LinAlgError) as error:
+                self.estimator.fail(str(error))
+                self.ready_pub.publish(False)
+                rospy.logerr('EKF stopped: %s', error)
+
+
+if __name__ == '__main__':
+    rospy.init_node('ekf_localization')
+    EKFLocalizationNode().run()

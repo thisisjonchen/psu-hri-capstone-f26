@@ -4,9 +4,12 @@ Body axes are forward/left/up and local Z is up. The quaternion (x, y, z, w)
 rotates body vectors into the local frame. Inputs are specific force including
 gravity (m/s^2) and body angular rate (rad/s).
 
-Attitude error: q_true = q_nominal * Exp(delta_theta).
-Covariance order: [delta_p, delta_v, delta_theta, delta_ba, delta_bg].
-See Sola, https://arxiv.org/abs/1711.02508, sections 5-6.
+The public covariance uses additive local position/velocity errors and right
+body attitude error: q_true = q_nominal * Exp(delta_theta). Its order is
+[delta_p, delta_v, delta_theta, delta_ba, delta_bg]. Internally, prediction and
+correction use a right-invariant navigation error: one local-frame rotation
+acts on attitude, position and velocity together. This keeps global yaw
+unobservable to the floor sensors across successive corrections.
 
 ekf_replay aligns measurements with the state timestamp; ekf_sensors provides
 the range and camera models. Default noise values still need flight tuning.
@@ -14,6 +17,7 @@ the range and camera models. Default noise values still need flight tuning.
 from __future__ import division
 
 import math
+import copy
 import numpy as np
 
 from localization.rotations import (skew, quaternion_matrix, quaternion_multiply,
@@ -32,6 +36,84 @@ def _stamp(value):
     if not np.isfinite(value) or value < 0:
         raise ValueError('Invalid timestamp')
     return value
+
+
+def _error_transforms(position, velocity, rotation):
+    """Convert between the public errors and invariant navigation errors."""
+    to_invariant, to_public = np.eye(15), np.eye(15)
+    for section, vector in ((slice(0, 3), position), (slice(3, 6), velocity)):
+        cross = skew(vector)
+        to_invariant[section, 6:9] = cross.dot(rotation)
+        to_public[section, 6:9] = -cross
+    to_invariant[6:9, 6:9] = rotation
+    to_public[6:9, 6:9] = rotation.T
+    return to_invariant, to_public
+
+
+def _multiply(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw*bx+ax*bw+ay*bz-az*by, aw*by-ax*bz+ay*bw+az*bx,
+            aw*bz+ax*by-ay*bx+az*bw, aw*bw-ax*bx-ay*by-az*bz)
+
+
+def _nominal_step(p, v, q, force, rate, gravity, step):
+    # Scalar arithmetic avoids temporary arrays in the short output roll-forward.
+    rx, ry, rz = rate
+    angle = math.sqrt(rx*rx + ry*ry + rz*rz)
+    scale = step/4 if angle < 1e-12 else math.sin(angle*step/4)/angle
+    half = (rx*scale, ry*scale, rz*scale, math.cos(angle*step/4))
+    mid_q = _multiply(q, half)
+    x, y, z, w = mid_q
+    fx, fy, fz = force
+    tx, ty, tz = 2*(y*fz-z*fy), 2*(z*fx-x*fz), 2*(x*fy-y*fx)
+    ax = fx+w*tx+y*tz-z*ty+gravity[0]
+    ay = fy+w*ty+z*tx-x*tz+gravity[1]
+    az = fz+w*tz+x*ty-y*tx+gravity[2]
+    px, py, pz = p
+    vx, vy, vz = v
+    p = (px+vx*step+.5*ax*step*step,
+         py+vy*step+.5*ay*step*step,
+         pz+vz*step+.5*az*step*step)
+    v = (vx+ax*step, vy+ay*step, vz+az*step)
+    x, y, z, w = _multiply(mid_q, half)
+    norm = math.sqrt(x*x + y*y + z*z + w*w)
+    q = (x/norm, y/norm, z/norm, w/norm)
+    return p, v, q, mid_q, (ax, ay, az)
+
+
+def _inertial_step(p, v, q, force, rate, gravity, step):
+    values = [tuple(map(float, a)) for a in (p, v, q, force, rate, gravity)]
+    next_p, next_v, next_q, mid_q, acceleration = _nominal_step(*(values+[step]))
+    acceleration = np.asarray(acceleration)
+    mid_p = p + v*step/2 + acceleration*step**2/8
+    mid_v = v + acceleration*step/2
+    return (np.asarray(next_p), np.asarray(next_v), np.asarray(next_q),
+            mid_p, mid_v, quaternion_matrix(mid_q))
+
+
+def _propagate_covariance(covariance, p, v, rotation, gravity, density, step):
+    dynamics = np.zeros((15, 15))
+    cross_p, cross_v = skew(p), skew(v)
+    dynamics[:3, 3:6] = np.eye(3)
+    dynamics[:3, 12:15] = -cross_p.dot(rotation)
+    dynamics[3:6, 6:9] = skew(gravity)
+    dynamics[3:6, 9:12] = -rotation
+    dynamics[3:6, 12:15] = -cross_v.dot(rotation)
+    dynamics[6:9, 12:15] = -rotation
+    a = dynamics*step
+    a2 = a.dot(a)
+    a3 = a2.dot(a)
+    transition = np.eye(15) + a + a2/2 + a3/6
+    half = np.eye(15) + a/2 + a2/8 + a3/48
+    gyro_map = np.vstack((cross_p, cross_v, np.eye(3)))
+    noise = density.copy()
+    noise[:9, :9] = density[6, 6]*gyro_map.dot(gyro_map.T)
+    noise[3:6, 3:6] += density[3:6, 3:6]
+    # Combine the two terms with the same transition in Simpson's noise integral.
+    noise *= step/6
+    return (transition.dot(covariance + noise).dot(transition.T)
+            + 4*half.dot(noise).dot(half.T) + noise)
 
 
 class ErrorStateEKF(object):
@@ -53,7 +135,35 @@ class ErrorStateEKF(object):
         self.max_gap = max_gap
         self.stamp = None
         self.last_update = None
-        self.camera_clone = None
+
+    @property
+    def covariance(self):
+        """Return a copy in local position/velocity and body attitude coordinates."""
+        transform = _error_transforms(self.position, self.velocity,
+                                      quaternion_matrix(self.quaternion))[1]
+        covariance = transform.dot(self._covariance).dot(transform.T)
+        return .5*(covariance + covariance.T)
+
+    @covariance.setter
+    def covariance(self, value):
+        transform = _error_transforms(self.position, self.velocity,
+                                      quaternion_matrix(self.quaternion))[0]
+        self._covariance = transform.dot(value).dot(transform.T)
+
+    def covariance_diagonal(self):
+        transform = _error_transforms(self.position, self.velocity,
+                                      quaternion_matrix(self.quaternion))[1]
+        return np.einsum('ij,ij->i', transform.dot(self._covariance), transform)
+
+    def body_navigation_variances(self):
+        """Variances of origin-relative position and velocity expressed in the body.
+
+        A common rotation of the local frame changes neither quantity, so global
+        heading uncertainty does not masquerade as lost navigation precision.
+        """
+        rotation = quaternion_matrix(self.quaternion)
+        return np.concatenate([np.einsum('ij,ij->j', rotation,
+            self._covariance[start:start+3, start:start+3].dot(rotation)) for start in (0, 3)])
 
     def initialize(self, stamp, quaternion, position=(0., 0., 0.),
                    velocity=(0., 0., 0.), acceleration_bias=(0., 0., 0.),
@@ -81,21 +191,6 @@ class ErrorStateEKF(object):
         self.covariance, self.stamp = covariance, stamp
         self.last_update = None
         self._measurement_stamps = {}
-        self.camera_clone = None
-
-    def clone_camera_pose(self):
-        """Save the camera frame's pose and its covariance with the current state."""
-        indices = [0, 1, 2, 6, 7, 8]
-        self.camera_clone = dict(position=self.position.copy(), quaternion=self.quaternion.copy(),
-                                 stamp=self.stamp, cross=self.covariance[:, indices].copy(),
-                                 covariance=self.covariance[np.ix_(indices, indices)].copy())
-
-    def joint_covariance(self):
-        if self.camera_clone is None:
-            return self.covariance
-        clone = self.camera_clone
-        return np.vstack((np.hstack((self.covariance, clone['cross'])),
-                          np.hstack((clone['cross'].T, clone['covariance']))))
 
     def predict(self, specific_force, angular_rate, stamp):
         """Integrate this interval's mean IMU reading up to stamp.
@@ -121,42 +216,83 @@ class ErrorStateEKF(object):
         steps = max(1, int(math.ceil(dt/.01 - 1e-10)))
         step = dt/steps
         p, v, q, covariance = (self.position.copy(), self.velocity.copy(),
-                                self.quaternion.copy(), self.covariance.copy())
-        cross = None if self.camera_clone is None else self.camera_clone['cross'].copy()
+                                self.quaternion.copy(), self._covariance.copy())
         for _ in range(steps):
-            mid_q = quaternion_multiply(q, quaternion_exp(rate * step/2))
-            rotation = quaternion_matrix(mid_q)
-            acceleration = rotation.dot(force) + self.gravity
-            p += v*step + .5*acceleration*step**2
-            v += acceleration*step
-            q = quaternion_multiply(q, quaternion_exp(rate*step))
-            q /= np.linalg.norm(q)
-
-            dynamics = np.zeros((15, 15))
-            dynamics[:3, 3:6] = np.eye(3)
-            dynamics[3:6, 6:9] = -rotation.dot(skew(force))
-            dynamics[3:6, 9:12] = -rotation
-            dynamics[6:9, 6:9] = -skew(rate)
-            dynamics[6:9, 12:15] = -np.eye(3)
-            a = dynamics*step
-            a2 = a.dot(a)
-            a3 = a2.dot(a)
-            transition = np.eye(15) + a + a2/2 + a3/6
-            half = np.eye(15) + a/2 + a2/8 + a3/48
-            # Integrate process noise with Simpson's rule.
-            noise = step/6 * (self.noise + 4*half.dot(self.noise).dot(half.T)
-                             + transition.dot(self.noise).dot(transition.T))
-            covariance = transition.dot(covariance).dot(transition.T) + noise
-            if cross is not None:
-                cross = transition.dot(cross)
+            p, v, q, mid_p, mid_v, rotation = _inertial_step(
+                p, v, q, force, rate, self.gravity, step)
+            covariance = _propagate_covariance(covariance, mid_p, mid_v, rotation,
+                                               self.gravity, self.noise, step)
         if not all(np.all(np.isfinite(x)) for x in (p, v, q, covariance)):
             return False, 'numerical_failure'
         self.position, self.velocity, self.quaternion = p, v, q
-        self.covariance = .5*(covariance + covariance.T)
+        self._covariance = .5*(covariance + covariance.T)
         self.stamp = stamp
-        if cross is not None:
-            self.camera_clone['cross'] = cross
         return True, 'predicted'
+
+    def project(self, intervals):
+        """Roll a snapshot to the last queued IMU stamp without changing fusion.
+
+        Every IMU interval contributes to the nominal output. Its covariance is
+        propagated once about the midpoint of the short output horizon.
+        """
+        result = copy.copy(self)
+        for name in ('position', 'velocity', 'quaternion', 'acceleration_bias', 'gyro_bias'):
+            setattr(result, name, getattr(self, name).copy())
+        result._covariance = self._covariance.copy()
+        result._measurement_stamps = self._measurement_stamps.copy()
+        if not intervals:
+            return result
+        duration = intervals[-1][0]-self.stamp
+        if not 0 < duration <= .5:
+            raise ValueError('Output horizon must be in (0, 0.5] seconds')
+        midpoint, middle = self.stamp+duration/2, None
+        p, v, q, gravity = [tuple(map(float, a)) for a in
+                            (result.position, result.velocity, result.quaternion, self.gravity)]
+        stamp = self.stamp
+        for end, force, rate in intervals:
+            if not stamp < end <= intervals[-1][0] or end-stamp > self.max_gap:
+                raise ValueError('Invalid output IMU interval')
+            force = tuple(map(float, force-self.acceleration_bias))
+            rate = tuple(map(float, rate-self.gyro_bias))
+            stops = [midpoint, end] if stamp < midpoint < end else [end]
+            for stop in stops:
+                steps = max(1, int(math.ceil((stop-stamp)/.01-1e-10)))
+                step = (stop-stamp)/steps
+                for _ in range(steps):
+                    p, v, q = _nominal_step(p, v, q, force, rate, gravity, step)[:3]
+                stamp = stop
+                if stamp == midpoint:
+                    middle = (p, v, quaternion_matrix(q))
+        result.position, result.velocity, result.quaternion = map(np.asarray, (p, v, q))
+        result.stamp = stamp
+        covariance = _propagate_covariance(self._covariance, middle[0], middle[1], middle[2],
+                                           self.gravity, self.noise, duration)
+        result._covariance = .5*(covariance+covariance.T)
+        return result
+
+    def correct_zero_velocity(self, stamp, variance=.02**2):
+        """Fuse v=0 when the caller has established that the drone is stationary."""
+        if self.stamp is None:
+            return self._reject('not_initialized')
+        observation = np.zeros((3, 15))
+        observation[:, 3:6] = np.eye(3)
+        # The known zero velocity is unchanged by a rotation of the local frame.
+        observation[:, 6:9] = skew(self.velocity).dot(quaternion_matrix(self.quaternion))
+        return self._correct(np.zeros(3), self.velocity, observation, variance,
+                             stamp, 'zero_velocity', 11.34)
+
+    def correct_stationary_gyro(self, mean_rate, duration, stamp):
+        """Use a confirmed period without rotation to observe gyro bias."""
+        if self.stamp is None:
+            return self._reject('not_initialized')
+        if not np.isfinite(duration) or duration <= 0:
+            return self._reject('invalid_stationary_duration')
+        observation = np.zeros((3, 15))
+        observation[:, 12:15] = np.eye(3)
+        # Averaging white rate noise over this duration reduces its variance.
+        variance = self.noise[6, 6]/duration
+        return self._correct(mean_rate, self.gyro_bias, observation, variance,
+                             stamp, 'stationary_gyro', 11.34)
 
     def _reject(self, reason):
         self.last_update = dict(accepted=False, reason=reason)
@@ -183,9 +319,10 @@ class ErrorStateEKF(object):
         if self.stamp <= self._measurement_stamps.get(sensor, -1):
             return self._reject('repeated_measurement')
 
-        prior = self.joint_covariance()
-        if observation.shape[1] == 15 and self.camera_clone is not None:
-            observation = np.hstack((observation, np.zeros((size, 6))))
+        _, to_public = _error_transforms(
+            self.position, self.velocity, quaternion_matrix(self.quaternion))
+        prior = self._covariance
+        observation = observation.dot(to_public)
         innovation = measured - predicted
         total = observation.dot(prior).dot(observation.T) + noise
         try:
@@ -206,25 +343,18 @@ class ErrorStateEKF(object):
         remainder = np.eye(len(prior)) - gain.dot(observation)
         covariance = (remainder.dot(prior).dot(remainder.T)
                       + gain.dot(noise).dot(gain.T))  # Joseph form.
-        reset = np.eye(len(prior))
-        reset[6:9, 6:9] = right_jacobian(delta[6:9])
-        if self.camera_clone is not None:
-            reset[18:21, 18:21] = right_jacobian(delta[18:21])
-        covariance = reset.dot(covariance).dot(reset.T)
-        q = quaternion_multiply(self.quaternion, quaternion_exp(delta[6:9]))
+        correction = quaternion_exp(delta[6:9])
+        rotation = quaternion_matrix(correction)
+        translation = right_jacobian(-delta[6:9])
+        p = rotation.dot(self.position) + translation.dot(delta[:3])
+        v = rotation.dot(self.velocity) + translation.dot(delta[3:6])
+        q = quaternion_multiply(correction, self.quaternion)
         if not np.all(np.isfinite(delta)) or not np.all(np.isfinite(covariance)):
             return self._reject('numerical_failure')
-        self.position += delta[:3]
-        self.velocity += delta[3:6]
+        self.position, self.velocity = p, v
         self.quaternion = q/np.linalg.norm(q)
         self.acceleration_bias += delta[9:12]
         self.gyro_bias += delta[12:15]
         covariance = .5*(covariance + covariance.T)
-        self.covariance = covariance[:15, :15]
-        if self.camera_clone is not None:
-            clone = self.camera_clone
-            clone['position'] += delta[15:18]
-            cq = quaternion_multiply(clone['quaternion'], quaternion_exp(delta[18:21]))
-            clone['quaternion'] = cq/np.linalg.norm(cq)
-            clone['cross'], clone['covariance'] = covariance[:15, 15:], covariance[15:, 15:]
+        self._covariance = covariance
         return True, 'corrected'

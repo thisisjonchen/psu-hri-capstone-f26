@@ -17,12 +17,14 @@ def skew(vector):
 def quaternion_matrix(quaternion):
     """Return a 3x3 body-to-map rotation matrix for quaternion (x,y,z,w)."""
     q = np.asarray(quaternion, dtype=float)
-    if q.shape != (4,) or not np.all(np.isfinite(q)):
+    if q.shape != (4,):
         raise ValueError('Invalid quaternion')
-    norm = np.dot(q, q)
-    if not np.isfinite(norm) or norm < 1e-12:
+    x, y, z, w = map(float, q)
+    norm = x*x + y*y + z*z + w*w
+    if math.isnan(norm) or math.isinf(norm) or norm < 1e-12:
         raise ValueError('Zero or unbounded quaternion')
-    x, y, z, w = q / math.sqrt(norm)
+    scale = 1/math.sqrt(norm)
+    x, y, z, w = x*scale, y*scale, z*scale, w*scale
     return np.array([
         [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
         [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
@@ -30,16 +32,20 @@ def quaternion_matrix(quaternion):
 
 
 def quaternion_multiply(a, b):
-    av, bv = np.asarray(a[:3]), np.asarray(b[:3])
-    return np.r_[a[3]*bv + b[3]*av + np.cross(av, bv), a[3]*b[3] - av.dot(bv)]
+    ax, ay, az, aw = map(float, a)
+    bx, by, bz, bw = map(float, b)
+    return np.array([aw*bx + ax*bw + ay*bz - az*by,
+                     aw*by - ax*bz + ay*bw + az*bx,
+                     aw*bz + ax*by - ay*bx + az*bw,
+                     aw*bw - ax*bx - ay*by - az*bz])
 
 
 def quaternion_exp(rotation_vector):
     """Convert a rotation vector in radians to a unit quaternion."""
-    vector = np.asarray(rotation_vector, dtype=float)
-    angle = np.linalg.norm(vector)
+    x, y, z = map(float, rotation_vector)
+    angle = math.sqrt(x*x + y*y + z*z)
     scale = .5 - angle*angle/48 if angle < 1e-6 else math.sin(angle/2)/angle
-    return np.r_[scale*vector, math.cos(angle/2)]
+    return np.array([scale*x, scale*y, scale*z, math.cos(angle/2)])
 
 
 def right_jacobian(rotation_vector):
