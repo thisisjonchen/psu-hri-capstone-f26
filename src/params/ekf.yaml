@@ -11,6 +11,6 @@ rotation_body_camera:
   - [-1.0, 0.0, 0.0]
   - [0.0, -0.7071067811865476, -0.7071067811865475]
 camera_offset_body: [0.0, 0.0, 0.0]
-fusion_delay_s: 0.25
+fusion_delay_s: 0.15
 # JPEG callback delay relative to the IMU timestamps.
 camera_delay_s: 0.04

@@ -4,11 +4,8 @@
 # Near hover, 1 m/s^2 is about 35 us of throttle. These starting gains reproduce
 # the earlier single-loop tuning (P 0.4 us/cm, I 0.2 us/(cm s), D 0.5 us/(cm/s)).
 
-# Throttle (us) that holds a hover; per-drone values override the default.
-hover_throttle: 1510.0
-hover_throttle_by_drone:
-  drone1: 1510.0
-  drone2: 1510.0
+# Throttle (us) that holds a hover.
+hover_throttle: 1540.0
 # Feed-forward at the start of takeoff, blended into hover_throttle by the end of the climb.
 takeoff_throttle: 1490.0
 throttle_range: [1200.0, 1700.0]

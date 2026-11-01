@@ -12,7 +12,8 @@ import sys
 import threading
 
 TOPICS = (
-    '/pidrone/imu_msp', '/pidrone/range',
+    '/pidrone/imu_msp', '/pidrone/imu_integrated', '/pidrone/range',
+    '/pidrone/battery',
     '/raspicam_node/image/compressed',
     '/raspicam_node/camera_info',
     '/pidrone/state', '/pidrone/localization/odometry',
@@ -68,7 +69,8 @@ def stream_ros(seconds):
                     multiwii_yaml=calibration_yaml,
                     parameters=dict((name, rospy.get_param(name, {})) for name in
                                     ('/ekf_localization', '/fusion_localization', '/raspicam_node')),
-                    imu_stamp='MSP packet host receipt; acquisition time unavailable',
+                    integrated_imu=True,
+                    imu_stamp='FC interval clock anchored to host request time; raw MSP stamps are packet receipt',
                     camera_images='Original JPEG images from image/compressed',
                     camera_stamp='Driver callback time; exposure time unavailable',
                     order='serialized recorder callbacks; not hardware acquisition order')
@@ -113,7 +115,7 @@ def stream_ros(seconds):
         with lock:
             state['accepting'] = False
             reason = 'error' if state['failed'] else ('shutdown' if rospy.is_shutdown() else 'duration')
-            missing = [topic for topic in ('/pidrone/imu_msp', '/pidrone/range',
+            missing = [topic for topic in ('/pidrone/imu_integrated', '/pidrone/range',
                                           '/raspicam_node/image/compressed',
                                           '/raspicam_node/camera_info')
                        if not writer.counts[topic]]

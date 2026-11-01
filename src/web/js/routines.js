@@ -82,7 +82,11 @@ class RoutineTerminal {
 
   started(ok) {
     this.nodes = ok;
-    if (!ok) drones[this.id].failConnection('Nodes failed to start');
+    const drone = drones[this.id];
+    if (!ok) drone.failConnection('Nodes failed to start');
+    // Startup confirms rosbridge is listening. Replace a socket that may still
+    // be waiting on an attempt made before the bridge was available.
+    else if (this.enabled && drone.waitUntil && drone.ros && !drone.connected) drone.retry(drone.ros);
     this.changed();
   }
 
@@ -227,8 +231,8 @@ class RoutineRunner {
   nodeAction(action) {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
-    const prompts = { restart: 'Restart all nodes on ', align: 'Re-align map +Y on ' };
-    const labels = { restart: 'Restarting nodes', align: 'Aligning heading' };
+    const prompts = { restart: 'Restart all nodes on ', align: 'Relocalize ' };
+    const labels = { restart: 'Restarting nodes', align: 'Relocalizing' };
     // Fusion locks map +Y when its node starts, so confirm placement first.
     if (!window.confirm(prompts[action] + names + '?\n\nEach drone must be disarmed, stationary and ' +
         'facing map +Y: its heading is aligned now.' + (action === 'align' ? ' Only fusion restarts.' : ''))) return;

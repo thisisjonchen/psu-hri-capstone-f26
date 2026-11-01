@@ -75,9 +75,12 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .command-feedback { border-top: 1px solid var(--line); margin: var(--space-4) 0 0; padding-top: var(--space-3); font-size: var(--type-body); color: var(--muted); }
 .fleet-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6); }
 .drone-dashboard { display: flex; flex-direction: column; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.drone-heading { display: flex; align-items: center; gap: 6px; margin-bottom: var(--space-2); border-left: 4px solid #0072b2; padding-left: var(--space-2); }
+.drone-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: var(--space-2); border-left: 4px solid #0072b2; padding-left: var(--space-2); }
 #drone2 .drone-heading { border-color: #d55e00; }
 .drone-heading h2 { flex: 1; white-space: nowrap; }
+.battery-status { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.battery-status svg { width: 20px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.battery-status .status-value { font-size: 12px; }
 .connection-status:disabled { cursor: default; opacity: 1; }
 .connection-action { display: none; }
 .connection-status:not(:disabled):is(:hover, :focus-visible) { color: #a12c35; background: #fcebee; }
@@ -92,14 +95,9 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .status-value { font-size: var(--type-value); font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .status-value.alert-danger { color: var(--error); background: transparent; }
 .status-value.alert-success { color: var(--success); background: transparent; }
-.metric-dropdown { padding: 0; overflow: hidden; }
-.metric-dropdown > summary { position: relative; display: grid; gap: var(--space-1); padding: var(--space-4) 40px var(--space-4) var(--space-4); cursor: pointer; list-style: none; }
-.metric-dropdown > summary::-webkit-details-marker { display: none; }
-.metric-dropdown > summary:focus-visible { outline: 3px solid #001e4466; outline-offset: -3px; border-radius: var(--radius-card); }
+.coordination-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--line); padding-top: var(--space-2); font-size: var(--type-label); }
+.coordination-status [data-field="coordination"] { min-width: 0; overflow-wrap: anywhere; }
 .metric-label { color: var(--muted); font-size: var(--type-label); font-weight: 600; }
-.metric-chevron { position: absolute; right: var(--space-4); top: var(--space-6); color: var(--muted); font-size: var(--type-value); line-height: 1; }
-.metric-dropdown[open] .metric-chevron { transform: rotate(180deg); }
-.metric-content { border-top: 1px solid var(--line); padding: var(--space-4); }
 .speed-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .speed-readings span, .speed-readings strong { display: block; }
 .speed-readings > span { min-width: 0; }
@@ -151,9 +149,6 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 }
 @media (max-width: 600px) {
   .control-cameras { grid-template-columns: minmax(0, 1fr); max-width: 360px; }
-}
-@media (max-width: 480px) {
-  .metric-dropdown { grid-column: 1 / -1; }
 }
 @media (max-width: 360px) {
   .target-preview label:first-child { flex-basis: 100%; }
@@ -214,18 +209,13 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
   .map-feedback .map-note { margin: 2px 0; font-size: 11px; }
   .command-feedback { margin-top: 6px; padding-top: 6px; font-size: 12px; }
   .fleet-grid { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; scrollbar-width: thin; }
-  .drone-dashboard { display: flex; flex-direction: column; flex: 1 0 auto; }
+  .drone-dashboard { flex: 1 1 0; min-height: 0; overflow: auto; }
+  .connection-entry { min-height: 64px; flex: 1; }
+  .status-grid { flex: 1; align-items: stretch; grid-template-rows: minmax(min-content, 1fr) minmax(min-content, 1fr) minmax(min-content, 1fr) auto; }
+  .status-grid > .status-card { display: flex; flex-direction: column; justify-content: center; }
   .drone-heading { margin-bottom: 6px; gap: 6px; }
-  .status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); flex: 1; align-items: stretch; gap: 6px; margin-bottom: 0; }
   .status-card { border-radius: 6px; padding: 8px; box-shadow: none; background: #f7f9fc; }
   .status-card p, .metric-label { font-size: 11px; }
-  .metric-dropdown { padding: 0; }
-  .metric-dropdown > summary { padding: 8px 18px 8px 8px; }
-  .metric-chevron { right: 6px; top: 10px; font-size: 14px; }
-  .metric-dropdown[data-metric="speed"] { grid-column: 1 / -1; }
-  .metric-dropdown[open] { grid-column: 1 / -1; }
-  .metric-content { padding: 8px; }
-  .metric-content .canvas-wrap { height: 140px; }
   .speed-readings strong { font-size: 16px; }
   .speed-readings span { font-size: 11px; }
   .routine-panel { grid-column: 1 / -1; grid-row: 3; margin: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -247,9 +237,7 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
   .status-grid { gap: var(--telemetry-space); margin-bottom: 0; }
   .status-card { padding: var(--telemetry-space); }
   .status-card p { margin-bottom: 0; }
-  .metric-dropdown { padding: 0; }
-  .metric-dropdown > summary { padding: var(--telemetry-space) 18px var(--telemetry-space) var(--telemetry-space); gap: 0; }
-  .localization-card { display: flex; align-items: baseline; gap: 8px; }
+  .status-grid > .localization-card { flex-direction: row; justify-content: flex-start; align-items: center; gap: 8px; }
   .localization-card p { margin: 0; }
 }
 
@@ -310,3 +298,6 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
   .page-title { gap: 8px; }
   .partner-logos { --partner-logo-height: 22px; gap: 8px; padding-left: 8px; }
 }
+
+.speed-card { grid-column: 1 / -1; }
+.battery-fill { fill: currentColor; stroke: none; }

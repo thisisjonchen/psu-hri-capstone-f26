@@ -3,9 +3,12 @@
 #include <cstdint>
 
 extern "C" {
+int pals_ekf_imu_means(const double*, const double*, double, double*, double*);
 int pals_ekf_predict(double*, double*, const double*, const double*, const double*, const double*, double);
-int pals_ekf_project(double*, double*, const double*, std::size_t, const double*, const double*,
-                     const double*, const double*, double, double);
+// Integrated interval layout: start, end, quaternion xyzw, delta velocity in start-body axes.
+int pals_ekf_predict_integrated(double*, double*, const double*, const double*, const double*, double, double);
+int pals_ekf_project_integrated(double*, double*, const double*, std::size_t,
+                              const double*, const double*, double);
 int pals_ekf_correct(double*, double*, const double*, const double*, const double*, std::size_t,
                      double, double*, double*);
 std::ptrdiff_t pals_camera_indices(const double*, const double*, const double*, const double*,

@@ -83,7 +83,7 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual(drone.xy_anchor, (1, 2))
         self.assertEqual(controller.desired_position.z, .5)
         self.assertEqual(controller.current_position.z, .5)
-        self.assertAlmostEqual(controller.desired_velocity.x, -.04)
+        self.assertAlmostEqual(controller.desired_velocity.x, -.06)
         self.assertFalse(controller.position_control)
 
     def test_relative_move_tracks_local_target_through_heading_change(self):
@@ -163,7 +163,7 @@ class RoutineControlTest(unittest.TestCase):
         pose.pose.pose.position.x += .2
         drone._local_received(pose)
         self.assertAlmostEqual(math.hypot(drone._xy_hold_command().linear.x,
-                                          drone._xy_hold_command().linear.y), .04)
+                                          drone._xy_hold_command().linear.y), .06)
         drone.unlock_xy()
         drone.mode, drone.height, drone.battery_at = 'FLYING', .5, self.fusion.now
         with self.assertRaisesRegex(RuntimeError, 'Fused position is missing/stale'):
@@ -192,9 +192,9 @@ class RoutineControlTest(unittest.TestCase):
         pose = copy.deepcopy(drone.local_pose)
         pose.pose.pose.position.x += .2
         drone._local_received(pose)
-        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.04)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.06)
         self.fusion.ros_now += .45  # Within the 0.5 s velocity coast limit.
-        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.04)
+        self.assertAlmostEqual(drone._xy_hold_command().linear.x, -.06)
         self.assertEqual(drone.xy_anchor, (1, 2))
         self.fusion.ros_now += .1
         controller.local_ready_callback(NS(data=False))
@@ -227,7 +227,7 @@ class RoutineControlTest(unittest.TestCase):
         command = drone._xy_hold_command()
         controller.position_control_callback(modes[-1])
         controller.desired_twist_callback(command)
-        self.assertAlmostEqual(command.linear.x, -.04)
+        self.assertAlmostEqual(command.linear.x, -.06)
         self.assertFalse(controller.position_control)
         self.assertEqual(drone.xy_anchor, (1, 2))
 

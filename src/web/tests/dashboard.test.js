@@ -188,26 +188,26 @@ test('connections select solo or paired, and disconnects cannot turn off paired 
   assert.equal(b.publishers.coordination.messages.length, count);
 });
 
-test('preflight shows onboard refusal and expires grants at the source timestamp', () => {
+test('flight-state tooltip shows preflight refusal and expires grants at the source timestamp', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
   const report = { ...stamp(1), mode: 'DISARMED', paired: true, ready: false, reason: 'uncertainty_too_large' };
   app.receive(a, '/pidrone/coordination/preflight', report);
-  assert.match(a.field('preflight').textContent, /blocked · uncertainty too large/);
+  assert.match(a.field('flightMode').title, /blocked · uncertainty too large/);
   report.ready = true;
   report.reason = 'ready';
   app.receive(a, '/pidrone/coordination/preflight', report);
-  assert.match(a.field('preflight').textContent, /ready · paired/);
+  assert.match(a.field('flightMode').title, /ready · paired/);
   app.advanceTime(400);
   app.receive(a, '/pidrone/coordination/preflight', report);
   app.advanceTime(101);
   app.maintenanceTimers.forEach(callback => callback());
-  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+  assert.equal(a.field('flightMode').title, 'Preflight unavailable');
   app.receive(a, '/pidrone/coordination/preflight', report);
-  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+  assert.equal(a.field('flightMode').title, 'Preflight unavailable');
   a.disconnect();
-  assert.equal(a.field('preflight').textContent, 'Preflight unavailable');
+  assert.equal(a.field('flightMode').title, 'Preflight unavailable');
 });
 
 test('separation status comes from each onboard guard and expires on silence or disconnect', () => {
@@ -292,19 +292,27 @@ test('fusion gaps and resets retain display markers without live control data an
   assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, false);
 });
 
-test('two connections keep telemetry, charts, clocks, and cameras isolated', () => {
+test('two connections keep telemetry, clocks, and cameras isolated', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   assert.equal(a.ros.url, 'ws://drone1.local:9090');
   assert.equal(b.ros.url, 'ws://drone2.local:9090');
   app.receive(a, '/pidrone/battery', { vbat: 10.8 });
-  app.receive(b, '/pidrone/battery', { vbat: 12.4 });
-  assert.equal(a.field('battery').textContent, '10.8 V EMPTY!');
-  assert.equal(b.field('battery').textContent, '12.4 V');
+  app.receive(b, '/pidrone/battery', { vbat: 16.8 });
+  assert.equal(a.field('battery').textContent, '10.8 V');
+  assert.equal(b.field('battery').textContent, '16.8 V');
+  for (const [voltage, percent] of [[14, 0], [15.4, 50], [16.8, 100], [17, 100]]) {
+    app.receive(a, '/pidrone/battery', { vbat: voltage });
+    assert.equal(a.field('battery').textContent, voltage.toFixed(1) + ' V');
+    assert.equal(Number(a.field('batteryFill').getAttribute('width')), 13 * percent / 100);
+    assert.equal(a.field('batteryStatus').title, voltage.toFixed(1) + ' V · ' + percent + '%');
+  }
+  app.receive(a, '/pidrone/battery', { vbat: NaN });
+  assert.equal(a.field('battery').textContent, '17.0 V');
   app.receive(a, '/pidrone/range', { ...stamp(100), range: 0.2 });
   app.receive(b, '/pidrone/range', { ...stamp(900), range: 0.4 });
-  assert.equal(a.heightChart.data.datasets[0].data[0].y, 0.2);
-  assert.equal(b.heightChart.data.datasets[0].data[0].y, 0.4);
+  assert.equal(a.field('height').textContent, '0.20 m');
+  assert.equal(b.field('height').textContent, '0.40 m');
   assert.equal(a.startTime, 100);
   assert.equal(b.startTime, 900);
   assert.match(a.field('camera').src, /drone1.local:8080/);
@@ -461,7 +469,6 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   assert.equal(a.field('detection').textContent, 'No tag data');
   oldRos.events.close();
   assert.equal(a.connected, true);
-  assert.equal(a.series.range.length, 0);
   assert.equal(app.timers.size, 2);
   app.receive(a, '/pidrone/range', { ...stamp(1), range: 0.1 });
   assert.equal(a.startTime, 1);
@@ -481,16 +488,6 @@ test('unexpected close or error stops heartbeats and clears publishers', () => {
   assert.equal(app.elements.get('drone2-connectionStatus').querySelector('[data-connection-label]').textContent, 'Error');
 });
 
-test('bounded height streams stay independent', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  for (let secs = 102; secs < 115; secs++) app.receive(a, '/pidrone/range', { ...stamp(secs), range: secs / 100 });
-  assert.ok(a.series.range.length <= 6);
-  assert.equal(b.series.range.length, 0);
-  assert.equal(a.heightChart.data.datasets[0].data.at(-1).y, 1.14);
-  assert.equal(a.heightChart.options.scales.yAxes[0].ticks.min, 0);
-  assert.equal(a.heightChart.options.scales.yAxes[0].ticks.max, 0.6);
-});
 
 test('connecting the other drone preserves its partner and automatically targets both', () => {
   const app = dashboard();
@@ -510,6 +507,7 @@ test('connecting the other drone preserves its partner and automatically targets
   firstRos.open();
   assert.equal(app.elements.get('drone1-connectionToggle').hidden, true);
   assert.equal(app.drones.drone1.field('telemetry').hidden, false);
+  assert.equal(app.drones.drone1.field('batteryStatus').hidden, false);
   assert.equal(app.elements.get('drone1-connectionStatus').disabled, false);
   assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-action]').textContent, 'Disconnect');
   assert.equal(app.currentTarget(), 'drone1');
@@ -529,6 +527,7 @@ test('connecting the other drone preserves its partner and automatically targets
   assert.equal(app.elements.get('drone1-connectionToggle').textContent, 'Connect');
   assert.equal(app.elements.get('drone1-connectionToggle').hidden, false);
   assert.equal(app.drones.drone1.field('telemetry').hidden, true);
+  assert.equal(app.drones.drone1.field('batteryStatus').hidden, true);
   assert.equal(app.elements.get('drone1-connectionStatus').disabled, true);
   assert.equal(app.events.at(-1).type, 'drone-disconnect');
 });
@@ -602,6 +601,21 @@ test('terminal connection failure cancels startup but detaching a connected dron
     term: { reset() {}, write(message) { output.push(message); }, cols: 80, rows: 24 }, fit: { fit() {} } });
   app.connectDrone('drone1');
   pane.attach(true);
+  const stalled = app.drones.drone1.ros;
+  const deadline = app.drones.drone1.waitUntil;
+  pane.started(true);
+  assert.equal(app.drones.drone1.ros, null);
+  assert.equal(app.drones.drone1.waitUntil, deadline);
+  stalled.open();
+  assert.equal(app.drones.drone1.connected, false);
+  app.retries.pop()();
+  const replacement = app.drones.drone1.ros;
+  replacement.open();
+  assert.equal(app.drones.drone1.connected, true);
+  pane.started(true);
+  assert.equal(app.drones.drone1.ros, replacement, 'startup must preserve an open bridge');
+  app.drones.drone1.disconnect();
+  app.connectDrone('drone1');
   pane.socket.onclose();
   assert.equal(app.drones.drone1.ros, null);
   assert.equal(app.drones.drone1.waitUntil, 0);
@@ -653,9 +667,6 @@ test('the speed header uses controller velocity and keeps range-derived vertical
   app.receive(a, '/pidrone/range', rangeAt(100.2, 0.36));
   assert.equal(a.field('speed').textContent, '0.50 m/s');
   assert.equal(a.field('verticalSpeed').textContent, '0.20 m/s ↓');
-  assert.equal(a.speedChart.data.datasets[0].data[0].y, 0.5);
-  assert.ok(Math.abs(a.speedChart.data.datasets[1].data[0].y + 0.2) < 1e-6);
-  assert.equal(b.series.verticalSpeed.length, 0);
   assert.equal(b.field('verticalSpeed').textContent, '—');
   assert.equal(b.field('speed').textContent, '—');
   app.receive(a, '/pidrone/state', { ...stamp(100.3),
@@ -671,14 +682,12 @@ test('vertical speed follows timestamped height with smoothing and ignores repea
   const a = app.connect('drone1');
   const noise = [-0.001, 0.002, -0.002, 0.001, -0.001, 0.002, -0.001];
   noise.forEach((offset, i) => app.receive(a, '/pidrone/range', rangeAt(100 + i * 0.05, 0.2 + i * 0.05 * 0.2 + offset)));
-  assert.ok(Math.abs(a.series.verticalSpeed.at(-1).y - 0.2) < 0.02);
+  assert.ok(Math.abs(parseFloat(a.field('verticalSpeed').textContent) - 0.2) < 0.02);
   assert.match(a.field('verticalSpeed').textContent, /m\/s ↑$/);
   const value = a.field('verticalSpeed').textContent;
-  const count = a.series.verticalSpeed.length;
   app.receive(a, '/pidrone/range', rangeAt(100.3, 1.1));
   app.receive(a, '/pidrone/range', rangeAt(100.1, 1.1));
   assert.equal(a.field('verticalSpeed').textContent, value);
-  assert.equal(a.series.verticalSpeed.length, count);
 });
 
 test('vertical speed clears on stale, invalid, or interrupted range data and reconnect starts fresh', () => {
@@ -692,7 +701,6 @@ test('vertical speed clears on stale, invalid, or interrupted range data and rec
   app.advanceTime(501);
   a.refreshVerticalSpeed();
   assert.equal(a.field('verticalSpeed').textContent, '—');
-  assert.equal(a.series.verticalSpeed.length, 0);
   assert.equal(b.field('verticalSpeed').textContent, '0.10 m/s ↓');
   send(a, 101, 0.4);
   assert.equal(a.field('verticalSpeed').textContent, '—');

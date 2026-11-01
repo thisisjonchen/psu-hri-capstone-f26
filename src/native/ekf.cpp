@@ -6,6 +6,27 @@
 #include <cstdint>
 #include <vector>
 
+// Mean observations for initialization, rest detection and camera rotation only.
+extern "C" int pals_ekf_imu_means(const double* q, const double* dv, double dt,
+                                           double* force, double* rate) {
+    double norm=0.;
+    for (int i=0;i<4;++i) norm+=q[i]*q[i];
+    if (!std::isfinite(norm) || std::abs(norm-1.)>.002 || q[3]<=0.
+        || !std::isfinite(dt) || dt<=0. || dt>.2) return -1;
+    for (int i=0;i<3;++i) if (!std::isfinite(dv[i])) return -1;
+    norm=std::sqrt(norm);
+    const double length=std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]);
+    const double scale=length<1.e-10 ? 2./(norm*dt) : 2.*std::atan2(length,q[3])/(length*dt);
+    const double hn=std::sqrt(2.*norm*(norm+q[3]));
+    const double x=-q[0]/hn,y=-q[1]/hn,z=-q[2]/hn,w=(norm+q[3])/hn;
+    const double tx=2*(y*dv[2]-z*dv[1]),ty=2*(z*dv[0]-x*dv[2]),tz=2*(x*dv[1]-y*dv[0]);
+    force[0]=(dv[0]+w*tx+y*tz-z*ty)/dt;
+    force[1]=(dv[1]+w*ty+z*tx-x*tz)/dt;
+    force[2]=(dv[2]+w*tz+x*ty-y*tx)/dt;
+    for (int i=0;i<3;++i) rate[i]=q[i]*scale;
+    return 0;
+}
+
 namespace {
 using Matrix = std::array<double, 225>;
 
@@ -159,46 +180,120 @@ extern "C" int pals_ekf_predict(double* state, double* covariance, const double*
     return 0;
 }
 
-extern "C" int pals_ekf_project(double* state, double* covariance, const double* intervals,
-                                std::size_t count, const double* acceleration_bias,
-                                const double* gyro_bias, const double* gravity,
-                                const double* density, double start, double max_gap) {
-    if (!count) return 0;
-    const double last=intervals[7*(count-1)], duration=last-start;
-    if (!std::isfinite(duration) || duration <= 0. || duration > .5) return 1;
-    const double midpoint=start+duration/2;
-    double stamp=start, mid_state[10], r[9];
-    bool have_midpoint = false;
-    for (std::size_t i=0; i<count; ++i) {
-        const double* sample=intervals+7*i;
-        const double end=sample[0];
-        if (!(stamp < end && end <= last) || end-stamp > max_gap || !finite(sample, 7)) return 2;
-        double force[3], rate[3];
-        for (int axis=0; axis<3; ++axis) {
-            force[axis] = sample[axis+1]-acceleration_bias[axis];
-            rate[axis] = sample[axis+4]-gyro_bias[axis];
+namespace {
+void rotation_vector(const double* q, double* angle) {
+    const double n=std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]);
+    const double scale=n<1.e-12 ? 2. : 2.*std::atan2(n,q[3])/n;
+    for (int i=0;i<3;++i) angle[i]=q[i]*scale;
+}
+void from_rotation_vector(const double* angle, double fraction, double* q) {
+    const double n=std::sqrt(angle[0]*angle[0]+angle[1]*angle[1]+angle[2]*angle[2]);
+    const double scale=n<1.e-12 ? fraction*.5 : std::sin(n*fraction*.5)/n;
+    for (int i=0;i<3;++i) q[i]=angle[i]*scale;
+    q[3]=std::cos(n*fraction*.5);
+}
+void rotate_vector(const double* q, const double* v, double* out) {
+    double r[9]; rotation(q,r);
+    for (int i=0;i<3;++i) out[i]=r[3*i]*v[0]+r[3*i+1]*v[1]+r[3*i+2]*v[2];
+}
+
+struct IntegratedMotion {
+    double start, end, duration, angle[3], velocity[3];
+    bool set(const double* packet, const double* ba, const double* bg) {
+        if (!finite(packet,9) || !finite(ba,3) || !finite(bg,3)) return false;
+        start=packet[0]; end=packet[1]; duration=end-start;
+        const double* q=packet+2;
+        double norm=0.; for (int i=0;i<4;++i) norm+=q[i]*q[i];
+        if (!(duration>0. && duration<=.200000001) || std::abs(norm-1.)>.002 || q[3]<=0.) return false;
+        double normalized[4], raw_angle[3], half[4], mid_velocity[3];
+        for (int i=0;i<4;++i) normalized[i]=q[i]/std::sqrt(norm);
+        rotation_vector(normalized,raw_angle);
+        from_rotation_vector(raw_angle,-.5,half);
+        rotate_vector(half,packet+6,mid_velocity);
+        // Biases are body-frame rates. Apply their duration-scaled correction at the midpoint.
+        for (int i=0;i<3;++i) {
+            angle[i]=raw_angle[i]-bg[i]*duration;
+            mid_velocity[i]-=ba[i]*duration;
         }
-        const bool split = stamp < midpoint && midpoint < end;
-        const double stops[] = {split ? midpoint : end, end};
-        for (int part=0; part<(split ? 2 : 1); ++part) {
-            const double stop=stops[part];
-            const int steps=std::max(1, static_cast<int>(std::ceil((stop-stamp)/.01-1e-10)));
-            const double step=(stop-stamp)/steps;
-            for (int n=0; n<steps; ++n) {
-                double mid_q[4], acceleration[3];
-                nominal_step(state, force, rate, gravity, step, mid_q, acceleration);
-            }
-            stamp = stop;
-            if (stamp == midpoint) {
-                std::copy(state, state+10, mid_state);
-                have_midpoint = true;
+        from_rotation_vector(angle,.5,half);
+        rotate_vector(half,mid_velocity,velocity);
+        return finite(angle,3) && finite(velocity,3);
+    }
+    void advance(double* state, const double* gravity, double first, double last,
+                 double* mid_q, double* acceleration) const {
+        const double dt=last-first, fraction=dt/duration;
+        double inverse_start[4], body_velocity[3], local_velocity[3], dq[4];
+        // Interpolate velocity linearly in interval-start axes. Slices compose to the full delta.
+        from_rotation_vector(angle,-(first-start)/duration,inverse_start);
+        rotate_vector(inverse_start,velocity,body_velocity);
+        rotate_vector(state+6,body_velocity,local_velocity);
+        from_rotation_vector(angle,.5*fraction,dq);
+        quaternion_product(state+6,dq,mid_q);
+        from_rotation_vector(angle,fraction,dq);
+        quaternion_product(state+6,dq,state+6);
+        double norm=0.; for (int i=6;i<10;++i) norm+=state[i]*state[i];
+        for (int i=6;i<10;++i) state[i]/=std::sqrt(norm);
+        for (int i=0;i<3;++i) {
+            const double dv=local_velocity[i]*fraction+gravity[i]*dt;
+            acceleration[i]=dv/dt;
+            state[i]+=state[i+3]*dt+.5*dv*dt;
+            state[i+3]+=dv;
+        }
+    }
+};
+}
+
+extern "C" int pals_ekf_predict_integrated(double* state, double* covariance, const double* packet,
+                                            const double* gravity, const double* density,
+                                            double start, double end) {
+    IntegratedMotion motion;
+    if (!motion.set(packet,state+10,state+13) || !std::isfinite(start) || !std::isfinite(end)
+        || !(start<end) || start<motion.start-1.e-9 || end>motion.end+1.e-9) return 1;
+    const int steps=std::max(1,static_cast<int>(std::ceil((end-start)/.01-1.e-10)));
+    const double step=(end-start)/steps;
+    for (int n=0;n<steps;++n) {
+        double mid_p[3],mid_v[3],mid_q[4],acceleration[3],r[9];
+        std::copy(state,state+3,mid_p); std::copy(state+3,state+6,mid_v);
+        motion.advance(state,gravity,start+n*step,start+(n+1)*step,mid_q,acceleration);
+        for (int i=0;i<3;++i) {
+            mid_p[i]+=mid_v[i]*step/2+acceleration[i]*step*step/8;
+            mid_v[i]+=acceleration[i]*step/2;
+        }
+        rotation(mid_q,r);
+        propagate(covariance,mid_p,mid_v,r,gravity,density,step);
+    }
+    if (!finite(state,16) || !finite(covariance,225)) return 2;
+    symmetrize(covariance);
+    return 0;
+}
+
+extern "C" int pals_ekf_project_integrated(double* state, double* covariance, const double* intervals,
+                                            std::size_t count, const double* gravity,
+                                            const double* density, double start) {
+    if (!count) return 0;
+    const double last=intervals[9*(count-1)+1],duration=last-start;
+    if (!std::isfinite(start) || !std::isfinite(duration) || duration<=0. || duration>.5) return 1;
+    const double midpoint=start+duration/2;
+    double stamp=start,mid_state[10],r[9]; bool have_midpoint=false;
+    for (std::size_t i=0;i<count;++i) {
+        IntegratedMotion motion;
+        if (!motion.set(intervals+9*i,state+10,state+13) || !(stamp<motion.end && motion.end<=last)
+            || (i ? std::abs(stamp-motion.start)>1.e-9 : stamp<motion.start-1.e-9)) return 2;
+        const bool split=stamp<midpoint && midpoint<motion.end;
+        const double stops[]={split ? midpoint : motion.end,motion.end};
+        for (int part=0;part<(split ? 2 : 1);++part) {
+            double mid_q[4],acceleration[3];
+            motion.advance(state,gravity,stamp,stops[part],mid_q,acceleration);
+            stamp=stops[part];
+            if (stamp==midpoint) {
+                std::copy(state,state+10,mid_state); have_midpoint=true;
             }
         }
     }
     if (!have_midpoint) return 2;
-    rotation(mid_state+6, r);
-    propagate(covariance, mid_state, mid_state+3, r, gravity, density, duration);
-    if (!finite(state, 10) || !finite(covariance, 225)) return 3;
+    rotation(mid_state+6,r);
+    propagate(covariance,mid_state,mid_state+3,r,gravity,density,duration);
+    if (!finite(state,16) || !finite(covariance,225)) return 3;
     symmetrize(covariance);
     return 0;
 }

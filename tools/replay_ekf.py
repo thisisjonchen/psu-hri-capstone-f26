@@ -21,6 +21,8 @@ from rosbags.typesys import Stores, get_typestore, get_types_from_msg
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
 from localization.ekf import ErrorStateEKF, _array
+from localization.ekf_native import imu_means
+from localization.rotations import quaternion_matrix
 from localization.ekf_replay import DelayedEKF
 from localization.ekf_sensors import FloorCamera, FloorRange, mounting_rotation
 from flow_capture import read_ekf_events
@@ -111,9 +113,31 @@ class Replay:
         if stamp_ns is None or stamp_ns <= 0:
             self.counts['missing_source_stamp'] += 1
             return events
-        if topic == '/pidrone/imu_msp':
-            force = self.rotation.dot((np.asarray(message.accelerometer)-self.acceleration_offset)*self.scale[0])
-            rate = self.rotation.dot(np.asarray(message.gyroscope)*self.scale[1])
+        imu_topic = '/pidrone/imu_integrated' if metadata.get('integrated_imu') else '/pidrone/imu_msp'
+        if topic == imu_topic:
+            delta = None
+            if topic == '/pidrone/imu_integrated':
+                previous = getattr(self, 'last_integrated', None)
+                if not message.valid:
+                    if previous is not None:
+                        raise ValueError('FC reported an invalid integrated IMU interval')
+                    return events
+                if previous is not None and (not 0 < ((int(message.sequence)-previous[0]) & 0xffffffff) < 0x80000000
+                        or ((int(message.sample_time_us)-previous[1]) & 0xffffffff) != message.integration_time_us):
+                    raise ValueError('Integrated IMU continuity lost')
+                duration = (stamp_ns-previous[2])/1.e9 if previous else message.integration_time_us*1.e-6
+                imu_means(message.delta_rotation, message.delta_velocity, duration)
+                q = np.r_[self.rotation.dot(message.delta_rotation[:3]), message.delta_rotation[3]]
+                q /= np.linalg.norm(q)
+                half = q.copy(); half[3] += 1.
+                dv = self.rotation.dot(message.delta_velocity) - quaternion_matrix(half).dot(
+                    self.rotation.dot(self.acceleration_offset*self.scale[0]))*duration
+                force, rate = imu_means(q, dv, duration)
+                delta = (q, dv)
+                self.last_integrated = (int(message.sequence),int(message.sample_time_us),stamp_ns)
+            else:
+                force = self.rotation.dot((np.asarray(message.accelerometer)-self.acceleration_offset)*self.scale[0])
+                rate = self.rotation.dot(np.asarray(message.gyroscope)*self.scale[1])
             if self.timeline is None:
                 self.origin_ns = stamp_ns
                 self.timeline = DelayedEKF(self.ekf, delay=self.profile.get('fusion_delay_s', .25))
@@ -121,7 +145,7 @@ class Replay:
             else:
                 stamp = (stamp_ns-self.origin_ns)/1e9
                 stationary = any(start <= stamp < end for start, end in self.stationary_intervals)
-                status, events = self.timeline.add_imu(force, rate, stamp, stationary=stationary)
+                status, events = self.timeline.add_imu(force, rate, stamp, stationary=stationary, delta=delta)
                 self.counts[status] += 1
         elif self.timeline is None:
             self.counts['before_initial_imu'] += 1
@@ -156,7 +180,7 @@ def replay(folder, profile, out, camera_source='images'):
     runner, decoder = Replay(profile, camera_source), CaptureDecoder()
     out.mkdir(parents=True)
     metadata, outcomes, baselines = {}, Counter(), 0
-    used = {'/pidrone/imu_msp', '/pidrone/range', '/raspicam_node/camera_info',
+    used = {'/pidrone/imu_msp', '/pidrone/imu_integrated', '/pidrone/range', '/raspicam_node/camera_info',
             runner.camera_topic, '/raspicam_node/motion_vectors',
             '/pidrone/state', '/pidrone/localization/odometry'}
     with (out/'estimates.csv').open('w', newline='') as stream, (out/'baseline.csv').open('w', newline='') as reference:

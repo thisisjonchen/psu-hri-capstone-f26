@@ -317,7 +317,7 @@ class FusionNodeTest(unittest.TestCase):
         self.node.range_callback(NS(range=height, min_range=.01, max_range=4,
                                    header=NS(stamp=Stamp(self.ros_now))))
         msg = self.ekf_message(yaw, height, velocity, omega, position, roll, pitch)
-        self.node.ekf_callback(msg)
+        self.node.update_ekf(msg)
         self.node.ekf_ready_callback(NS(data=ready))
 
     def ekf_message(self, yaw=0, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
@@ -533,9 +533,8 @@ class FusionNodeTest(unittest.TestCase):
         msg.twist.covariance = np.diag([1., 2., 3., 4., 5., 6.]).ravel().tolist()
         self.node.range_callback(NS(range=.5, min_range=.01, max_range=4,
                                    header=NS(stamp=Stamp(self.ros_now-.05))))
-        self.node.ekf_callback(msg)
         self.node.ekf_ready_callback(NS(data=True))
-        self.node.step()
+        self.node.ekf_callback(msg)
         q = msg.pose.pose.orientation
         angles = euler((q.x, q.y, q.z, q.w))
         level = quaternion_matrix(quaternion(yaw=-angles[2]))

@@ -61,6 +61,7 @@ add_message_files(
   PeerState.msg
   FlightReadiness.msg
   MspImu.msg
+  IntegratedImu.msg
 
 )
 

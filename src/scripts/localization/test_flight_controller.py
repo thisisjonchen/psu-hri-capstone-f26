@@ -22,6 +22,8 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.events, self.pending = [], []
         self.commands = []
         self.missing_reply = None
+        self.sequence, self.previous_us = 0, None
+        self.requests = {}
         self.board = MultiWii.__new__(MultiWii)
         self.board.attitude = dict(cmd=MultiWii.ATTITUDE, angx=0, angy=0, heading=0)
         self.board.rawIMU = dict(cmd=MultiWii.RAW_IMU, ax=0, ay=0, az=2048,
@@ -30,6 +32,9 @@ class FlightControllerLoopTest(unittest.TestCase):
 
         def send(size, code, data):
             self.events.append(('send', code, self.env.ros_now))
+            if code == MultiWii.INTEGRATED_IMU:
+                self.assertEqual(data[1], self.sequence, 'Received interval must be acknowledged before the next request')
+                self.requests[code] = data[0]
             if code == MultiWii.SET_RAW_RC:
                 self.commands.append(list(data))
             self.pending.append(code)
@@ -41,12 +46,15 @@ class FlightControllerLoopTest(unittest.TestCase):
             self.env.now += .002
             if code == self.missing_reply:
                 return None
-            if code == MultiWii.RAW_IMU:
+            if code == MultiWii.INTEGRATED_IMU:
                 self.board.rawIMU['timestamp'] = self.env.ros_now
-            if code == MultiWii.MULTIPLE_MSP:
-                self.board.rawIMU['timestamp'] = self.env.ros_now
-                return [None if self.missing_reply == reply['cmd'] else reply
-                        for reply in (self.board.attitude, self.board.rawIMU)]
+                end = int(self.env.ros_now*1e6) & 0xffffffff
+                duration = 10000 if self.previous_us is None else (end-self.previous_us) & 0xffffffff
+                self.sequence += 1
+                self.previous_us = end
+                return dict(cmd=code, request=self.requests[code], valid=True, sequence=self.sequence, end_us=end, duration_us=duration,
+                            rotation=(0.,0.,0.,1.), velocity=(0.,0.,9.8*duration*1e-6),
+                            timestamp=self.env.ros_now, legacy=[self.board.attitude,self.board.rawIMU])
             return {MultiWii.SET_RAW_RC: 'Set Raw RC',
                     MultiWii.ATTITUDE: self.board.attitude,
                     MultiWii.RAW_IMU: self.board.rawIMU,
@@ -73,7 +81,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         sys.modules['std_msgs.msg'].Header = sys.modules['std_msgs.msg'].String = NS
         sys.modules['geometry_msgs.msg'].Quaternion = NS
         sys.modules['pidrone_pkg.msg'].Battery = NS
-        sys.modules['pidrone_pkg.msg'].MspImu = NS
+        sys.modules['pidrone_pkg.msg'].MspImu = sys.modules['pidrone_pkg.msg'].IntegratedImu = NS
         sys.modules['sensor_msgs.msg'].Imu = lambda: NS(
             orientation=NS(x=0., y=0., z=0., w=1.),
             angular_velocity=fusion_helpers.vector(), linear_acceleration=fusion_helpers.vector())
@@ -207,8 +215,8 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(transactions[-2:],
                          [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC)])
 
-    def test_missing_bulk_reply_skips_imu_and_keeps_loop_running_until_shutdown(self):
-        self.missing_reply = MultiWii.RAW_IMU
+    def test_missing_interval_reply_skips_imu_and_keeps_loop_running_until_shutdown(self):
+        self.missing_reply = MultiWii.INTEGRATED_IMU
         output = self.run_loop()
         self.assertNotIn('internal error', output)
         self.assertEqual(self.env.messages['/pidrone/imu'], [])
@@ -224,7 +232,7 @@ class FlightControllerLoopTest(unittest.TestCase):
 
         def turning():  # 1 degree per reply, crossing 359 -> 0 degrees.
             reply = receive()
-            if isinstance(reply, list):
+            if isinstance(reply, dict) and reply.get('cmd') == MultiWii.INTEGRATED_IMU:
                 self.board.attitude = dict(self.board.attitude,
                                            heading=(self.board.attitude['heading'] + 1) % 360)
             return reply

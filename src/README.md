@@ -27,7 +27,11 @@ Driver corrections: [ToF I²C error handling](../tools/tof/README.md) and
 
 ## Betaflight telemetry setup
 
-To install the USB timing firmware and save the 250 Hz serial setting together,
+The current FC node and EKF require the bundled `imu100001` firmware. Update the
+firmware and ROS package together; the older `usb2ms001` build does not supply
+integrated IMU telemetry.
+
+To install the firmware and save the 250 Hz serial setting together,
 run from the laptop with the drone disarmed and props removed:
 
 ```sh
@@ -40,7 +44,7 @@ its configuration, and verifies the update. See the
 supported versions and the Pi-side code needed for 100 Hz IMU delivery.
 
 Drone2 uses a SpeedyBee F405 V3 with a custom Betaflight 2026.6.1 build
-(`usb2ms001`, based on `6dbc4218f`, board config `749fff1`, MSP API 1.48).
+(`imu100001`, based on `6dbc4218f`, board config `749fff1`, MSP API 1.48).
 The firmware flushes USB replies every 2 ms. Its saved MSP serial service rate
 is 250 Hz:
 
@@ -54,21 +58,27 @@ node stopped so it releases the USB port. `save` persists the setting and reboot
 the flight controller. After reconnecting, verify it with
 `get serial_update_rate_hz`, then restart the Pi's flight-controller node.
 
+Drone2's PID profile 0 also uses `vbat_sag_compensation = 100` for battery-voltage
+compensation. This changes motor-output scaling and requires hover-throttle
+verification. The flash command preserves this setting; it does not enable it.
+
 The serial setting controls how often Betaflight services serial traffic. The
 USB interval is a compiled firmware change, preserved in the
 [patch and build instructions](../tools/firmware/betaflight/README.md). Flashing a stock
 image removes that change; restoring the CLI settings alone does not restore it.
 
-The Pi requests fresh MSP accelerometer and gyro counts for `/pidrone/imu_msp`
-at 100 Hz, while the existing `/pidrone/imu` attitude messages and RC commands
-run at 60 Hz. IMU message timestamps mark reception on the Pi, not acquisition
-inside the flight controller. These delivery settings do not change the gyro
-sampling or PID loop rates. They have been applied to drone2; drone1 is unverified.
+The Pi requests integrated rotation and specific force at 100 Hz for
+`/pidrone/imu_integrated`, with FC interval timestamps mapped into ROS time.
+`/pidrone/imu_msp` retains current sensor counts stamped at Pi receipt; the existing
+`/pidrone/imu` attitude messages and RC commands run at 60 Hz. These settings do not
+change gyro sampling or PID loop rates. They are applied to drone2; drone1 is unverified.
 
 ## EKF recording and replay
 
 Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
 each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
+Both paths consume integrated IMU increments directly. Splitting an interval assumes
+constant rotation rate and uniformly distributed delta velocity in its starting axes.
 The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
 
 ```sh

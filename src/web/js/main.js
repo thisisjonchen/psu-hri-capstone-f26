@@ -616,32 +616,21 @@ class DroneSession {
     this.retryTimer = null;
     this.positionMode = false;
     this.startTime = null;
-    this.latestTime = 0;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.rangeStamp = null;
     this.series = {};
     this.xyFrames = {};
     this.xyReceivedAt = {};
-    this.heightChart = this.makeChart('heightChart', this.heightDatasets(), 'Height (m)', 0, 0.6);
-    this.speedChart = this.makeChart('speedChart', [
-      this.dataset('speed', 'Horizontal speed', '#e46555'),
-      this.dataset('verticalSpeed', 'Vertical velocity', '#49368c')
-    ], 'Speed (m/s)', undefined, undefined);
     xySources.forEach(([key]) => {
       [0, 1, 2].forEach(i => { this.series[key + i] = []; });
-    });
-    ['height', 'speed'].forEach(kind => {
-      this.field(kind + 'Details').addEventListener('toggle', () => {
-        if (!this.field(kind + 'Details').open) return;
-        this[kind + 'Chart'].resize();
-        this.render(kind);
-      });
     });
     this.field('camera').addEventListener('error', () => {
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
-        this.field('camera').src = 'nocamera.svg';
+        this.field('batteryFill').setAttribute('width', 0);
+    this.field('batteryStatus').title = 'Battery voltage unavailable';
+    this.field('camera').src = 'nocamera.svg';
       }
     });
   }
@@ -692,7 +681,7 @@ class DroneSession {
     if (this.preflightReceivedAt !== null &&
         (Date.now() < this.preflightReceivedAt || Date.now() - this.preflightReceivedAt > 500)) {
       this.preflightReceivedAt = null;
-      this.field('preflight').textContent = 'Preflight unavailable';
+      this.field('flightMode').title = 'Preflight unavailable';
     }
     if (this.coordinationReceivedAt !== null &&
         (Date.now() - this.coordinationReceivedAt < 0 || Date.now() - this.coordinationReceivedAt > 500)) {
@@ -725,38 +714,6 @@ class DroneSession {
     this.updateXY('fused', message.pose.pose, message.header.frame_id);
   }
 
-  dataset(key, label, color) {
-    if (!this.series[key]) this.series[key] = [];
-    return {
-      key, label, data: this.series[key].slice(), borderColor: color,
-      backgroundColor: color, borderWidth: 1.5, pointRadius: 0,
-      fill: false, lineTension: 0
-    };
-  }
-
-  heightDatasets() {
-    return [
-      this.dataset('range', 'Raw range', '#e46555'),
-      this.dataset('ema', 'EMA height', '#fc46ad'),
-      this.dataset('truthHeight', 'Ground truth', '#172337')
-    ];
-  }
-
-  makeChart(field, datasets, axisLabel, min, max) {
-    return new Chart(this.field(field).getContext('2d'), {
-      type: 'line', data: { datasets }, options: {
-        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
-        scales: {
-          yAxes: [{ ticks: { min, max }, scaleLabel: { display: true, labelString: axisLabel } }],
-          xAxes: [{ type: 'linear', display: false, ticks: { min: 0, max: 5 } }]
-        },
-        legend: { labels: { filter: (item, data) => {
-          const dataset = data.datasets[item.datasetIndex];
-          return dataset.data.length > 0;
-        } } }
-      }
-    });
-  }
 
   setStatus(text, connected = false) {
     const state = connected ? 'connected' : ['Connecting…', 'Waiting for nodes…'].includes(text) ? 'connecting'
@@ -769,6 +726,7 @@ class DroneSession {
     button.textContent = state === 'connecting' ? 'Cancel connection' : 'Connect';
     button.setAttribute('aria-label', button.textContent + ' Drone ' + this.id.slice(-1));
     this.field('telemetry').hidden = !connected;
+    this.field('batteryStatus').hidden = !connected;
     status.disabled = !active;
     status.querySelector('[data-connection-action]').textContent = connected ? 'Disconnect' : 'Cancel';
     if (connected && document.activeElement === button) status.focus();
@@ -786,7 +744,6 @@ class DroneSession {
     this.xyFrames = {};
     this.xyReceivedAt = {};
     this.startTime = null;
-    this.latestTime = 0;
     this.positionMode = false;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
@@ -799,18 +756,15 @@ class DroneSession {
     this.coordinationReceivedAt = null;
     this.field('coordination').textContent = 'Unavailable';
     this.preflightReceivedAt = null;
-    this.field('preflight').textContent = 'Preflight unavailable';
+    this.field('flightMode').title = 'Preflight unavailable';
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedPosition'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
     });
+    this.field('batteryFill').setAttribute('width', 0);
+    this.field('batteryStatus').title = 'Battery voltage unavailable';
     this.field('camera').src = 'nocamera.svg';
     Object.keys(this.series).forEach(key => { this.series[key] = []; });
-    [this.heightChart, this.speedChart].forEach(chart => {
-      chart.data.datasets.forEach(dataset => { dataset.data = []; });
-      Object.assign(chart.options.scales.xAxes[0].ticks, { min: 0, max: 5 });
-      chart.update();
-    });
     if (fleetMap) fleetMap.clearDrone(this.id);
   }
 
@@ -950,14 +904,17 @@ class DroneSession {
     subscribe('/pidrone/battery', 'pidrone_pkg/Battery', message => {
       if (!Number.isFinite(message.vbat)) return;
       const battery = this.field('battery');
-      battery.textContent = message.vbat.toFixed(1) + ' V' + (message.vbat <= 11.3 ? ' EMPTY!' : '');
-      battery.classList.toggle('alert-danger', message.vbat <= 11.3);
-      battery.classList.toggle('alert-success', message.vbat > 11.3);
+      const percent = Math.round(Math.max(0, Math.min(1, (message.vbat - 14) / 2.8)) * 100);
+      battery.textContent = message.vbat.toFixed(1) + ' V';
+      this.field('batteryStatus').title = message.vbat.toFixed(1) + ' V · ' + percent + '%';
+      this.field('batteryFill').setAttribute('width', 13 * percent / 100);
+      battery.classList.toggle('alert-danger', message.vbat <= 14);
+      battery.classList.toggle('alert-success', message.vbat > 14);
     });
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       if (this.field('flightMode').textContent !== message.mode) {
         this.preflightReceivedAt = null;
-        this.field('preflight').textContent = 'Preflight unavailable';
+        this.field('flightMode').title = 'Preflight unavailable';
       }
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
@@ -979,15 +936,15 @@ class DroneSession {
         time > 0 && time <= now && now - time <= 500;
       // Repeated reports must not make old sensor data look fresh.
       this.preflightReceivedAt = message.ready === true && current ? time : now;
-      const status = this.field('preflight');
+      const status = this.field('flightMode');
       if (message.mode === 'FLYING') {
-        status.textContent = 'In flight';
+        status.title = 'In flight';
       } else if (message.ready !== true) {
-        status.textContent = 'Preflight blocked · ' + (message.reason || 'unavailable').replace(/_/g, ' ');
+        status.title = 'Preflight blocked · ' + (message.reason || 'unavailable').replace(/_/g, ' ');
       } else if (current) {
-        status.textContent = 'Preflight ready · ' + (message.paired ? 'paired' : 'solo');
+        status.title = 'Preflight ready · ' + (message.paired ? 'paired' : 'solo');
       } else {
-        status.textContent = 'Preflight unavailable';
+        status.title = 'Preflight unavailable';
       }
       this.refreshCoordination();
     });
@@ -1007,27 +964,17 @@ class DroneSession {
       if (valid) {
         if (this.rangeStamp !== null && time <= this.rangeStamp) return;
         this.rangeStamp = time;
-        this.addPoint('range', time, message.range);
       }
       this.field('height').textContent = valid ? message.range.toFixed(2) + ' m' : '—';
       this.updateVerticalSpeed(time, valid ? message.range : NaN);
-      this.render('height');
     });
     subscribe('/pidrone/state', 'pidrone_pkg/State', message => {
       const velocity = message.twist_with_covariance.twist.linear;
       const speed = Math.hypot(velocity.x, velocity.y);
-      this.addPoint('speed', this.time(message), speed);
       this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
-      this.render('speed');
-    });
-    subscribe('/pidrone/state/ema', 'pidrone_pkg/State', message => {
-      this.addPoint('ema', this.time(message), message.pose_with_covariance.pose.position.z);
-      this.render('height');
     });
     subscribe('/pidrone/state/ground_truth', 'pidrone_pkg/StateGroundTruth', message => {
-      this.addPoint('truthHeight', this.time(message), message.pose.position.z);
       this.updateXY('groundTruth', message.pose, message.header && message.header.frame_id);
-      this.render('height');
     });
     subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => {
       this.updateXY('camera', message.pose, message.header && message.header.frame_id);
@@ -1040,16 +987,13 @@ class DroneSession {
     if (!Number.isFinite(now) || now <= 0) return NaN;
     if (this.startTime === null) this.startTime = now;
     const time = now - this.startTime;
-    this.latestTime = Math.max(this.latestTime, time);
     return time;
   }
 
   clearVerticalSpeed() {
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
-    this.series.verticalSpeed = [];
     this.field('verticalSpeed').textContent = '—';
-    this.render('speed');
   }
 
   refreshVerticalSpeed() {
@@ -1076,29 +1020,9 @@ class DroneSession {
     const numerator = samples.reduce((sum, sample) => sum + (sample.time - meanTime) * (sample.height - meanHeight), 0);
     const denominator = samples.reduce((sum, sample) => sum + (sample.time - meanTime) ** 2, 0);
     const velocity = numerator / denominator;
-    this.addPoint('verticalSpeed', time, velocity);
     const rounded = Math.round(Math.abs(velocity) * 100) / 100;
     const direction = rounded === 0 ? '' : velocity > 0 ? ' ↑' : ' ↓';
     this.field('verticalSpeed').textContent = rounded.toFixed(2) + ' m/s' + direction;
-    this.render('speed');
-  }
-
-  addPoint(key, time, value) {
-    if (!Number.isFinite(time) || !Number.isFinite(value)) return;
-    const series = this.series[key] || [];
-    series.push({ x: time, y: value });
-    // Bound every stream, including stopped timestamps.
-    this.series[key] = series.filter(point => point.x >= this.latestTime - 5).slice(-1000);
-  }
-
-  render(kind) {
-    const chart = this[kind + 'Chart'];
-    chart.data.datasets.forEach(dataset => {
-      dataset.data = this.series[dataset.key].filter(point => point.x >= this.latestTime - 5);
-    });
-    chart.options.scales.xAxes[0].ticks.min = Math.max(0, this.latestTime - 5);
-    chart.options.scales.xAxes[0].ticks.max = Math.max(5, this.latestTime);
-    chart.update();
   }
 
   updateXY(key, pose, frame) {
@@ -1177,9 +1101,6 @@ function updateLayout() {
   const grid = document.getElementById('fleetGrid');
   const countChanged = Number(grid.dataset.count) !== connected.length;
   grid.dataset.count = String(connected.length);
-  Object.values(drones).forEach(drone => {
-    [drone.heightChart, drone.speedChart].forEach(chart => chart.resize());
-  });
   if (fleetMap) fleetMap.chart.resize();
   if (countChanged) {
     stopHeldKeys();
@@ -1268,7 +1189,7 @@ function publishCoordinationSelection() {
   }
   if (previous !== coordinationPaired) connected.forEach(drone => {
     drone.preflightReceivedAt = null;
-    drone.field('preflight').textContent = 'Preflight unavailable';
+    drone.field('flightMode').title = 'Preflight unavailable';
   });
   connected.forEach(drone => drone.publish('coordination', { data: coordinationPaired }));
 }

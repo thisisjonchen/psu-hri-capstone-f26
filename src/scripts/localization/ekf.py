@@ -143,6 +143,27 @@ class ErrorStateEKF(object):
         self.stamp = stamp
         return True, 'predicted'
 
+    def predict_integrated(self, interval, stamp):
+        """Advance through a slice of a recorded delta-rotation/velocity interval."""
+        if self.stamp is None:
+            return False, 'not_initialized'
+        try:
+            interval, stamp = _array(interval, (9,)), _stamp(stamp)
+        except (TypeError, ValueError, OverflowError):
+            return False, 'invalid_imu'
+        if stamp <= self.stamp:
+            return False, 'non_increasing_stamp'
+        if stamp-self.stamp > self.max_gap:
+            return False, 'imu_gap'
+        state = np.concatenate((self.position, self.velocity, self.quaternion,
+                                self.acceleration_bias, self.gyro_bias))
+        covariance = self._covariance.copy()
+        if ekf_native.predict_integrated(state, covariance, interval, self.gravity, self.noise, self.stamp, stamp):
+            return False, 'numerical_failure'
+        self.position, self.velocity, self.quaternion = state[:3].copy(), state[3:6].copy(), state[6:10].copy()
+        self._covariance, self.stamp = covariance, stamp
+        return True, 'predicted'
+
     def correct_zero_velocity(self, stamp, variance=.02**2):
         """Fuse v=0 when the caller has established that the drone is stationary."""
         if self.stamp is None:

@@ -233,7 +233,7 @@ def worker(folder, user_home):
         return result.stdout
 
     layout = transfer('device', ['-l'])
-    require('@Internal Flash /0x08000000/04*016Kg,01*064Kg,07*128Kg' in layout,
+    require('@Internal Flash /0x08000000/04*016Kg,01*064Kg,07*128Kg' in ' '.join(layout.split()),
             'Unexpected STM32 flash layout; no firmware was written.')
     print('Backing up the full device flash before writing.', flush=True)
     transfer('read-before', ['-s', '0x08000000:1048576', '-U', str(backup / 'flash-before.bin')])
@@ -299,7 +299,7 @@ def worker(folder, user_home):
         started = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'FC',
                        '-X', 'stuff', command])
         require(started.returncode == 0, 'Firmware verified, but the FC window could not be restarted.')
-    print('Verified: usb2ms001, serial service 250 Hz, other settings preserved.', flush=True)
+    print('Verified: %s, serial service 250 Hz, other settings preserved.' % manifest['firmware_revision'], flush=True)
     print('FC node restart requested.' if restart else 'FC node was stopped and remains stopped.', flush=True)
 
 

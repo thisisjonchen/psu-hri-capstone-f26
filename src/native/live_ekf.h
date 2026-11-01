@@ -26,9 +26,13 @@ struct Profile {
 };
 
 struct Imu {
-    double stamp;
-    Vec force, rate;
+    double stamp, duration;
+    Quaternion delta_rotation;
+    Vec delta_velocity;
+    void means(Vec& force, Vec& rate) const;
+    std::array<double,9> packet() const;
 };
+Imu calibrated_imu(double duration, const Quaternion&, const Vec&, const Profile&);
 
 struct Filter {
     std::array<double, 16> state = {};
@@ -43,6 +47,7 @@ struct Filter {
     bool predict(const Imu&, double end);
     bool project(const std::vector<Imu>&);
     bool correct(const cv::Mat& innovation, const cv::Mat& observation, const cv::Mat& noise, double gate);
+    void reset_height(double height, const Vec& attitude_jacobian, double variance);
     cv::Mat public_covariance() const;
     bool navigation_variance_valid() const;
 };
@@ -85,12 +90,13 @@ public:
                 const std::vector<double>& distortion, const std::string& model);
     void range(std::int64_t stamp, double distance, double minimum, double maximum);
     void image(std::int64_t stamp, const std::vector<unsigned char>& encoded);
-    void imu(std::int64_t stamp, const Vec& acceleration, const Vec& gyro, double received);
+    void imu(std::int64_t stamp, Imu sample, double received);
     Snapshot snapshot() const;
     const Filter& filter() const { return filter_; }
 private:
     struct Measurement {
         double stamp, end = 0., value = 0.;
+        bool ground_rest = false;
         std::string sensor;
         Vec rate;
         cv::Mat previous, image;

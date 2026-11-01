@@ -22,10 +22,11 @@ from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
-from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu
+from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
 from localization import monotonic
 from localization.distance_guard import fresh, STATE_TIMEOUT
+from localization.imu_clock import ImuClock
 import os
 
 
@@ -71,6 +72,9 @@ class FlightController(object):
         now = monotonic()
         self.next_rc = self.next_imu = self.next_attitude = self.next_battery = now
         self.imu_pending = self.battery_pending = None
+        self.imu_clock = ImuClock()
+        self.imu_request = self.imu_ack = 0
+        self.integrated_started = False
         self.last_rc_ack = now
         # store the mode publisher
         self.modepub = None
@@ -219,15 +223,22 @@ class FlightController(object):
                     self.last_rc_ack = now
                 else:
                     rospy.logwarn_throttle(1, 'Invalid RC acknowledgment from flight controller')
-            elif code in (MultiWii.RAW_IMU, MultiWii.MULTIPLE_MSP):
+            elif code in (MultiWii.INTEGRATED_IMU, 255):
                 if self.imu_pending is not None and code == self.imu_pending[0]:
+                    if isinstance(reply, dict):
+                        if reply.get('request') != self.imu_pending[4]:
+                            continue
+                        reply['sent'] = self.imu_pending[2]
+                        reply['publish_attitude'] = self.imu_pending[3]
+                        # Acknowledge this interval before scheduling the next request.
+                        reply['integrated'] = self.integrated_imu_sample(reply)
                     self.imu_pending = None
                     received.append((code, reply))
             elif code == MultiWii.ANALOG and self.battery_pending is not None:
                 self.battery_pending = None
                 received.append((code, reply))
 
-        if self.imu_pending is not None and now - self.imu_pending[1] >= 1.:
+        if self.imu_pending is not None and now - self.imu_pending[1] >= .05:
             rospy.logwarn_throttle(1, 'IMU response timed out; skipping sample')
             self.imu_pending = None
         if self.battery_pending is not None and now - self.battery_pending >= 1.:
@@ -246,13 +257,12 @@ class FlightController(object):
             if rc_due:
                 self.next_rc = self.next_poll(self.next_rc, now, 60.)
         if now >= self.next_imu and self.imu_pending is None:
-            if now >= self.next_attitude:
-                code, args = MultiWii.MULTIPLE_MSP, [MultiWii.ATTITUDE, MultiWii.RAW_IMU]
+            attitude_due = now >= self.next_attitude
+            if attitude_due:
                 self.next_attitude = self.next_poll(self.next_attitude, now, 60.)
-            else:
-                code, args = MultiWii.RAW_IMU, []
-            requests.append((code, args))
-            self.imu_pending = (code, now)
+            self.imu_request = (self.imu_request+1) & 0xffffffff
+            requests.append((MultiWii.INTEGRATED_IMU, [self.imu_request,self.imu_ack]))
+            self.imu_pending = (MultiWii.INTEGRATED_IMU, now, rospy.Time.now().to_sec(), attitude_due,self.imu_request)
             self.next_imu = self.next_poll(self.next_imu, now, 100.)
         if now >= self.next_battery and self.battery_pending is None:
             requests.append((MultiWii.ANALOG, []))
@@ -372,6 +382,31 @@ class FlightController(object):
         message.header.stamp = rospy.Time.from_sec(stamp)
         message.accelerometer = counts[:3]
         message.gyroscope = counts[3:]
+        return message
+
+    def integrated_imu_sample(self, reply):
+        try:
+            if (not np.all(np.isfinite(reply['rotation'] + reply['velocity']))
+                    or not .9 < np.linalg.norm(reply['rotation']) < 1.1
+                    or (reply['valid'] and not 0 < reply['duration_us'] <= 200000)):
+                raise ValueError('Invalid integrated IMU payload')
+            stamp = self.imu_clock.map(reply['end_us'], reply['sent'], reply['timestamp'])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            rospy.logwarn_throttle(1, 'Invalid integrated IMU sample; skipping: %s' % error)
+            return None
+        message = IntegratedImu()
+        message.header = Header()
+        message.header.frame_id = 'fc_msp'
+        message.header.stamp = rospy.Time.from_sec(stamp)
+        message.sequence = reply['sequence']
+        message.sample_time_us = reply['end_us']
+        message.integration_time_us = reply['duration_us']
+        message.valid = reply['valid']
+        message.delta_rotation = reply['rotation']
+        message.delta_velocity = reply['velocity']
+        if reply['valid'] or not self.integrated_started:
+            self.imu_ack = reply['sequence']
+        self.integrated_started = self.integrated_started or reply['valid']
         return message
 
     def update_battery_message(self, reply):
@@ -499,6 +534,7 @@ def main():
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
     msp_imupub = rospy.Publisher('/pidrone/imu_msp', MspImu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
+    integral_pub = rospy.Publisher('/pidrone/imu_integrated', IntegratedImu, queue_size=100, tcp_nodelay=True)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
     calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
     calibration_owner_pub = rospy.Publisher('/pidrone/localization/calibration_owner/status', String, queue_size=1, latch=True)
@@ -546,16 +582,15 @@ def main():
                     else:
                         rospy.logwarn_throttle(1, 'Invalid battery response; skipping sample')
                     continue
-                if code == MultiWii.MULTIPLE_MSP:
-                    if not fc.update_imu_message(reply):
-                        continue
+                if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.INTEGRATED_IMU:
+                    rospy.logwarn_throttle(1, 'Missing integrated IMU reply; imu100001 firmware is required')
+                    continue
+                integrated = reply['integrated']
+                if integrated is not None:
+                    integral_pub.publish(integrated)
+                if reply['publish_attitude'] and fc.update_imu_message(reply['legacy']):
                     imupub.publish(fc.imu_message)
-                    raw = next(sample for sample in reply if sample['cmd'] == MultiWii.RAW_IMU)
-                else:
-                    if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.RAW_IMU:
-                        rospy.logwarn_throttle(1, 'Invalid IMU response; skipping sample')
-                        continue
-                    raw = reply
+                raw = next(sample for sample in reply['legacy'] if sample['cmd'] == MultiWii.RAW_IMU)
                 msp_message = fc.msp_imu_sample(raw)
                 if msp_message is not None:
                     msp_imupub.publish(msp_message)

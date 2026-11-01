@@ -6,7 +6,7 @@ EKF position or velocity. ToF freshness remains part of controller readiness.
 """
 import math
 import threading
-from copy import deepcopy
+from copy import copy
 from collections import deque
 
 import numpy as np
@@ -116,6 +116,11 @@ class FusionLocalizationNode(object):
             self.ekf_ready, self.ekf_ready_at = bool(msg.data), rospy.get_time()
 
     def ekf_callback(self, msg):
+        self.update_ekf(msg)
+        self.step()
+        self.updated.set()
+
+    def update_ekf(self, msg):
         with self.lock:
             now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
             if (self.ekf_reference_lost or msg.header.frame_id != self.odom_frame
@@ -143,7 +148,6 @@ class FusionLocalizationNode(object):
             self.ekf_history.append((stamp, np.array([p.x, p.y])))
             while self.ekf_history and stamp - self.ekf_history[0][0] > 2.:
                 self.ekf_history.popleft()
-            self.updated.set()
 
     def local_odom(self):
         p = self.ekf_odom.pose.pose.position
@@ -373,11 +377,11 @@ class FusionLocalizationNode(object):
         if stamp == self.ekf_published_stamp:
             return
         state = State()
-        state.header = deepcopy(odometry.header)
+        state.header = copy(odometry.header)
         # Keep the existing altitude watchdog tied to a real ToF observation.
         state.header.stamp = min((odometry.header.stamp, self.range_stamp), key=lambda value: value.to_sec())
-        state.pose_with_covariance = deepcopy(odometry.pose)
-        state.twist_with_covariance = deepcopy(odometry.twist)
+        state.pose_with_covariance = odometry.pose
+        state.twist_with_covariance.twist.angular = odometry.twist.twist.angular
         q = odometry.pose.pose.orientation
         quaternion = (q.x, q.y, q.z, q.w)
         yaw = tf.transformations.euler_from_quaternion(quaternion)[2]
@@ -441,10 +445,10 @@ def main():
     rospy.init_node('fusion_localization')
     node = FusionLocalizationNode()
     while not rospy.is_shutdown():
-        # Wake for fresh EKF output, or check freshness during a sensor gap.
-        node.updated.wait(1 / 60.)
+        # Samples publish in their callback; keep checking freshness through gaps.
+        if not node.updated.wait(1 / 60.):
+            node.step()
         node.updated.clear()
-        node.step()
 
 
 if __name__ == '__main__':

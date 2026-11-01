@@ -40,6 +40,26 @@ def correct(state, covariance, innovation, observation, noise, gate):
 
 
 _quaternion = np.ctypeslib.ndpointer(dtype=np.float64, shape=(4,), flags='C_CONTIGUOUS')
+_imu_means = _library.pals_ekf_imu_means
+_imu_means.argtypes = [_quaternion, _vector, ctypes.c_double, _vector, _vector]
+_imu_means.restype = ctypes.c_int
+
+
+def imu_means(rotation, velocity, duration):
+    """Mean observations for rest detection and camera rotation, not propagation."""
+    q, dv = np.ascontiguousarray(rotation, dtype=float), np.ascontiguousarray(velocity, dtype=float)
+    force, rate = np.empty(3), np.empty(3)
+    if _imu_means(q, dv, duration, force, rate):
+        raise ValueError('Invalid integrated IMU interval')
+    return force, rate
+
+
+predict_integrated = _library.pals_ekf_predict_integrated
+predict_integrated.argtypes = [_correction_state, _writable_matrix, _float_vector,
+                              _vector, _matrix, ctypes.c_double, ctypes.c_double]
+predict_integrated.restype = ctypes.c_int
+
+
 _rotation = np.ctypeslib.ndpointer(dtype=np.float64, shape=(3, 3), flags='C_CONTIGUOUS')
 _indices = np.ctypeslib.ndpointer(dtype=np.int64, ndim=1, flags=('C_CONTIGUOUS', 'WRITEABLE'))
 _observations = np.ctypeslib.ndpointer(dtype=np.float64, ndim=3, flags=('C_CONTIGUOUS', 'WRITEABLE'))

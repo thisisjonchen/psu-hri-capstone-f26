@@ -1,10 +1,11 @@
 # SpeedyBee F405 V3 firmware
 
-Drone2's SpeedyBee F405 V3 runs Betaflight 2026.6.1 with revision marker
-`usb2ms001`. The [USB patch](usb-flush-2ms.patch) changes
-`CDC_IN_FRAME_INTERVAL` from 15 to 1 in the F405 USB driver. Its post-increment
-frame counter makes this a 2 ms USB IN flush interval. The saved CLI setting is
-`serial_update_rate_hz = 250`; see [telemetry setup](../../../src/README.md#betaflight-telemetry-setup).
+The bundled Betaflight 2026.6.1 build is `imu100001`: a 2 ms USB flush interval
+and [integrated IMU telemetry](imu-integration.patch). It accumulates rotation
+and specific force between acknowledged replies, with FC timestamps and durations.
+Standard MSP readings remain unchanged. The serial setting is 250 Hz.
+
+Drone2 uses this build with the matching ROS package. Drone1 is unverified.
 
 ## Apply to a drone
 
@@ -30,7 +31,7 @@ The command handles the complete firmware update:
    other saved settings. Restarts the FC node if it was running beforehand.
 
 It supports the exact original Betaflight 2026.6.1 build listed below and the
-already-patched `usb2ms001` image. A different board or firmware build is rejected
+patched `usb2ms001` and `imu100001` images. A different board or firmware build is rejected
 before writing firmware; prepare a matching build before updating such a drone.
 It uses each drone's existing configuration, including its calibration and
 receiver settings. No configuration dump from another drone is applied.
@@ -42,10 +43,9 @@ controller left in DFU mode before any firmware write can return to its original
 firmware by disconnecting and reconnecting its power.
 
 The 100 Hz IMU delivery also needs the current Pi-side
-`flight_controller_node.py`, `h2rMultiWii.py`, and generated `MspImu` ROS message.
-Sync this branch to the Pi and build its ROS package if those are missing. The
-flash command handles firmware and its serial setting; it does not deploy Pi code
-or claim a measured IMU rate. Drone2 has already been measured at 99.6 Hz.
+`flight_controller_node.py`, `h2rMultiWii.py`, the generated `IntegratedImu` message,
+and the rebuilt EKF. Update firmware and ROS code together. The flash command
+does not deploy Pi code. Restart localization on the floor after restarting the FC.
 
 ## Build
 
@@ -57,7 +57,8 @@ Use these exact sources and compiler:
   `749fff1`, target `SPEEDYBEEF405V3`.
 - Arm GNU Toolchain 13.3.Rel1, GCC 13.3.1.
 
-Apply `usb-flush-2ms.patch` from the Betaflight source root with `git apply`.
+Apply `usb-flush-2ms.patch` and `imu-integration.patch` from the Betaflight source
+root with `git apply`.
 Then build there, replacing the two `/path/to/` paths below. The feature flags
 match drone2's original official build
 [`a7fa899c9773c51462447321eaff4ec0`](https://build.betaflight.com/api/builds/a7fa899c9773c51462447321eaff4ec0/json).
@@ -66,31 +67,13 @@ match drone2's original official build
 make -j4 hex CONFIG=SPEEDYBEEF405V3 \
   CONFIG_DIR=/path/to/config \
   ARM_SDK_PREFIX=/path/to/toolchain/bin/arm-none-eabi- \
-  AUTOHYDRATE_STAMPS= REVISION=usb2ms001 \
+  AUTOHYDRATE_STAMPS= REVISION=imu100001 \
   "CONFIG_REVISION_DEFINE=-D'__CONFIG_REVISION__=\"749fff1\"'" \
   'EXTRA_FLAGS=-DCLOUD_BUILD -DUSE_ACRO_TRAINER -DUSE_DSHOT -DUSE_GPS -DUSE_GPS_PLUS_CODES -DUSE_LED_STRIP -DUSE_OPTICALFLOW -DUSE_OSD -DUSE_OSD_HD -DUSE_OSD_SD -DUSE_PINIO -DUSE_RANGEFINDER -DUSE_SERIALRX -DUSE_SERIALRX_CRSF -DUSE_TELEMETRY -DUSE_TELEMETRY_CRSF -DUSE_VTX'
 ```
 
-The bundled DFU is `betaflight_2026.6.1_SPEEDYBEEF405V3_usb2ms001.dfu`, SHA-256
-`b965e3bc8e8e57d5bd7a8425f14ba29fc423081297e81ccc0cbbd016a6493e83`.
+The bundled DFU is `betaflight_2026.6.1_SPEEDYBEEF405V3_imu100001.dfu`.
 `manifest.json` records its checksum and the supported firmware fingerprints.
-Drone2's patched HEX has SHA-256
-`81c71352c2649182b233e0b71a24372a8c5c9d947c97ede722d0469dceef9a18`.
 Rebuilds can differ because Betaflight embeds the build date and time. Betaflight
 is distributed under the included [GPL license](LICENSE); its pinned upstream
-source and local patch are linked above.
-
-## Installed configuration and backups
-
-The firmware was flashed using DfuSe elements at `0x08000000` and `0x08008000`.
-Readback verified all 452,772 firmware bytes and confirmed that the 16 KB
-configuration sector at `0x08004000` was unchanged. The saved CLI configuration
-was also checked after reboot. PID, receiver, motor, sensor and calibration
-settings were preserved.
-
-Drone2's installed HEX, original firmware, full pre-flash device backup, CLI
-configuration, and verification results are retained locally under
-`flow_capture_ekf_drone2_20261030/firmware_usb_100hz/` at the repository root.
-That recording directory is ignored by Git. The DFU, source patch, manifest and
-build recipe here are included in the repository. A stock firmware reflash removes
-the patch.
+source and local patches are linked above. A stock reflash removes both patches.

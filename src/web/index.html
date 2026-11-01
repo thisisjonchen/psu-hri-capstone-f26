@@ -6,13 +6,13 @@
   <title>PALS: Paired Aerial Lift System</title>
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/xterm.css">
-  <link rel="stylesheet" href="css/main.css?v=20261019-tag-placeholder">
+  <link rel="stylesheet" href="css/main.css?v=20261031-status-layout">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
-  <script src="js/main.js?v=20261019-connect-panel" defer></script>
+  <script src="js/main.js?v=20261031-status-layout" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
   <script src="js/routines.js?v=20261019-terminal-messages" defer></script>
@@ -126,7 +126,7 @@
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
-      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Solo or paired flight is selected automatically from the connected drones before arming. Connect both drones for paired flight. Paired protection stays on through disconnects. Check each drone’s preflight and Separation guard status below.</p><p><strong>Keyboard shortcuts</strong></p>
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Solo or paired flight is selected automatically from the connected drones before arming. Connect both drones for paired flight. Paired protection stays on through disconnects. Check each drone’s Separation guard status below. Hover over its flight state for preflight details.</p><p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
@@ -144,7 +144,7 @@
           <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
           <button class="btn btn-danger" data-command="disarm">Disarm all</button>
         </div>
-        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary" id="nodes-align" type="button" disabled>Realign Yaw</button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
+        <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes" title="Restart nodes"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><button class="btn btn-outline-secondary icon-button with-label" id="nodes-align" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg><span>Relocalize</span></button><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
       </div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
       <div class="routine-terminals">
@@ -157,46 +157,24 @@
       </div>
     </section>
     <div class="fleet-grid" id="fleetGrid" data-count="0"><section class="drone-dashboard" id="drone1" aria-labelledby="drone1-heading">
-          <div class="drone-heading"><h2 id="drone1-heading">Drone 1</h2><button class="connection-status" id="drone1-connectionStatus" data-state="disconnected" data-connection-toggle="drone1" disabled aria-label="Drone 1 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
+          <div class="drone-heading"><h2 id="drone1-heading">Drone 1</h2><span class="battery-status" data-field="batteryStatus" title="Battery voltage" hidden><svg viewBox="0 0 24 16" role="img" aria-label="Battery" focusable="false"><rect x="1" y="2" width="19" height="12" rx="2"/><path d="M23 6v4"/><rect data-field="batteryFill" class="battery-fill" x="4" y="5" width="0" height="6" rx="1"/></svg><span class="status-value" data-field="battery">—</span></span><button class="connection-status" id="drone1-connectionStatus" data-state="disconnected" data-connection-toggle="drone1" disabled aria-label="Drone 1 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
           <button class="connection-entry" id="drone1-connectionToggle" data-connection-toggle="drone1" aria-label="Connect Drone 1">Connect</button>
           <div class="status-grid" data-field="telemetry" aria-label="Drone 1 status" hidden>
             <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
-            <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
-            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div><p data-field="preflight" role="status">Preflight unavailable</p></div>
-            <div class="status-card"><p>Separation guard</p><div class="status-value" data-field="coordination" role="status">Unavailable</div></div>
-            <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
-              <summary aria-label="Drone 1 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
-              <div class="metric-content"><article class="metric-chart">
-              <div class="canvas-wrap"><canvas id="drone1-heightChart" data-field="heightChart" aria-label="Drone 1 height chart"></canvas></div>
-            </article></div>
-            </details>
-            <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
-              <summary aria-label="Drone 1 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
-              <div class="metric-content"><article class="metric-chart">
-              <div class="canvas-wrap"><canvas id="drone1-speedChart" data-field="speedChart" aria-label="Drone 1 speed chart"></canvas></div>
-            </article></div>
-            </details>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode" title="Preflight unavailable">—</div></div>
+            <div class="status-card"><span class="metric-label">Height</span><div class="status-value" data-field="height">—</div></div>
+            <div class="status-card speed-card"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span></div>
+            <div class="coordination-status"><span class="metric-label">Separation guard</span><span data-field="coordination" role="status">Unavailable</span></div>
           </div>
         </section><section class="drone-dashboard" id="drone2" aria-labelledby="drone2-heading">
-          <div class="drone-heading"><h2 id="drone2-heading">Drone 2</h2><button class="connection-status" id="drone2-connectionStatus" data-state="disconnected" data-connection-toggle="drone2" disabled aria-label="Drone 2 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
+          <div class="drone-heading"><h2 id="drone2-heading">Drone 2</h2><span class="battery-status" data-field="batteryStatus" title="Battery voltage" hidden><svg viewBox="0 0 24 16" role="img" aria-label="Battery" focusable="false"><rect x="1" y="2" width="19" height="12" rx="2"/><path d="M23 6v4"/><rect data-field="batteryFill" class="battery-fill" x="4" y="5" width="0" height="6" rx="1"/></svg><span class="status-value" data-field="battery">—</span></span><button class="connection-status" id="drone2-connectionStatus" data-state="disconnected" data-connection-toggle="drone2" disabled aria-label="Drone 2 offline"><span class="state-icon" data-state-icon aria-hidden="true"></span><span data-connection-label aria-live="polite">Offline</span><span class="connection-action" data-connection-action aria-hidden="true">Disconnect</span></button></div>
           <button class="connection-entry" id="drone2-connectionToggle" data-connection-toggle="drone2" aria-label="Connect Drone 2">Connect</button>
           <div class="status-grid" data-field="telemetry" aria-label="Drone 2 status" hidden>
             <div class="status-card localization-card"><p>Position</p><div data-field="fusedPosition">—</div></div>
-            <div class="status-card"><p>Battery</p><div class="status-value" data-field="battery">—</div></div>
-            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode">—</div><p data-field="preflight" role="status">Preflight unavailable</p></div>
-            <div class="status-card"><p>Separation guard</p><div class="status-value" data-field="coordination" role="status">Unavailable</div></div>
-            <details class="status-card metric-dropdown" data-field="heightDetails" data-metric="height">
-              <summary aria-label="Drone 2 height graph"><span class="metric-label">Height</span><span class="status-value" data-field="height">—</span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
-              <div class="metric-content"><article class="metric-chart">
-              <div class="canvas-wrap"><canvas id="drone2-heightChart" data-field="heightChart" aria-label="Drone 2 height chart"></canvas></div>
-            </article></div>
-            </details>
-            <details class="status-card metric-dropdown" data-field="speedDetails" data-metric="speed">
-              <summary aria-label="Drone 2 speed graph"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span><span class="metric-chevron" aria-hidden="true">⌄</span></summary>
-              <div class="metric-content"><article class="metric-chart">
-              <div class="canvas-wrap"><canvas id="drone2-speedChart" data-field="speedChart" aria-label="Drone 2 speed chart"></canvas></div>
-            </article></div>
-            </details>
+            <div class="status-card"><p>Flight state</p><div class="status-value" data-field="flightMode" title="Preflight unavailable">—</div></div>
+            <div class="status-card"><span class="metric-label">Height</span><div class="status-value" data-field="height">—</div></div>
+            <div class="status-card speed-card"><span class="speed-readings"><span><span class="metric-label">Horizontal speed</span><strong data-field="speed" title="Horizontal velocity estimate used by the controller.">—</strong></span><span><span class="metric-label">Vertical speed</span><strong data-field="verticalSpeed" title="Estimated from changes in measured height.">—</strong></span></span></div>
+            <div class="coordination-status"><span class="metric-label">Separation guard</span><span data-field="coordination" role="status">Unavailable</span></div>
           </div>
         </section></div>
   </main>

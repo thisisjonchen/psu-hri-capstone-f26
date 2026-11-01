@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -53,16 +54,27 @@ def record_ekf(drone, seconds, out_dir):
         raise ValueError('seconds must be in (0, 3600]')
     out_dir.mkdir(parents=True)
     worker = Path(__file__).with_name('ekf_stream.py').read_bytes()
-    command = ("pals_capture=$(mktemp /tmp/pals-ekf.XXXXXX) || exit 1; "
-               "trap 'rm -f \"$pals_capture\"' EXIT; "
-               "docker exec -i pidrone_pkg bash -ic 'exec python -u - %d' > \"$pals_capture\"; "
-               "pals_status=$?; cat \"$pals_capture\" || exit $?; exit \"$pals_status\"") % seconds
+    remote_path = '/tmp/pals-ekf-%s.jsonl' % uuid.uuid4().hex
+    command = ("umask 077; docker exec -i pidrone_pkg bash -ic 'exec python -u - %d' > %s; "
+               "pals_status=$?; cat %s || exit $?; exit \"$pals_status\"") % (seconds, remote_path, remote_path)
     print('Recording on %s for %d seconds; download follows. Remain stationary initially.' % (drone, seconds))
     with (out_dir / 'events.jsonl').open('wb') as output, (out_dir / 'capture.stderr').open('wb') as errors:
-        result = subprocess.run(['ssh', drone, command], input=worker, stdout=output,
-                                stderr=errors, timeout=seconds + 120)
+        errors.write(('Remote recording: %s:%s\n' % (drone, remote_path)).encode())
+        errors.flush()
+        try:
+            result = subprocess.run(['ssh', drone, command], input=worker, stdout=output,
+                                    stderr=errors, timeout=seconds + 600)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError('Download timed out; recording retained at %s:%s' % (drone, remote_path)) from error
     if result.returncode:
-        raise RuntimeError('Capture failed; see %s' % (out_dir / 'capture.stderr'))
+        raise RuntimeError('Capture failed; see %s. Remote recording: %s:%s' %
+                           (out_dir / 'capture.stderr', drone, remote_path))
+    # Keep the remote recording until the local completion marker and counts agree.
+    for _ in read_ekf_events(out_dir):
+        pass
+    cleanup = subprocess.run(['ssh', drone, 'rm -f ' + remote_path], stderr=subprocess.PIPE)
+    if cleanup.returncode:
+        print('Saved locally; remote cleanup failed: %s:%s' % (drone, remote_path), file=sys.stderr)
     print('Saved capture to %s' % out_dir)
 
 

@@ -83,28 +83,46 @@ void Filter::initialize(double height, const Quaternion& q, const Vec& ba, const
     std::copy(converted.ptr<double>(),converted.ptr<double>()+225,covariance.begin());
     stamp=0.;
 }
+void Imu::means(Vec& force, Vec& rate) const {
+    require(!pals_ekf_imu_means(delta_rotation.val,delta_velocity.val,duration,force.val,rate.val),
+            "Invalid integrated IMU interval");
+}
+std::array<double,9> Imu::packet() const {
+    return {{stamp-duration,stamp,delta_rotation[0],delta_rotation[1],delta_rotation[2],delta_rotation[3],
+             delta_velocity[0],delta_velocity[1],delta_velocity[2]}};
+}
+Imu calibrated_imu(double duration,const Quaternion& q,const Vec& dv,const Profile& profile) {
+    Imu sample{0.,duration,q,dv}; Vec force,rate;
+    sample.means(force,rate);
+    const Vec vector=profile.imu_rotation*Vec(q[0],q[1],q[2]);
+    sample.delta_rotation=Quaternion(vector[0],vector[1],vector[2],q[3])/cv::norm(q);
+    Quaternion half=sample.delta_rotation; half[3]+=1.; half/=cv::norm(half);
+    const Vec offset=profile.imu_rotation*(profile.acceleration_offset*profile.acceleration_scale);
+    sample.delta_velocity=profile.imu_rotation*dv-rotation(half)*offset*duration;
+    return sample;
+}
+
 bool Filter::predict(const Imu& sample, double end) {
     if (!(end>stamp && end-stamp<=.2)) return false;
     auto s=state; auto p=covariance;
-    const Vec force=sample.force-acceleration_bias(), rate=sample.rate-gyro_bias();
-    if (pals_ekf_predict(s.data(),p.data(),force.val,rate.val,gravity.val,noise.data(),end-stamp)) return false;
+    const auto packet=sample.packet();
+    if (pals_ekf_predict_integrated(s.data(),p.data(),packet.data(),gravity.val,noise.data(),stamp,end)) return false;
     state=s; covariance=p; stamp=end;
     return true;
 }
 bool Filter::project(const std::vector<Imu>& samples) {
     if (samples.empty()) return true;
-    std::vector<double> intervals; intervals.reserve(samples.size()*7);
+    std::vector<double> intervals; intervals.reserve(samples.size()*9);
     for (const auto& s:samples) {
         if (s.stamp<=stamp) continue;
-        intervals.push_back(s.stamp);
-        intervals.insert(intervals.end(),s.force.val,s.force.val+3);
-        intervals.insert(intervals.end(),s.rate.val,s.rate.val+3);
+        const auto packet=s.packet();
+        intervals.insert(intervals.end(),packet.begin(),packet.end());
     }
     if (intervals.empty()) return true;
     auto s=state; auto p=covariance;
-    if (pals_ekf_project(s.data(),p.data(),intervals.data(),intervals.size()/7,
-        state.data()+10,state.data()+13,gravity.val,noise.data(),stamp,.2)) return false;
-    state=s; covariance=p; stamp=intervals[intervals.size()-7];
+    if (pals_ekf_project_integrated(s.data(),p.data(),intervals.data(),intervals.size()/9,
+        gravity.val,noise.data(),stamp)) return false;
+    state=s; covariance=p; stamp=intervals[intervals.size()-8];
     return true;
 }
 bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate) {
@@ -115,6 +133,23 @@ bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat&
                          innovation.rows,gate,total.ptr<double>(),&nis)) return false;
     state=s; covariance=p;
     return true;
+}
+void Filter::reset_height(double height,const Vec& attitude_jacobian,double variance) {
+    // The new height comes from range and attitude, not the rejected height prior.
+    cv::Mat reset=cv::Mat::eye(15,15,CV_64F);
+    reset.row(2).setTo(0.);
+    for (int i=0;i<3;++i) reset.at<double>(2,6+i)=attitude_jacobian[i];
+    cv::Mat p=reset*public_covariance()*reset.t();
+    p.at<double>(2,2)+=variance;
+    const Rotation r=rotation(quaternion());
+    cv::Mat transform=cv::Mat::eye(15,15,CV_64F);
+    block(transform,0,6,skew(Vec(state[0],state[1],height))*r);
+    block(transform,3,6,skew(velocity())*r); block(transform,6,6,r);
+    cv::Mat converted=transform*p*transform.t();
+    require(std::isfinite(height) && height>0. && std::isfinite(variance) && variance>0.
+            && cv::checkRange(converted),"Invalid ground height reset");
+    state[2]=height;
+    std::copy(converted.ptr<double>(),converted.ptr<double>()+225,covariance.begin());
 }
 cv::Mat Filter::public_covariance() const {
     cv::Mat t=cv::Mat::eye(15,15,CV_64F);
@@ -161,8 +196,8 @@ bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) co
     if (!fault.empty()) reason=fault;
     else if (!initialized) reason="Hold still on the floor for eight seconds while disarmed";
     else if (!reference_valid) reason="Local reference lost; restart on the floor before flight";
-    else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh IMU";
     else if (!range_ready(now)) reason="Waiting for accepted range";
+    else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh EKF output";
     else if (current-horizontal_aid>.5) reason="Coasting; waiting for accepted camera flow";
     else if (!estimate.navigation_variance_valid()) reason="Position or velocity uncertainty is too large";
     else { reason="Ready"; return true; }
@@ -217,7 +252,11 @@ void LiveEKF::range(std::int64_t stamp,double distance,double minimum,double max
     range_.stamp=stamp; range_.value=distance;
     if (origin_ns_ && fault_.empty()) {
         Measurement m; m.stamp=(stamp-origin_ns_)/1.e9; m.sensor="range";
-        m.value=distance; queue(m);
+        m.value=distance;
+        m.ground_rest=mode_=="DISARMED" && was_stationary_ && rest_since_
+            && (stamp-rest_since_)/1.e9>=.5 && distance>=.015 && distance<=.08
+            && std::abs(distance-ground_range_)<.015;
+        queue(m);
     }
 }
 void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded) {
@@ -238,12 +277,18 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     queue(m);
 }
 bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,const Vec& rate) {
+    Vec rest_rate=rate;
+    if (origin_ns_ && mode_!="DISARMED") {
+        // Average motor vibration without relaxing the limit on sustained rotation.
+        const double end=(stamp-origin_ns_)/1.e9;
+        if (!mean_rate(end-.2,end,rest_rate)) { clear_rest(); return false; }
+    }
     const double range_age=(stamp-range_.stamp)/1.e9;
     bool quiet=ground_rest_allowed()
         && received-mode_at_>=0. && received-mode_at_<=.5 && range_.stamp>0
         && range_age>=-.1 && range_age<=.3 && range_.value>=.015 && range_.value<=.08
-        && cv::norm(rate)<.03 && std::abs(cv::norm(force)-9.8)<.5 && force[2]>9.;
-    if (quiet && origin_ns_) quiet=cv::norm(rate-filter_.gyro_bias())<.015;
+        && cv::norm(rest_rate)<.03 && std::abs(cv::norm(force)-9.8)<.5 && force[2]>9.;
+    if (quiet && origin_ns_) quiet=cv::norm(rest_rate-filter_.gyro_bias())<.015;
     if (quiet && ground_range_>=0.) quiet=std::abs(range_.value-ground_range_)<.015;
     if (quiet && rest_since_) quiet=cv::norm(force-rest_force_)<.3 && std::abs(range_.value-rest_range_)<.015;
     if (!quiet) { clear_rest(); return false; }
@@ -255,10 +300,9 @@ void LiveEKF::check_reference(double stamp) {
                                  last_aid_.count("zero_velocity") ? last_aid_.at("zero_velocity") : 0.);
     if (stamp-aiding>2.) reference_valid_=false;
 }
-void LiveEKF::imu(std::int64_t ns,const Vec& acceleration,const Vec& gyro,double received) {
+void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
     if (!fault_.empty() || ns<=0) return;
-    const Vec force=profile_.imu_rotation*((acceleration-profile_.acceleration_offset)*profile_.acceleration_scale);
-    const Vec rate=profile_.imu_rotation*(gyro*profile_.gyro_scale);
+    Vec force,rate; sample.means(force,rate);
     require(finite(force) && finite(rate),"Invalid IMU");
     if (last_imu_ns_) {
         if (ns<=last_imu_ns_) return;
@@ -268,6 +312,11 @@ void LiveEKF::imu(std::int64_t ns,const Vec& acceleration,const Vec& gyro,double
         }
     }
     last_imu_ns_=ns;
+    const double stamp=origin_ns_ ? (ns-origin_ns_)/1.e9 : 0.;
+    if (origin_ns_) {
+        angular_.push_back({last_imu_,stamp,rate});
+        while (!angular_.empty() && angular_.front().end<stamp-profile_.delay-.4) angular_.pop_front();
+    }
     const bool stationary=ground_rest(ns,received,force,rate);
     if (!origin_ns_) {
         if (!rest_since_) return;
@@ -284,10 +333,8 @@ void LiveEKF::imu(std::int64_t ns,const Vec& acceleration,const Vec& gyro,double
         filter_.initialize(height,q,mean_force-r.t()*Vec(0.,0.,9.8),mean_rate);
         origin_ns_=ns; ground_range_=distance; initial_.clear(); return;
     }
-    const double stamp=(ns-origin_ns_)/1.e9,dt=stamp-last_imu_;
-    angular_.push_back({last_imu_,stamp,rate});
-    while (!angular_.empty() && angular_.front().end<stamp-profile_.delay-.4) angular_.pop_front();
-    imu_.push_back({stamp,force,rate}); last_imu_=stamp;
+    const double dt=stamp-last_imu_;
+    sample.stamp=stamp; imu_.push_back(sample); last_imu_=stamp;
     if (stationary) {
         Measurement m; m.stamp=stamp; m.sensor="zero_velocity"; queue(m);
         if (was_stationary_) {
@@ -350,7 +397,15 @@ bool LiveEKF::correct(const Measurement& m) {
         h.at<double>(0,2)=-1./direction[2];
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
         for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
-        return filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63);
+        if (filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63)) return true;
+        // Recover rejected floor range only if rest still holds when delayed fusion reaches it.
+        if (!m.ground_rest || mode_!="DISARMED" || !was_stationary_ || !rest_since_
+            || m.stamp<(rest_since_-origin_ns_)/1.e9+.5) return false;
+        const double height=-(r*profile_.range_offset+m.value*direction)[2];
+        if (!std::isfinite(height) || height<=0.) return false;
+        const Vec height_jacobian(a(2,0)+m.value*b(2,0),a(2,1)+m.value*b(2,1),a(2,2)+m.value*b(2,2));
+        filter_.reset_height(height,height_jacobian,.02*.02*direction[2]*direction[2]);
+        return true;
     }
     if (m.sensor=="zero_velocity") {
         block(h,0,3,Rotation::eye()); block(h,0,6,skew(filter_.velocity())*rotation(filter_.quaternion()));

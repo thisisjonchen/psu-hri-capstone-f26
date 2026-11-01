@@ -31,6 +31,8 @@ class MultiWii:
     STATUS = 101
     RAW_IMU = 102
     RAW_IMU_STRUCT = struct.Struct('<hhhhhhhhh')
+    INTEGRATED_IMU = 0x7F01
+    INTEGRATED_IMU_STRUCT = struct.Struct('<BBIIII7f9h')
     POS_EST = 123
     SERVO = 103
     MOTOR = 104
@@ -140,6 +142,14 @@ class MultiWii:
         return packet
 
     def create_packet(self, data_length, code, data):
+        if code == self.INTEGRATED_IMU:
+            payload = struct.pack('<BHHII', 0, code, 8, *data)
+            payload += struct.pack('B', self.crc8(payload))
+            packet = struct.pack('<BB', len(payload), 255) + payload
+            checksum = 0
+            for value in bytearray(packet):
+                checksum ^= value
+            return b'$M<' + packet + struct.pack('B', checksum)
         if code == MultiWii.SET_RAW_RC:
             return self.create_raw_rc_packet(data)
         dl = len(data)
@@ -253,6 +263,14 @@ class MultiWii:
                             crc ^= byte
                         if header[:3] != '$M>' or ord(checksum) != crc:
                             return code, None
+                        if code == 255:
+                            code = self.INTEGRATED_IMU
+                            if (len(data) < 6 or self.crc8(data[:-1]) != ord(data[-1:])):
+                                return code, None
+                            flags, command, size = struct.unpack('<BHH', data[:5])
+                            if flags or command != code or size != len(data)-6:
+                                return code, None
+                            data = data[5:-1]
                         reply = self._decode_packet(code, data, self.received_at,
                                                     time.time() - start)
                         return code, reply
@@ -267,7 +285,20 @@ class MultiWii:
 
     def _decode_packet(self, code, data, readTime, elapsed):
         datalength = len(data)
-        if code == MultiWii.MULTIPLE_MSP:
+        if code == self.INTEGRATED_IMU:
+            if datalength != self.INTEGRATED_IMU_STRUCT.size:
+                return None
+            v = self.INTEGRATED_IMU_STRUCT.unpack(data)
+            if v[0] != 1 or v[1] not in (0, 1):
+                return None
+            raw = dict(zip(('ax', 'ay', 'az', 'gx', 'gy', 'gz'), v[13:19]))
+            raw.update(cmd=self.RAW_IMU, timestamp=readTime)
+            attitude = dict(cmd=self.ATTITUDE, angx=v[19]/10., angy=v[20]/10.,
+                            heading=v[21], timestamp=readTime)
+            return dict(cmd=code, valid=bool(v[1]), request=v[2], sequence=v[3], end_us=v[4], duration_us=v[5],
+                        rotation=v[6:10], velocity=v[10:13], timestamp=readTime,
+                        legacy=[attitude, raw])
+        elif code == MultiWii.MULTIPLE_MSP:
             return self._decode_imu_batch(data, readTime, elapsed)
         elif code in (MultiWii.ATTITUDE, MultiWii.RAW_IMU):
             size = MultiWii.ATTITUDE_STRUCT.size if code == MultiWii.ATTITUDE else MultiWii.RAW_IMU_STRUCT.size
@@ -386,6 +417,15 @@ class MultiWii:
         else:
             print("No return error!: %d" % code)
             raise
+
+    @staticmethod
+    def crc8(data):
+        crc = 0
+        for value in bytearray(data):
+            crc ^= value
+            for _ in range(8):
+                crc = ((crc << 1) ^ (0xD5 if crc & 0x80 else 0)) & 255
+        return crc
 
     def _decode_imu_reply(self, code, data, read_time, elapsed):
         if code == MultiWii.ATTITUDE:

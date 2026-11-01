@@ -6,7 +6,7 @@
 #include <sensor_msgs/Range.h>
 #include <std_msgs/Bool.h>
 #include <pidrone_pkg/Mode.h>
-#include <pidrone_pkg/MspImu.h>
+#include <pidrone_pkg/IntegratedImu.h>
 #include <pidrone_pkg/State.h>
 #include <atomic>
 #include <condition_variable>
@@ -45,7 +45,8 @@ pals::Profile profile(ros::NodeHandle& node) {
 struct Event {
     enum Kind { IMU, RANGE, IMAGE, CAMERA, MODE } kind;
     double received;
-    pidrone_pkg::MspImu::ConstPtr imu;
+    std::int64_t stamp=0;
+    pals::Imu imu;
     sensor_msgs::Range::ConstPtr range;
     sensor_msgs::CompressedImage::ConstPtr image;
     sensor_msgs::CameraInfo::ConstPtr camera;
@@ -61,7 +62,7 @@ public:
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
         ready_pub_=node_.advertise<std_msgs::Bool>("pidrone/ekf/local_ready",1);
         const auto transport=ros::TransportHints().tcpNoDelay();
-        imu_sub_=node_.subscribe("pidrone/imu_msp",100,&Node::imu,this,transport);
+        imu_sub_=node_.subscribe("pidrone/imu_integrated",100,&Node::imu,this,transport);
         range_sub_=node_.subscribe("pidrone/range",10,&Node::range,this,transport);
         image_sub_=node_.subscribe("raspicam_node/image/compressed",10,&Node::image,this,transport);
         camera_sub_=node_.subscribe("raspicam_node/camera_info",1,&Node::camera,this);
@@ -89,9 +90,10 @@ private:
     std::atomic<bool> failed_{false};
     pals::Snapshot snapshot_;
     // Only the ROS callback thread owns the current-time IMU history and output.
-    struct RawImu { std::int64_t stamp; pals::Vec force,rate; };
-    std::deque<RawImu> history_;
+    struct TimedImu { std::int64_t stamp; pals::Imu sample; pals::Vec rate; };
+    std::deque<TimedImu> history_;
     std::int64_t last_imu_=0,last_published_=0;
+    std::uint32_t last_sequence_=0,last_sample_us_=0;
     pals::Filter last_output_;
     bool ready_sent_=false,last_ready_=false;
     ros::WallTime ready_at_;
@@ -120,18 +122,32 @@ private:
     void image(const sensor_msgs::CompressedImage::ConstPtr& msg) { Event e; e.kind=Event::IMAGE; e.image=msg; enqueue(e); }
     void camera(const sensor_msgs::CameraInfo::ConstPtr& msg) { Event e; e.kind=Event::CAMERA; e.camera=msg; enqueue(e); }
     void mode(const pidrone_pkg::Mode::ConstPtr& msg) { Event e; e.kind=Event::MODE; e.mode=msg; enqueue(e); }
-    void imu(const pidrone_pkg::MspImu::ConstPtr& msg) {
+    void imu(const pidrone_pkg::IntegratedImu::ConstPtr& msg) {
         const std::int64_t stamp=msg->header.stamp.toNSec();
         if (stamp<=0 || stamp<=last_imu_) return;
+        if (!msg->valid) {
+            ROS_WARN_THROTTLE(1.,"FC reported an invalid IMU interval; skipping sample");
+            return;
+        }
+        if (last_imu_ && (std::uint32_t(msg->sequence-last_sequence_)==0
+            || std::uint32_t(msg->sequence-last_sequence_)>=0x80000000U
+            || std::uint32_t(msg->sample_time_us-last_sample_us_)!=msg->integration_time_us)) {
+            fail("Integrated IMU continuity lost; restart localization on the floor"); return;
+        }
+        pals::Imu sample; pals::Vec force,rate;
+        try {
+            sample=pals::calibrated_imu(last_imu_ ? (stamp-last_imu_)/1.e9 : msg->integration_time_us*1.e-6,
+                pals::Quaternion(msg->delta_rotation[0],msg->delta_rotation[1],msg->delta_rotation[2],msg->delta_rotation[3]),
+                pals::Vec(msg->delta_velocity[0],msg->delta_velocity[1],msg->delta_velocity[2]),profile_);
+            sample.means(force,rate);
+        } catch (const std::exception& error) { fail(error.what()); return; }
+        last_sequence_=msg->sequence; last_sample_us_=msg->sample_time_us;
         auto s=snapshot();
         if (last_imu_ && (stamp-last_imu_)/1.e9>.2 && s.initialized) fail("IMU gap; restart the EKF node on the floor");
         last_imu_=stamp;
-        const pals::Vec acceleration(msg->accelerometer[0],msg->accelerometer[1],msg->accelerometer[2]);
-        const pals::Vec gyro(msg->gyroscope[0],msg->gyroscope[1],msg->gyroscope[2]);
-        history_.push_back({stamp,profile_.imu_rotation*((acceleration-profile_.acceleration_offset)*profile_.acceleration_scale),
-                           profile_.imu_rotation*(gyro*profile_.gyro_scale)});
+        history_.push_back({stamp,sample,rate});
         while (!history_.empty() && (stamp-history_.front().stamp)/1.e9>1.) history_.pop_front();
-        Event e; e.kind=Event::IMU; e.imu=msg; enqueue(e);
+        Event e; e.kind=Event::IMU; e.stamp=stamp; e.imu=sample; enqueue(e);
         try { publish(s,stamp); }
         catch (const std::exception& error) { fail(error.what()); publish_ready(false,error.what()); }
     }
@@ -158,7 +174,9 @@ private:
         std::vector<pals::Imu> intervals;
         for (const auto& raw:history_) {
             const double relative=(raw.stamp-s.origin_ns)/1.e9;
-            if (relative>s.filter.stamp) intervals.push_back({relative,raw.force,raw.rate});
+            if (relative>s.filter.stamp) {
+                auto sample=raw.sample; sample.stamp=relative; intervals.push_back(sample);
+            }
         }
         pals::Filter estimate=s.filter;
         if (!estimate.project(intervals)) {
@@ -197,9 +215,7 @@ private:
             if (failed_) continue;
             try {
                 if (e.kind==Event::IMU) {
-                    const auto& m=*e.imu;
-                    filter_.imu(m.header.stamp.toNSec(),pals::Vec(m.accelerometer[0],m.accelerometer[1],m.accelerometer[2]),
-                                pals::Vec(m.gyroscope[0],m.gyroscope[1],m.gyroscope[2]),e.received);
+                    filter_.imu(e.stamp,e.imu,e.received);
                 } else if (e.kind==Event::RANGE) {
                     const auto& m=*e.range; filter_.range(m.header.stamp.toNSec(),m.range,m.min_range,m.max_range);
                 } else if (e.kind==Event::IMAGE) filter_.image(e.image->header.stamp.toNSec(),e.image->data);

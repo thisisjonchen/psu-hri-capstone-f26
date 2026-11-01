@@ -28,12 +28,14 @@ class DelayedEKF(object):
         self.stationary_duration = 0.
         self.was_stationary = False
 
-    def add_imu(self, force, rate, stamp, stationary=False):
+    def add_imu(self, force, rate, stamp, stationary=False, delta=None):
         """Queue an IMU interval and optional externally confirmed rest constraint."""
         if self.fault:
             return self.fault, []
         try:
             force, rate, stamp = _array(force, (3,)), _array(rate, (3,)), _stamp(stamp)
+            interval = None if delta is None else np.r_[self.last_imu, stamp,
+                _array(delta[0], (4,)), _array(delta[1], (3,))]
         except (ValueError, TypeError):
             return 'invalid_imu', []
         if stamp <= self.last_imu:
@@ -45,7 +47,7 @@ class DelayedEKF(object):
         self.angular_rates.append((self.last_imu, stamp, rate))
         while self.angular_rates and self.angular_rates[0][1] < stamp-self.delay-.4:
             self.angular_rates.popleft()
-        self.imu.append((stamp, force, rate))
+        self.imu.append((stamp, force, rate, interval))
         self.last_imu = stamp
         if stationary:
             self.add_measurement(stamp, 'zero_velocity',
@@ -107,13 +109,14 @@ class DelayedEKF(object):
     def _drain(self, through):
         events = []
         while self.imu and not self.fault:
-            end, force, rate = self.imu[0]
+            end, force, rate, interval = self.imu[0]
             aid_stamp = self.measurements[0][0] if self.measurements else float('inf')
             stamp = min(end, aid_stamp)
             if stamp > through:
                 break
             if stamp > self.ekf.stamp:
-                accepted, reason = self.ekf.predict(force, rate, stamp)
+                accepted, reason = (self.ekf.predict(force, rate, stamp) if interval is None
+                                    else self.ekf.predict_integrated(interval, stamp))
                 if not accepted:
                     self.fault = reason
                     break
