@@ -867,14 +867,16 @@ class DroneSession {
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
-    const subscribe = (name, messageType, callback) => {
-      const topic = new ROSLIB.Topic({ ros, name, messageType, queue_length: 2, throttle_rate: 80 });
+    const subscribe = (name, messageType, callback, options = {}) => {
+      const topic = new ROSLIB.Topic({ ros, name, messageType, queue_length: 2, throttle_rate: 80, ...options });
       topic.subscribe(message => { if (this.ros === ros && this.connected) callback(message); });
       this.subscribers.push(topic);
     };
-    subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message));
+    subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message),
+      { throttle_rate: 500, queue_length: 1 });
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
-    subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message));
+    subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message),
+      { throttle_rate: 200, queue_length: 1 });
     subscribe('/pidrone/localization/generation', 'std_msgs/UInt32', message => {
       if (!Number.isInteger(message.data)) return;
       if (this.fusionGeneration !== null && this.fusionGeneration !== message.data) {
@@ -910,7 +912,7 @@ class DroneSession {
       this.field('batteryFill').setAttribute('width', 13 * percent / 100);
       battery.classList.toggle('alert-danger', message.vbat <= 14);
       battery.classList.toggle('alert-success', message.vbat > 14);
-    });
+    }, { throttle_rate: 500, queue_length: 1 });
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       if (this.field('flightMode').textContent !== message.mode) {
         this.preflightReceivedAt = null;
@@ -972,13 +974,13 @@ class DroneSession {
       const velocity = message.twist_with_covariance.twist.linear;
       const speed = Math.hypot(velocity.x, velocity.y);
       this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
-    });
+    }, { throttle_rate: 200, queue_length: 1 });
     subscribe('/pidrone/state/ground_truth', 'pidrone_pkg/StateGroundTruth', message => {
       this.updateXY('groundTruth', message.pose, message.header && message.header.frame_id);
-    });
+    }, { throttle_rate: 200, queue_length: 1 });
     subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => {
       this.updateXY('camera', message.pose, message.header && message.header.frame_id);
-    });
+    }, { throttle_rate: 200, queue_length: 1 });
   }
 
   time(message) {

@@ -16,7 +16,7 @@ GRAVITY = 9.80665
 
 class VelocityController(object):
     def __init__(self, gain_p=1.2, gain_i=0.4, i_limit_deg=3.0, max_lean_deg=5.0,
-                 angle_limit_deg=55.0):
+                 angle_limit_deg=60.0):
         values = (gain_p, i_limit_deg, max_lean_deg, angle_limit_deg)
         # math.isfinite is unavailable on the drone's Python 2.7.
         if (not all(not math.isnan(v) and not math.isinf(v) and v > 0 for v in values)

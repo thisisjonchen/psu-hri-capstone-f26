@@ -751,7 +751,7 @@ class FusionNodeTest(unittest.TestCase):
                     pose=NS(position=NS(x=1.2, y=2, z=999)))
         controller.room_target_callback(target)
         controller.calc_error()
-        self.assertAlmostEqual(controller.desired_velocity.x, .04)
+        self.assertAlmostEqual(controller.desired_velocity.x, .06)
         target.pose.position.x = 2
         controller.room_target_callback(target)
         controller.calc_error()
@@ -866,7 +866,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.current_state.twist_with_covariance.twist.linear.y = 10.
         controller.current_state_callback(controller.current_state)
         roll, pitch = controller.step()[:2]
-        limit = 500 * 5.0 / 55.0
+        limit = 500 * 5.0 / 60.0
         self.assertAlmostEqual(roll, 1500 + limit)
         self.assertAlmostEqual(pitch, 1500 - limit)
 

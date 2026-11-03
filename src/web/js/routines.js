@@ -231,12 +231,14 @@ class RoutineRunner {
   nodeAction(action) {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
-    const prompts = { restart: 'Restart all nodes on ', align: 'Relocalize ' };
-    const labels = { restart: 'Restarting nodes', align: 'Relocalizing' };
+    if (this.busy || !targets.length || !targets.every(terminal => terminal.nodes && !terminal.running)) return;
+    const prompts = { restart: 'Restart all nodes on ', align: 'Recalibrate gyro and relocalize ' };
+    const labels = { restart: 'Restarting nodes', align: 'Rebooting FC, checking gyro and relocalizing' };
+    const warmup = action === 'align' ? '\n\nLeave powered for a few minutes first. Props must be removed. Keep each drone untouched on the floor throughout the gyro calibration and relocalization. Only FC communication and localization restart; settings are unchanged.' : '';
     // Fusion locks map +Y when its node starts, so confirm placement first.
     if (!window.confirm(prompts[action] + names + '?\n\nEach drone must be disarmed, stationary and ' +
-        'facing map +Y: its heading is aligned now.' + (action === 'align' ? ' Only fusion restarts.' : ''))) return;
-    this.run(labels[action], targets, terminal => terminal.nodeAction(action));
+        'facing map +Y: its heading is aligned now.' + warmup)) return;
+    return this.run(labels[action], targets, terminal => terminal.nodeAction(action));
   }
 }
 

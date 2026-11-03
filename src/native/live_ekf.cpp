@@ -198,7 +198,7 @@ bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) co
     else if (!reference_valid) reason="Local reference lost; restart on the floor before flight";
     else if (!range_ready(now)) reason="Waiting for accepted range";
     else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh EKF output";
-    else if (current-horizontal_aid>.5) reason="Coasting; waiting for accepted camera flow";
+    else if (current-horizontal_aid>.5 && current>takeoff_deadline) reason="Coasting; waiting for accepted camera flow";
     else if (!estimate.navigation_variance_valid()) reason="Position or velocity uncertainty is too large";
     else { reason="Ready"; return true; }
     return false;
@@ -227,6 +227,10 @@ std::vector<Vec> Camera::undistort(const std::vector<cv::Point2d>& pixels) const
 LiveEKF::LiveEKF(const Profile& p):profile_(p) { p.validate(); }
 void LiveEKF::clear_rest() { rest_since_=0; initial_.clear(); }
 void LiveEKF::mode(const std::string& value,double received) {
+    if (value!=mode_) {
+        takeoff_handoff_=value=="FLYING" && mode_=="ARMED" && origin_ns_
+            && reference_valid_ && rest_since_ && was_stationary_;
+    }
     mode_=value; mode_at_=received;
     if (!ground_rest_allowed()) clear_rest();
 }
@@ -367,6 +371,7 @@ void LiveEKF::drain(double through) {
             check_reference(stamp);
             if (accepted && (m.sensor=="range" || m.sensor=="camera" || m.sensor=="zero_velocity")) {
                 last_aid_[m.sensor]=stamp;
+                if (m.sensor=="camera") takeoff_handoff_=false;
             }
         }
     }
@@ -493,6 +498,10 @@ Snapshot LiveEKF::snapshot() const {
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));
+    if (takeoff_handoff_ && last_aid_.count("zero_velocity")) {
+        // Bridge liftoff to camera tracking without refreshing the ground measurement.
+        s.takeoff_deadline=std::min(last_aid_.at("zero_velocity")+1.,mode_at_-origin_ns_/1.e9+.5);
+    }
     return s;
 }
 }

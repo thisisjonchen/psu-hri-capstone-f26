@@ -20,6 +20,22 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.addCleanup(self.env.doCleanups)
         ros = self.env.ros
         self.events, self.pending = [], []
+        publisher = ros.Publisher
+
+        def make_publisher(topic, *args, **kwargs):
+            pub = publisher(topic, *args, **kwargs)
+            pub.get_num_connections = lambda: 1
+            if topic == '/pidrone/imu_integrated':
+                publish = pub.publish
+
+                def publish_integrated(message):
+                    self.events.append(('publish', MultiWii.INTEGRATED_IMU, self.env.ros_now))
+                    publish(message)
+
+                pub.publish = publish_integrated
+            return pub
+
+        ros.Publisher = make_publisher
         self.commands = []
         self.missing_reply = None
         self.sequence, self.previous_us = 0, None
@@ -142,6 +158,12 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.readiness(fc)
         fc.desired_mode_callback(NS(mode='FLYING'))
         self.assertEqual(fc.curr_mode, 'FLYING')
+        fc.fly_commands_callback(NS(roll=1502., pitch=1498., yaw=1500., throttle=1540.))
+        flight_command = list(fc.command)
+        fc.desired_mode_callback(NS(mode='ARMED'))
+        fc.update_command()
+        self.assertEqual(fc.curr_mode, 'FLYING', 'an arm request must not end flight control')
+        self.assertEqual(fc.command, flight_command)
         self.readiness(fc, ready=False, reason='peer_state_stale')
         self.assertEqual(fc.curr_mode, 'FLYING', 'readiness loss must not disarm in flight')
         fc.desired_mode_callback(NS(mode='DISARMED'))
@@ -193,6 +215,9 @@ class FlightControllerLoopTest(unittest.TestCase):
         output = self.run_loop()
         self.assertNotIn('internal error', output)
         transactions = [(kind, code) for kind, code, _ in self.events]
+        for i, transaction in enumerate(transactions):
+            if transaction == ('read', MultiWii.INTEGRATED_IMU):
+                self.assertEqual(transactions[i + 1], ('publish', MultiWii.INTEGRATED_IMU))
         imu = self.env.messages['/pidrone/imu']
         self.assertGreater(len(self.env.messages['/pidrone/imu_msp']), len(imu))
         self.assertGreater(len(imu), 50)

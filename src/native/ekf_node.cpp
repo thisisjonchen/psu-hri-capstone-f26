@@ -95,6 +95,7 @@ private:
     std::int64_t last_imu_=0,last_published_=0;
     std::uint32_t last_sequence_=0,last_sample_us_=0;
     pals::Filter last_output_;
+    std::array<double,2> vertical_output_ = {};
     bool ready_sent_=false,last_ready_=false;
     ros::WallTime ready_at_;
 
@@ -172,9 +173,10 @@ private:
             publish_ready(false,"Delayed fusion is more than 0.5 seconds behind"); return;
         }
         std::vector<pals::Imu> intervals;
+        const double first=last_published_ ? std::min(s.filter.stamp,last_output_.stamp) : s.filter.stamp;
         for (const auto& raw:history_) {
             const double relative=(raw.stamp-s.origin_ns)/1.e9;
-            if (relative>s.filter.stamp) {
+            if (relative>first) {
                 auto sample=raw.sample; sample.stamp=relative; intervals.push_back(sample);
             }
         }
@@ -183,10 +185,29 @@ private:
             fail("Invalid output IMU interval or projection");
             publish_ready(false,"Invalid output IMU interval or projection"); return;
         }
-        const pals::Output output=pals::body_output(estimate,history_.back().rate);
+        auto vertical=vertical_output_;
+        if (!last_published_) vertical={{estimate.state[2],estimate.state[5]}};
+        else {
+            pals::Filter predicted=last_output_;
+            if (!predicted.project(intervals) || pals_ekf_vertical_output(vertical.data(),
+                estimate.state[2],estimate.state[5],predicted.state[5]-last_output_.state[5],
+                estimate.stamp-last_output_.stamp)) {
+                fail("Invalid vertical output prediction");
+                publish_ready(false,"Invalid vertical output prediction"); return;
+            }
+        }
+        pals::Output output=pals::body_output(estimate,history_.back().rate);
+        const double height_error=vertical[0]-estimate.state[2];
+        const pals::Vec velocity_error=pals::rotation(output.quaternion).t()
+            *pals::Vec(0.,0.,vertical[1]-estimate.state[5]);
+        output.velocity+=velocity_error;
+        // Include output tracking error without changing the EKF covariance or readiness.
+        output.pose_covariance[14]+=height_error*height_error;
+        for (int i=0;i<3;++i) for (int j=0;j<3;++j)
+            output.twist_covariance[6*i+j]+=velocity_error[i]*velocity_error[j];
         nav_msgs::Odometry odom;
         odom.header.stamp.fromNSec(stamp); odom.header.frame_id="ekf_odom"; odom.child_frame_id=body_frame_;
-        auto& p=odom.pose.pose.position; p.x=estimate.state[0]; p.y=estimate.state[1]; p.z=estimate.state[2];
+        auto& p=odom.pose.pose.position; p.x=estimate.state[0]; p.y=estimate.state[1]; p.z=vertical[0];
         auto& q=odom.pose.pose.orientation;
         q.x=output.quaternion[0]; q.y=output.quaternion[1]; q.z=output.quaternion[2]; q.w=output.quaternion[3];
         auto& v=odom.twist.twist.linear; v.x=output.velocity[0]; v.y=output.velocity[1]; v.z=output.velocity[2];
@@ -200,7 +221,7 @@ private:
         pidrone_pkg::State state;
         state.header=odom.header; state.pose_with_covariance=odom.pose; state.twist_with_covariance=odom.twist;
         state_pub_.publish(state); odom_pub_.publish(odom);
-        last_output_=estimate; last_published_=stamp;
+        last_output_=estimate; vertical_output_=vertical; last_published_=stamp;
         std::string reason; publish_ready(s.ready(after,estimate,reason),reason);
     }
     void work() {

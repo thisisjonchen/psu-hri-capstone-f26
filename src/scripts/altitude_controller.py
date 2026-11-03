@@ -56,7 +56,7 @@ class AltitudeController(object):
         self.takeoff = None
 
     def thrust(self, throttle):
-        """ArduPilot thrust curve: thrust = (1 - expo) * a + expo * a^2."""
+        """Approximate thrust from RC throttle; Betaflight also scales and mixes it."""
         a = (throttle - 1000.0) / 1000.0
         return (1 - self.thrust_expo) * a + self.thrust_expo * a * a
 

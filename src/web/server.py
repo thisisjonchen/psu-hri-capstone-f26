@@ -3,6 +3,10 @@
 import argparse
 import json
 import logging
+import os
+import signal
+import socket
+from contextlib import ExitStack
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +24,54 @@ from calibration.calibration_service import AnchorCalibration
 import drones
 sys.path.insert(0, str(ROOT.parents[1] / 'tools'))
 import peer_relay
+
+
+def release_dashboard_ports(port):
+    """Replace this dashboard's server without stopping unrelated applications."""
+    import psutil
+
+    ports = {port, port + 1}
+    for process in psutil.process_iter(['cmdline']):
+        if process.pid == os.getpid():
+            continue
+        command = process.info['cmdline'] or []
+        script = next((Path(arg) for arg in command[1:] if Path(arg).name == 'server.py'), None)
+        if script is None:
+            continue
+        try:
+            if not script.is_absolute():
+                script = Path(process.cwd()) / script
+            if script.resolve() != ROOT / 'server.py':
+                continue
+            listeners = {conn.laddr.port for conn in process.net_connections(kind='tcp')
+                         if conn.status == psutil.CONN_LISTEN}
+            if not ports.intersection(listeners):
+                continue
+            print('Stopping existing dashboard (PID %d)...' % process.pid, flush=True)
+            process.terminate()
+            try:
+                process.wait(timeout=12)
+            except psutil.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            continue
+
+    # Check both listeners before starting calibration or the peer relay.
+    with ExitStack() as stack:
+        for number in sorted(ports):
+            probe = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+            if os.name == 'nt':
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(('127.0.0.1', number))
+            except OSError as error:
+                raise RuntimeError('Port %d is unavailable; close its application or choose another --port: %s'
+                                   % (number, error)) from error
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -157,6 +209,12 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--state', type=Path, default=ROOT.parents[1] / '.calibration-state.json')
     args = parser.parse_args()
+    if not 1 <= args.port <= 65534:
+        parser.error('--port must be between 1 and 65534 (the terminal uses the next port)')
+    try:
+        release_dashboard_ports(args.port)
+    except RuntimeError as error:
+        parser.exit(1, 'dashboard: %s\n' % error)
     logging.basicConfig(level=logging.INFO)
     handler = partial(DashboardHandler, directory=str(ROOT))
     with ThreadingHTTPServer(('127.0.0.1', args.port), handler) as server:
@@ -168,6 +226,9 @@ def main():
         relay = threading.Thread(target=peer_relay.run, args=(relay_stop,), daemon=True)
         relay.start()
         print('Dashboard: http://localhost:%d' % server.server_port, flush=True)
+        def stop(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, stop)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

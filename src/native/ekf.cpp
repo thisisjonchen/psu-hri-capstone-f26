@@ -298,6 +298,22 @@ extern "C" int pals_ekf_project_integrated(double* state, double* covariance, co
     return 0;
 }
 
+extern "C" int pals_ekf_vertical_output(double* output, double height, double velocity,
+                                          double delta_velocity, double dt) {
+    if (!finite(output,2) || !std::isfinite(height) || !std::isfinite(velocity)
+        || !std::isfinite(delta_velocity) || !std::isfinite(dt) || dt<=0. || dt>.5) return 1;
+    const double decay=std::exp(-dt/.1);
+    // Follow IMU motion immediately; spread EKF corrections over successive samples.
+    // Position corrections must not be mistaken for physical climb rate.
+    const double predicted_height=output[0]+(output[1]+.5*delta_velocity)*dt;
+    const double predicted_velocity=output[1]+delta_velocity;
+    const double position=height+decay*(predicted_height-height);
+    const double rate=velocity+decay*(predicted_velocity-velocity);
+    if (!std::isfinite(position) || !std::isfinite(rate)) return 2;
+    output[0]=position; output[1]=rate;
+    return 0;
+}
+
 namespace {
 // Solve all right-hand sides together, using partial pivoting.
 bool solve(double* a, double* rhs, std::size_t n, std::size_t columns) {

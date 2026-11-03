@@ -172,7 +172,7 @@ def status(drone):
 
 
 def node_action(drone, action):
-    """Restart every node, or only fusion (align); fusion aligns map +Y when it starts.
+    """Run a disarmed maintenance action through the onboard launcher.
 
     Returns the script's last output line, which summarizes the result.
     """
@@ -181,7 +181,8 @@ def node_action(drone, action):
         raise ValueError('Unknown node action: %r' % (action,))
     if routine_running(drone):
         raise RuntimeError('a routine is running; stop it first')
-    code, output = run(drone, START + ' ' + action + ' 2>&1', timeout=90)
+    command = 'warm-reboot' if action == 'align' else action
+    code, output = run(drone, START + ' ' + command + ' 2>&1', timeout=150 if action == 'align' else 90)
     # Interactive container shells print banners first; the script ends with its result.
     lines = output.strip().splitlines() or ['no output']
     if code:

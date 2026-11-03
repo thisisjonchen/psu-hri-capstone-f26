@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Runs on the Pi host for the dashboard's Connect, Restart nodes and Align +Y
+# Runs on the Pi host for the dashboard's Connect, Restart and Relocalize
 # buttons. Starts the pidrone_pkg container and the `pidrone` screen session
 # (pi.screenrc) that owns every onboard node. Fusion aligns map +Y when it starts,
-# so `align` restarts only fusion (its SE window).
-# Usage: pals-start.sh start|restart|align|status
+# so `align` restarts localization (its SE window).
+# Usage: pals-start.sh start|restart|align|warm-reboot|status
 set -u
 container=pidrone_pkg
 session=pidrone
@@ -42,6 +42,22 @@ resolve_ports() {
     printf 'PALS_FC_PORT=%s\nPALS_UWB_PORT=%s\n' "$fc" "$uwb" > "$env_file"
 }
 
+align_heading() {
+    docker exec "$container" screen -S "$session" -p SE -X stuff '^C'
+    # The old offset stays on the parameter server, so clear it to see the new capture.
+    # [e] keeps pgrep -f from matching this script's own bash command line.
+    docker exec "$container" bash -ic '
+        for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
+        pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null && { echo "Localization did not stop; check the SE window."; exit 1; }
+        rosparam delete /fusion_localization/room_yaw_offset >/dev/null 2>&1
+        screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"
+        for _ in $(seq 60); do
+            rosparam get /fusion_localization/room_yaw_offset >/dev/null 2>&1 && { echo "Heading aligned with map +Y."; exit 0; }
+            sleep 0.5
+        done
+        echo "Fusion restarted but has not aligned yet; check the SE window."; exit 1' 2>/dev/null
+}
+
 case "${1:-}" in
     status) session_running; exit ;;
     start) ;;
@@ -52,19 +68,15 @@ case "${1:-}" in
             echo "Refusing to align: drone mode is ${mode:-unknown}; it must be DISARMED."
             exit 1
         fi
-        docker exec "$container" screen -S "$session" -p SE -X stuff '^C'
-        # The old offset stays on the parameter server, so clear it to see the new capture.
-        # [e] keeps pgrep -f from matching this script's own bash command line.
-        docker exec "$container" bash -ic '
-            for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
-            pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null && { echo "Localization did not stop; check the SE window."; exit 1; }
-            rosparam delete /fusion_localization/room_yaw_offset >/dev/null 2>&1
-            screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"
-            for _ in $(seq 60); do
-                rosparam get /fusion_localization/room_yaw_offset >/dev/null 2>&1 && { echo "Heading aligned with map +Y."; exit 0; }
-                sleep 0.5
-            done
-            echo "Fusion restarted but has not aligned yet; check the SE window."; exit 1' 2>/dev/null
+        align_heading
+        exit
+        ;;
+    warm-reboot)
+        session_running || { echo "Nodes are not started."; exit 1; }
+        worker=$(dirname "$(readlink -f "$0")")/../../tools/warm_reboot_fc.py
+        result=$(sudo -n python3 "$worker" 2>&1) || { echo "$result"; exit 1; }
+        align_heading || exit 1
+        echo "Warm reboot complete. $result"
         exit
         ;;
     restart)
@@ -80,7 +92,7 @@ case "${1:-}" in
             sleep 0.5
         done
         ;;
-    *) echo "Usage: $0 start|restart|align|status" >&2; exit 2 ;;
+    *) echo "Usage: $0 start|restart|align|warm-reboot|status" >&2; exit 2 ;;
 esac
 
 docker start "$container" >/dev/null || exit 1

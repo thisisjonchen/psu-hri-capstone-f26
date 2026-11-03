@@ -119,6 +119,9 @@ class FlightController(object):
         with self.mode_lock:
             if msg.mode not in ('DISARMED', 'ARMED', 'FLYING'):
                 return
+            if self.curr_mode == 'FLYING' and msg.mode == 'ARMED':
+                rospy.logwarn_throttle(1, 'Ignoring arm request while flying')
+                return
             if (msg.mode in ('ARMED', 'FLYING') and self.curr_mode != 'FLYING'
                     and msg.mode != self.curr_mode):
                 reason = self.preflight_failure()
@@ -213,7 +216,7 @@ class FlightController(object):
     def next_poll(deadline, now, hz):
         return deadline + (int(max(0., now - deadline) * hz) + 1) / hz
 
-    def poll(self):
+    def poll(self, publish_integrated):
         """Schedule RC and telemetry independently on the same serial connection."""
         now = monotonic()
         received = []
@@ -231,13 +234,16 @@ class FlightController(object):
                         reply['sent'] = self.imu_pending[2]
                         reply['publish_attitude'] = self.imu_pending[3]
                         # Acknowledge this interval before scheduling the next request.
-                        reply['integrated'] = self.integrated_imu_sample(reply)
+                        integrated = self.integrated_imu_sample(reply)
+                        if integrated is not None:
+                            publish_integrated(integrated)
                     self.imu_pending = None
                     received.append((code, reply))
             elif code == MultiWii.ANALOG and self.battery_pending is not None:
                 self.battery_pending = None
                 received.append((code, reply))
 
+        now = monotonic()
         if self.imu_pending is not None and now - self.imu_pending[1] >= .05:
             rospy.logwarn_throttle(1, 'IMU response timed out; skipping sample')
             self.imu_pending = None
@@ -271,7 +277,6 @@ class FlightController(object):
         if requests:
             self.board.send_commands(requests)
         if command_sent and command != self.last_command:
-            print('new command sent:', command)
             self.last_command = command
         return command_sent, received
 
@@ -573,7 +578,7 @@ def main():
                 break
                 
             fc.update_command()
-            command_sent, replies = fc.poll()
+            command_sent, replies = fc.poll(integral_pub.publish)
             for code, reply in replies:
                 if code == MultiWii.ANALOG:
                     if isinstance(reply, dict):
@@ -585,20 +590,18 @@ def main():
                 if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.INTEGRATED_IMU:
                     rospy.logwarn_throttle(1, 'Missing integrated IMU reply; imu100001 firmware is required')
                     continue
-                integrated = reply['integrated']
-                if integrated is not None:
-                    integral_pub.publish(integrated)
                 if reply['publish_attitude'] and fc.update_imu_message(reply['legacy']):
                     imupub.publish(fc.imu_message)
-                raw = next(sample for sample in reply['legacy'] if sample['cmd'] == MultiWii.RAW_IMU)
-                msp_message = fc.msp_imu_sample(raw)
-                if msp_message is not None:
-                    msp_imupub.publish(msp_message)
+                if msp_imupub.get_num_connections() > 0:
+                    raw = next(sample for sample in reply['legacy'] if sample['cmd'] == MultiWii.RAW_IMU)
+                    msp_message = fc.msp_imu_sample(raw)
+                    if msp_message is not None:
+                        msp_imupub.publish(msp_message)
 
             if command_sent:
                 with fc.mode_lock:
                     now = monotonic()
-                    # Report transitions immediately; repeat unchanged modes at 10 Hz.
+                    # Report the ROS control mode, not Betaflight's arming or Angle flags.
                     if fc.curr_mode != published_mode or now - last_mode_at >= .1:
                         fc.modepub.publish(fc.curr_mode)
                         published_mode, last_mode_at = fc.curr_mode, now
@@ -608,8 +611,13 @@ def main():
                                                                              'request': calibration[1]})))
                         published_calibration = calibration
 
-            # Wake on a reply, or wait up to 5 ms before checking commands again.
-            select.select([fc.board.ser], [], [], .005)
+            # Wake on a reply or the next request deadline; check commands within 5 ms.
+            deadline = fc.next_rc
+            if fc.imu_pending is None:
+                deadline = min(deadline, fc.next_imu)
+            if fc.battery_pending is None:
+                deadline = min(deadline, fc.next_battery)
+            select.select([fc.board.ser], [], [], max(0., min(.005, deadline - monotonic())))
             
     except SerialException:
         print('\nCannot connect to the flight controller board.')

@@ -64,6 +64,7 @@ struct Snapshot {
     std::int64_t origin_ns = 0;
     bool initialized = false, reference_valid = true;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
+    double takeoff_deadline = -1.e100;
     std::string fault;
     bool range_ready(double now) const;
     bool ready(double now, const Filter& estimate, std::string& reason) const;
@@ -117,6 +118,7 @@ private:
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;
     Vec rest_force_, stationary_angle_ = Vec(0., 0., 0.);
     bool was_stationary_ = false, reference_valid_ = true;
+    bool takeoff_handoff_ = false;
     std::map<std::string, double> last_aid_;
     std::string mode_, fault_;
     void clear_rest();

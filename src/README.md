@@ -15,6 +15,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    python3 tools/pals.py dashboard
    ```
    Open `http://localhost:8000` if it does not open automatically.
+   Run the command again to replace an existing dashboard on the same port; restart while disarmed.
 3. Place each drone disarmed on a level floor, stationary and facing the top of the map (+Y).
 4. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
 5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
@@ -22,8 +23,8 @@ Assuming that the base environment is already set up on the DD24 by following th
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
-Driver corrections: [ToF I²C error handling](../tools/tof/README.md) and
-[camera motion-vector processing](../tools/camera/README.md).
+For the complete firmware, driver and code rollout, see the
+[drone update guide](../tools/DRONE_UPDATE.md).
 
 ## Betaflight telemetry setup
 
