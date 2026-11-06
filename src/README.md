@@ -166,9 +166,16 @@ The onboard `payload_detection` node starts with the normal dashboard connection
 It reads `/raspicam_node/image/compressed` and publishes
 `/pidrone/payload/detection` (`pidrone_pkg/PayloadDetection`). Each drone's camera
 panel shows a yellow bounding box and center dot, with separate payload and tag
-status. This is image-based detection only: no distance, room position, payload
-orientation, or flight commands are produced. Existing localization and AprilTag
-heading correction remain active.
+status. The detector reports image coordinates.
+
+The onboard AprilTag mapper projects the yellow center onto a fixed height and
+publishes `/pidrone/payload/map_point`. Set `payload_plane_z` in
+`params/apriltag_mapping.yaml` to the height of the visible yellow surface in
+the map when the payload is resting on the floor. The default 0.0 assumes that
+surface is at floor level. The mapper uses the same camera calibration, mounting
+and fresh fused pose as the floor tags. The dashboard shows a yellow diamond from
+the most recently received usable estimate and hides it when observations expire.
+This marker is for display and assumes the payload is at the configured height.
 
 `params/payload_detection.yaml` contains starting HSV thresholds and minimum image
 area. Tune these using actual camera images of the payload under the zone's
@@ -186,7 +193,7 @@ image timestamp stops advancing. Its overlay and MJPEG video arrive separately,
 so a moving box may lag the video; the overlay is a display aid.
 
 After these changes are copied to a drone, rebuild the catkin workspace to
-generate the new message before starting nodes. For a separate perception-only
+generate the ROS messages before starting nodes. For a separate perception-only
 session with an existing camera and ROS master, use:
 
 ```sh

@@ -2,6 +2,10 @@
 # For tags laid flat on the floor and UWB z=0 at that floor, leave at 0.
 tag_plane_z: 0.0
 
+# Height of the visible yellow surface with the payload resting on the floor,
+# in map meters. 0.0 assumes the detected surface is at floor level.
+payload_plane_z: 0.0
+
 # IMPORTANT: degrees BELOW HORIZONTAL (90 = straight down). The DD24 camera is
 # mounted at about 45. Optical flow uses this same value.
 camera_pitch_down_deg: 45.0

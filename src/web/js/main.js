@@ -29,6 +29,7 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
+    this.payloadReports = {};
     this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
@@ -39,6 +40,9 @@ class FleetMap {
       }))));
     datasets.push({ key: 'apriltags', label: 'Mapped floor AprilTags', data: [], showLine: false,
       backgroundColor: '#198a71', borderColor: '#198a71', pointStyle: 'rectRot',
+      pointRadius: 7, pointHoverRadius: 9, fill: false });
+    datasets.push({ key: 'payload', label: 'Payload (ground estimate)', data: [], showLine: false,
+      backgroundColor: '#ffdf00', borderColor: '#574900', pointStyle: 'rectRot',
       pointRadius: 7, pointHoverRadius: 9, fill: false });
     datasets.push({ key: 'anchors', label: 'UWB anchors', data: [], borderColor: '#58677b',
       backgroundColor: '#58677b', pointStyle: 'rect', pointRadius: 5, borderDash: [4, 4],
@@ -203,6 +207,7 @@ class FleetMap {
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           this.tagReports = {};
+          this.payloadReports = {};
         }
         this.room = candidate;
         this.targets = {};
@@ -328,6 +333,34 @@ class FleetMap {
     // Lifetime sample counts and averaging can pin a moved tag to its old spot.
     return Array.from(groups.values()).sort((a, b) => a.id - b.id)
       .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x, y: tag.y }));
+  }
+
+  updatePayloadPoint(id, message) {
+    const header = message.header || {};
+    const stamp = header.stamp && header.stamp.secs + header.stamp.nsecs / 1e9;
+    const frame = roomFrame(header.frame_id);
+    const previous = this.payloadReports[id];
+    const point = message.point;
+    if (!frame || !Number.isFinite(stamp) || stamp <= 0 ||
+        !Number.isInteger(message.generation) || message.generation !== drones[id].fusionGeneration ||
+        typeof message.valid !== 'boolean' ||
+        (message.valid && (!point || ![point.x, point.y, point.z].every(Number.isFinite))) ||
+        (previous && (stamp < previous.stamp || (stamp === previous.stamp && message.valid)))) return;
+    // Invalidations can carry the same source stamp as the point they clear.
+    this.payloadReports[id] = { frame, stamp, point: message.valid ? point : null, receivedAt: Date.now() };
+    this.render();
+  }
+
+  mappedPayload() {
+    if (!this.room || !this.layoutUsable) return [];
+    let latest = null;
+    for (const [id, report] of Object.entries(this.payloadReports)) {
+      if (!report.point || !drones[id].connected || report.frame !== this.room.frame ||
+          Date.now() - report.receivedAt > 750 || !this.hasMatchingReport(id)) continue;
+      // The two ROS clocks are independent. Use dashboard receipt order in time.
+      if (!latest || report.receivedAt >= latest.receivedAt) latest = report;
+    }
+    return latest ? [{ x: latest.point.x, y: latest.point.y }] : [];
   }
 
   drawTagLabels(chart) {
@@ -545,6 +578,8 @@ class FleetMap {
     this.chart.data.datasets.forEach(dataset => {
       if (dataset.key === 'apriltags') {
         dataset.data = this.mappedTags().map(tag => ({ x: tag.x, y: tag.y }));
+      } else if (dataset.key === 'payload') {
+        dataset.data = this.mappedPayload();
       } else if (dataset.key === 'anchors') {
         dataset.data = this.room ? [...this.room.anchors, this.room.anchors[0]] : [];
       } else if (dataset.key === 'target') {
@@ -595,6 +630,7 @@ class FleetMap {
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     delete this.tagReports[id];
+    delete this.payloadReports[id];
     this.refreshAnchors();
   }
 }
@@ -947,6 +983,7 @@ class DroneSession {
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message),
       { throttle_rate: 500, queue_length: 1 });
     subscribe('/pidrone/payload/detection', 'pidrone_pkg/PayloadDetection', message => this.updatePayload(message));
+    subscribe('/pidrone/payload/map_point', 'pidrone_pkg/PayloadMapPoint', message => fleetMap.updatePayloadPoint(this.id, message));
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message),
       { throttle_rate: 200, queue_length: 1 });
@@ -961,6 +998,7 @@ class DroneSession {
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         delete fleetMap.tagReports[this.id];
+        delete fleetMap.payloadReports[this.id];
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;

@@ -1919,7 +1919,46 @@ test('mapped AprilTags follow changed positions across drones and clear on gener
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });
 
-test('routine execution automatically targets active drones and waits for readiness', async () => {
+test('payload map draws one fresh ground estimate and clears it on loss or room reset', () => {
+  const app = dashboard();
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  const topic = '/pidrone/payload/map_point';
+  const generation = '/pidrone/localization/generation';
+  const dataset = app.fleetMap.chart.data.datasets.find(d => d.key === 'payload');
+  const point = (time, x, overrides = {}) => ({
+    header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
+    generation: 1, valid: true, point: { x, y: 2, z: .25 }, ...overrides
+  });
+  app.receive(a, generation, { data: 1 });
+  app.receive(b, generation, { data: 1 });
+  app.receive(a, topic, point(100, 1));
+  assert.equal(dataset.data[0].x, 1);
+  app.advanceTime(5);
+  app.receive(b, topic, point(98, 1.2)); // Independent clocks, one displayed marker.
+  assert.equal(dataset.data.length, 1);
+  assert.equal(dataset.data[0].x, 1.2);
+  app.receive(b, topic, point(98, 1.2, { valid: false }));
+  assert.equal(dataset.data[0].x, 1);
+  app.receive(b, topic, point(98, 1.2));
+  assert.equal(dataset.data[0].x, 1);
+
+  app.advanceTime(751);
+  app.receive(a, topic, point(100, 1));
+  for (const callback of app.maintenanceTimers.values()) callback();
+  assert.equal(dataset.data.length, 0);
+  app.receive(b, topic, point(101, 1.3));
+  assert.equal(dataset.data[0].x, 1.3);
+  app.receive(b, generation, { data: 2 });
+  app.receive(b, '/pidrone/localization/anchors', anchorsAt(102));
+  app.receive(b, topic, point(102, 1.3)); // Old room generation.
+  assert.equal(dataset.data.length, 0);
+  app.receive(b, topic, point(102, 1.4, { generation: 2 }));
+  assert.equal(dataset.data[0].x, 1.4);
+  b.disconnect();
+  assert.equal(dataset.data.length, 0);
+});
+
+test('routine execution synchronizes start for one or two drones', async () => {
   let released, sends = [];
   const context = vm.createContext({ document: { addEventListener() {} },
     awaitSyncStart(ids) { released = ids; }, confirmSyncStart() {} });
