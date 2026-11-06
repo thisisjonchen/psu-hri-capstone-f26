@@ -510,6 +510,12 @@ class FleetMap {
     document.getElementById('target-command-status').textContent = 'Target sent to Drone ' + id.slice(-1) + '.';
   }
 
+  requestRender() {
+    if (this.renderPending) return;
+    this.renderPending = true;
+    requestAnimationFrame(() => { this.renderPending = false; this.render(); });
+  }
+
   render() {
     const frame = document.getElementById('map-frame');
     // Once discovered, keep the map visible for the rest of this page session.
@@ -695,7 +701,7 @@ class DroneSession {
     this.fusedReceivedAt = this.fusionReadyAt = null;
     // Retain the displayed coordinates through gaps; control must use fresh data.
     [0, 1, 2].forEach(i => { this.series['fused' + i] = []; });
-    if (fleetMap) fleetMap.render();
+    if (fleetMap) fleetMap.requestRender();
   }
 
   updateFusion(message) {
@@ -895,7 +901,7 @@ class DroneSession {
     subscribe('/pidrone/localization/ready', 'std_msgs/Bool', message => {
       this.fusionReadyAt = message.data ? Date.now() : null;
       if (!message.data) this.clearFusion();
-      if (fleetMap) fleetMap.render();
+      if (fleetMap) fleetMap.requestRender();
     });
     subscribe('/pidrone/localization/fusion_status', 'diagnostic_msgs/DiagnosticArray', message => {
       const status = message.status && message.status[0];
@@ -1040,7 +1046,7 @@ class DroneSession {
         { x: p.x + rotated[0], y: p.y + rotated[1] }
       ];
     });
-    if (fleetMap) fleetMap.render();
+    if (fleetMap) fleetMap.requestRender();
   }
 
   publish(key, data) {

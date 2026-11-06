@@ -6,16 +6,16 @@
   <title>PALS: Paired Aerial Lift System</title>
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/xterm.css">
-  <link rel="stylesheet" href="css/main.css?v=20261031-status-layout">
+  <link rel="stylesheet" href="css/main.css?v=20261106-terminal-result">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
-  <script src="js/main.js?v=20261105-routine-target" defer></script>
+  <script src="js/main.js?v=20261105-relay-timing" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
-  <script src="js/routines.js?v=20261105-routine-target" defer></script>
+  <script src="js/routines.js?v=20261106-terminal-result" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
@@ -149,10 +149,10 @@
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>
       <div class="routine-terminals">
       <article class="routine-terminal" data-terminal="drone1">
-        <div class="terminal-pane"><h4 class="terminal-label" id="drone1-terminal-label">Drone 1</h4><div class="script-terminal" data-field="terminal" aria-labelledby="drone1-terminal-label"></div></div>
+        <div class="terminal-pane"><h4 class="terminal-label" id="drone1-terminal-label">Drone 1</h4><div class="terminal-result" data-field="result" role="status" hidden></div><div class="script-terminal" data-field="terminal" aria-labelledby="drone1-terminal-label"></div></div>
       </article>
       <article class="routine-terminal" data-terminal="drone2">
-        <div class="terminal-pane"><h4 class="terminal-label" id="drone2-terminal-label">Drone 2</h4><div class="script-terminal" data-field="terminal" aria-labelledby="drone2-terminal-label"></div></div>
+        <div class="terminal-pane"><h4 class="terminal-label" id="drone2-terminal-label">Drone 2</h4><div class="terminal-result" data-field="result" role="status" hidden></div><div class="script-terminal" data-field="terminal" aria-labelledby="drone2-terminal-label"></div></div>
       </article>
       </div>
     </section>

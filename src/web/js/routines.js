@@ -16,6 +16,7 @@ class RoutineTerminal {
     this.nodes = false;
     this.running = false;
     this.polling = false;
+    this.lastPollAt = 0;
   }
 
   setEnabled(enabled, start = false) {
@@ -96,15 +97,17 @@ class RoutineTerminal {
 
   async poll() {
     if (!this.enabled || this.polling) return;
+    if (this.running && Date.now() - this.lastPollAt < 10000) return;
+    this.lastPollAt = Date.now();
     this.polling = true;
     const socket = this.socket;
     try {
-      const response = await fetch('/api/routine?drone=' + this.id);
+      const response = await fetch('/api/routine?drone=' + this.id + (this.scripts && this.nodes ? '&running=1' : ''));
       const body = await response.json();
       if (!this.enabled || this.socket !== socket) return;
       if (!response.ok) throw new Error(body.error || response.statusText);
-      this.scripts = body.scripts;
-      this.nodes = body.nodes;
+      if (body.scripts) this.scripts = body.scripts;
+      if (body.nodes !== undefined) this.nodes = body.nodes;
       this.running = body.running;
     } catch (_) {
       if (!this.enabled || this.socket !== socket) return;
@@ -123,7 +126,11 @@ class RoutineTerminal {
   }
 
   report(message) {
-    if (this.term && message) this.term.write('\r\n[' + message + ']\r\n');
+    if (!message) return;
+    const status = this.root.querySelector('[data-field="result"]');
+    status.textContent = message;
+    status.hidden = false;
+    if (this.term) this.term.write('\r\n[' + message + ']\r\n');
   }
 
   async post(path, body) {
@@ -157,6 +164,7 @@ class RoutineTerminal {
       throw error;
     }
     this.nodes = true;
+    this.scripts = null;
     if (this.enabled && (!restart || telemetry.waitUntil === deadline)) {
       if (!this.socket) this.attach();
       if (restart) telemetry.connect(true);

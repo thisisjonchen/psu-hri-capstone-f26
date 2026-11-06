@@ -126,6 +126,8 @@ class PIDController(object):
         self.peer_preview = self.peer_preview_received = None
         self.coordination_status_pub = None
         self.preflight_pub = None
+        self.coordination_published = None
+        self.coordination_published_at = None
         self.coordination_status = 'disabled'
         self.coordination_error = ''
         self.coordination_active = True
@@ -571,10 +573,17 @@ class PIDController(object):
                         if xy_ready and np.isfinite(measured) else 0)
         elif self.coordination_config is not None:
             self.coordination_status = 'inactive' if self.coordination_active else 'solo'
-        if self.coordination_status_pub is not None:
-            self.coordination_status_pub.publish(self.coordination_status)
-        if self.preflight_pub is not None:
-            self.preflight_pub.publish(self.flight_readiness())
+        report = self.flight_readiness() if self.preflight_pub is not None else None
+        status = (self.coordination_status, self.current_mode,
+                  (report.ready, report.reason, report.paired) if report is not None else None)
+        now = monotonic()
+        if (status != self.coordination_published or self.coordination_published_at is None
+                or now - self.coordination_published_at >= 0.1):
+            if self.coordination_status_pub is not None:
+                self.coordination_status_pub.publish(self.coordination_status)
+            if report is not None:
+                self.preflight_pub.publish(report)
+            self.coordination_published, self.coordination_published_at = status, now
         return xy_ready
 
     def reset(self):

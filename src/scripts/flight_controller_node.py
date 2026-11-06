@@ -3,6 +3,7 @@ import traceback
 import sys
 import yaml
 import threading
+import errno
 
 import rospy
 import rospkg
@@ -617,7 +618,12 @@ def main():
                 deadline = min(deadline, fc.next_imu)
             if fc.battery_pending is None:
                 deadline = min(deadline, fc.next_battery)
-            select.select([fc.board.ser], [], [], max(0., min(.005, deadline - monotonic())))
+            try:
+                select.select([fc.board.ser], [], [], max(0., min(.005, deadline - monotonic())))
+            except (select.error, OSError) as error:
+                # Python 2 interrupts select on signals. Recheck ROS shutdown above.
+                if not error.args or error.args[0] != errno.EINTR:
+                    raise
             
     except SerialException:
         print('\nCannot connect to the flight controller board.')

@@ -1,8 +1,10 @@
 """Exercise the FC serial loop without opening a serial port or running ROS."""
 import contextlib
+import errno
 import io
 import os
 import runpy
+import select
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace as NS
@@ -118,7 +120,7 @@ class FlightControllerLoopTest(unittest.TestCase):
                 self.env.now += timeout
             return (readers if self.pending else [], [], [])
 
-        namespace['main'].__globals__['select'] = NS(select=wait)
+        namespace['main'].__globals__['select'] = NS(select=wait, error=select.error)
 
     def run_loop(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -212,6 +214,12 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(fc.curr_mode, 'FLYING')
 
     def test_commands_precede_batched_imu_and_battery_stays_fresh_at_reduced_rate(self):
+        polling = self.main.__globals__['select']
+        wait = polling.select
+        def interrupted_once(*args):
+            polling.select = wait
+            raise select.error(errno.EINTR, 'Interrupted system call')
+        polling.select = interrupted_once
         output = self.run_loop()
         self.assertNotIn('internal error', output)
         transactions = [(kind, code) for kind, code, _ in self.events]
@@ -251,6 +259,16 @@ class FlightControllerLoopTest(unittest.TestCase):
                          [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC)])
         self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
         self.assertEqual(self.pending, [])
+
+    def test_shutdown_interrupt_exits_cleanly_and_disarms(self):
+        def interrupt(*args):
+            self.env.ros.is_shutdown = lambda: True
+            raise select.error(errno.EINTR, 'Interrupted system call')
+        self.main.__globals__['select'].select = interrupt
+        output = self.run_loop()
+        self.assertNotIn('internal error', output)
+        self.assertIn('Sending DISARM command', output)
+        self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
 
     def test_turning_through_north_reports_the_turn_rate_not_a_spin(self):
         receive = self.board.receiveDataPacket

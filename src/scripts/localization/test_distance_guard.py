@@ -94,7 +94,20 @@ class DistancePIDTest(unittest.TestCase):
         self.assertTrue(report.paired)
         self.assertEqual(report.header.stamp.to_sec(), peer.header.stamp.to_sec())
         self.assertIsNone(self.c.peer_state, 'preflight must not enable the flight guard')
+        reports = []
+        self.c.preflight_pub = NS(publish=reports.append)
+        self.c.calc_error()
+        for _ in range(5):
+            self.c.calc_error()
+        self.assertEqual(len(reports), 1)
+        self.fixture.now += .11
+        self.c.calc_error()
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[-1].header.stamp.to_sec(), peer.header.stamp.to_sec())
         peer.recipient_generation = 99
+        self.c.calc_error()
+        self.assertEqual(reports[-1].reason, 'reference_mismatch')
+        self.assertEqual(len(reports), 3, 'report readiness changes without waiting')
         self.assertEqual(self.c.flight_readiness().reason, 'reference_mismatch')
         peer.recipient_generation = 0
         peer.pose.covariance[0] = .15 ** 2
@@ -316,8 +329,9 @@ class PeerRelayTest(unittest.TestCase):
 
     def test_peer_state_preserves_oldest_measurement_and_converts_velocity(self):
         snapshots = [self.snapshot(), self.snapshot()]
-        topic, messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
-        self.assertEqual(topic, self.module['PEER_TOPIC'])
+        topics, messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
+        flight, preview = self.module['PEER_TOPIC'], self.module['PREVIEW_TOPIC']
+        self.assertEqual(topics, [flight, flight])
         for index, message in enumerate(messages):
             self.assertEqual(self.module['stamp'](message['header']), 99.95)
             self.assertEqual(message['header']['frame_id'], 'map')
@@ -325,17 +339,20 @@ class PeerRelayTest(unittest.TestCase):
             self.assertAlmostEqual(message['velocity']['y'], .1)
             self.assertEqual(message['recipient_id'], 'drone%d' % (index+1))
             self.assertEqual(message['drone_id'], 'drone%d' % (2-index))
-        for snapshot in snapshots:
-            snapshot['mode'][0]['mode'] = 'DISARMED'
-        topic, preview = self.module['peer_messages'](snapshots, 100.1, 10.1)
-        self.assertEqual(topic, self.module['PREVIEW_TOPIC'])
-        self.assertEqual(preview, messages)
-        for modes in [('FLYING', 'DISARMED'), ('DISARMED', 'FLYING'), ('ARMED', 'ARMED')]:
-            for snapshot, mode in zip(snapshots, modes):
-                snapshot['mode'][0]['mode'] = mode
-            topic, preview = self.module['peer_messages'](snapshots, 100.1, 10.1)
-            self.assertEqual(topic, self.module['PREVIEW_TOPIC'])
-            self.assertEqual(preview, messages)
+        for modes, expected in [
+                (('ARMED', 'ARMED'), [preview, preview]),
+                (('FLYING', 'ARMED'), [flight, preview]),
+                (('ARMED', 'FLYING'), [preview, flight]),
+                (('FLYING', 'FLYING'), [flight, flight]),
+                (('FLYING', 'DISARMED'), [preview, preview]),
+                (('DISARMED', 'FLYING'), [preview, preview]),
+                (('DISARMED', 'DISARMED'), [preview, preview])]:
+            with self.subTest(modes=modes):
+                for snapshot, mode in zip(snapshots, modes):
+                    snapshot['mode'][0]['mode'] = mode
+                topics, routed = self.module['peer_messages'](snapshots, 100.1, 10.1)
+                self.assertEqual(topics, expected)
+                self.assertEqual(routed, messages)
         snapshots[0]['mode'][0]['mode'] = 'UNKNOWN'
         with self.assertRaisesRegex(ValueError, 'known flight mode'):
             self.module['peer_messages'](snapshots, 100.1, 10.1)
@@ -346,6 +363,12 @@ class PeerRelayTest(unittest.TestCase):
 
     def test_pair_requires_matching_maps_and_both_fresh_inputs(self):
         first, second = self.snapshot(), self.snapshot()
+        first['generation'] = (first['generation'][0], 1)
+        self.module['peer_messages']([first, second], 100.1, 10.1)
+        missing = dict(first)
+        del missing['generation']
+        with self.assertRaisesRegex(ValueError, 'generation'):
+            self.module['peer_messages']([missing, second], 100.1, 10.1)
         second['anchors'][0]['positions'][0]['x'] += .1
         with self.assertRaisesRegex(ValueError, 'anchor map'):
             self.module['peer_messages']([first, second], 100.1, 10.1)

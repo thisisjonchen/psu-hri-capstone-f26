@@ -107,6 +107,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   Chart.defaults = { global: {} };
   Chart.helpers = { getRelativePosition: event => ({ x: event.clientX, y: event.clientY }) };
   const context = vm.createContext({
+    requestAnimationFrame(callback) { callback(); },
     AbortSignal,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     fetch(url, options = {}) {
@@ -624,10 +625,18 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Terminal = vm.runInContext('RoutineTerminal', context);
   const pane = Object.create(Terminal.prototype);
-  Object.assign(pane, { id: 'drone1', socket: null, enabled: true, changed() {},
+  const result = { textContent: '', hidden: true };
+  Object.assign(pane, { root: { querySelector() { return result; } },
+    id: 'drone1', socket: null, enabled: true, changed() {},
     term: { reset() {}, write(message) { output.push(message); }, cols: 80, rows: 24 }, fit: { fit() {} } });
   app.connectDrone('drone1');
+  pane.report('Failed: Warm reboot incomplete: Incomplete MSP reply.');
   pane.attach(true);
+  pane.socket.onmessage({ data: '\x1b[2J' });
+  assert.equal(result.textContent, 'Failed: Warm reboot incomplete: Incomplete MSP reply.');
+  assert.equal(result.hidden, false);
+  pane.report('Restarting nodes…');
+  assert.equal(result.textContent, 'Restarting nodes…');
   const stalled = app.drones.drone1.ros;
   const deadline = app.drones.drone1.waitUntil;
   pane.started(true);
@@ -685,6 +694,8 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.notEqual(pane.socket, oldTerminal);
   drone.ros.open();
   assert.equal(drone.connected, true);
+  assert.equal(pane.ready, false, 'reload the script list after restart');
+  pane.scripts = [];
   assert.equal(pane.ready, true);
   assert.equal(drone.publishers.mode.messages.length, 0, 'reconnecting sends no flight command');
 

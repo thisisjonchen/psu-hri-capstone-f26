@@ -112,9 +112,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if url.path == '/api/calibration':
             self.respond(200, self.server.calibration.status())
         elif url.path == '/api/routine':
-            drone = parse_qs(url.query).get('drone', [''])[0]
+            query = parse_qs(url.query)
+            drone = query.get('drone', [''])[0]
             try:
-                self.respond(200, drones.status(drone))
+                drones.host(drone)
+                result = ({'running': drones.routine_running(drone)} if query.get('running') == ['1']
+                          else drones.status(drone))
+                self.respond(200, result)
             except (ValueError, RuntimeError) as error:
                 self.respond(503, {'error': str(error)})
         else:
