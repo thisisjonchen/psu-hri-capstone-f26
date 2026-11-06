@@ -161,7 +161,16 @@ const anchorsAt = (secs, points = [[0, 0, 2.25], [3, 0, 2.25], [3, 6, 2.25], [0,
   positions: points.map(([x, y, z]) => ({ x, y, z }))
 });
 
-test('connections select solo or paired, and disconnects cannot turn off paired protection after arming', () => {
+function readyRoom(app, drone, seconds = 1) {
+  app.receive(drone, '/pidrone/localization/fused', {
+    header: { stamp: { secs: seconds, nsecs: 0 }, frame_id: 'map' },
+    pose: { pose: { position: { x: 0, y: 0, z: .04 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }
+  });
+  app.receive(drone, '/pidrone/localization/ready', { data: true });
+  app.maintenanceTimers.forEach(callback => callback());
+}
+
+test('automatic pairing requires fresh room positions and stays latched after arming', () => {
   const app = dashboard();
   const a = app.connect('drone1');
   assert.equal(a.publishers.coordination.messages.length, 0, 'wait for a fresh flight mode');
@@ -170,28 +179,45 @@ test('connections select solo or paired, and disconnects cannot turn off paired 
   const b = app.connect('drone2');
   assert.equal(b.publishers.coordination.messages.length, 0, 'wait for the new drone’s flight mode');
   app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(b, 'coordination').data, false, 'connected without UWB uses local flight');
+  readyRoom(app, a);
+  assert.equal(last(a, 'coordination').data, false, 'both room positions are required');
+  readyRoom(app, b);
   assert.equal(last(a, 'coordination').data, true);
   assert.equal(last(b, 'coordination').data, true);
+  app.receive(b, '/pidrone/localization/ready', { data: false });
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(last(a, 'coordination').data, false, 'unavailable UWB disables the guard before arming');
+  app.advanceTime(600);
+  readyRoom(app, a, 1.1);
+  readyRoom(app, b, 1.1);
+  assert.equal(last(a, 'coordination').data, true);
+  app.advanceTime(1);
+  app.receive(a, '/pidrone/localization/ready', { data: true });
+  app.receive(b, '/pidrone/localization/ready', { data: true });
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(last(a, 'coordination').data, false, 'fresh readiness cannot renew an old position stamp');
+  readyRoom(app, a, 1.601);
+  readyRoom(app, b, 1.601);
   app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
-  assert.equal(last(b, 'coordination').data, true);
+  app.receive(b, '/pidrone/localization/ready', { data: false });
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(last(a, 'coordination').data, true, 'UWB loss cannot disable protection after arming');
   b.disconnect();
   assert.equal(last(a, 'coordination').data, true);
   app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
   assert.equal(last(a, 'coordination').data, false);
-  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
-  b.connect(); b.ros.open();
-  app.receive(b, '/pidrone/mode', { mode: 'DISARMED' });
-  assert.equal(last(b, 'coordination').data, true);
-  const count = b.publishers.coordination.messages.length;
+  const count = a.publishers.coordination.messages.length;
   app.advanceTime(2000);
   app.maintenanceTimers.forEach(callback => callback());
-  assert.equal(b.publishers.coordination.messages.length, count);
+  assert.equal(a.publishers.coordination.messages.length, count);
 });
 
 test('flight-state tooltip shows preflight refusal and expires grants at the source timestamp', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  for (const drone of [a, b]) readyRoom(app, drone);
   const report = { ...stamp(1), mode: 'DISARMED', paired: true, ready: false, reason: 'uncertainty_too_large' };
   app.receive(a, '/pidrone/coordination/preflight', report);
   assert.match(a.field('flightMode').title, /blocked · uncertainty too large/);
@@ -337,7 +363,7 @@ test('shared commands reach both bridges and individual commands only their targ
   }
 });
 
-test('synchronized start waits for both drones with mandatory paired protection', () => {
+test('synchronized start waits for both drones and uses available room positions', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const publishers = [a, b].map(drone => drone.publishers.routineStart);
@@ -355,6 +381,7 @@ test('synchronized start waits for both drones with mandatory paired protection'
   assert.deepEqual(starts(), [0, 0]);  // drone1's ready is stale.
   app.receive(a, '/pidrone/routine/ready', {});
   assert.deepEqual(starts(), [0, 0]); // Wait for both HTTP launches to succeed too.
+  for (const drone of [a, b]) readyRoom(app, drone, 1.6);
   app.confirmSyncStart();
   assert.deepEqual(starts(), [1, 1]);
   for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, true);

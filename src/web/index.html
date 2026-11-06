@@ -12,7 +12,7 @@
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
-  <script src="js/main.js?v=20261101-telemetry-rates" defer></script>
+  <script src="js/main.js?v=20261105-auto-distance-guard" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
   <script src="js/routines.js?v=20261102-warm-relocalize" defer></script>
@@ -126,7 +126,7 @@
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
-      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Solo or paired flight is selected automatically from the connected drones before arming. Connect both drones for paired flight. Paired protection stays on through disconnects. Check each drone’s Separation guard status below. Hover over its flight state for preflight details.</p><p><strong>Keyboard shortcuts</strong></p>
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting, restarting nodes, or aligning. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Flight setup is automatic before arming. With both drones connected and fresh UWB room positions, the separation guard is enabled. Otherwise, flight uses local EKF estimates without the separation guard. Once enabled for flight, paired protection stays on through UWB or connection losses. Check each drone’s Separation guard status below. Hover over its flight state for preflight details.</p><p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>

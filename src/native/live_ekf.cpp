@@ -282,8 +282,8 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
 }
 bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,const Vec& rate) {
     Vec rest_rate=rate;
-    if (origin_ns_ && mode_!="DISARMED") {
-        // Average motor vibration without relaxing the limit on sustained rotation.
+    if (origin_ns_) {
+        // Average brief gyro noise without relaxing the limit on sustained rotation.
         const double end=(stamp-origin_ns_)/1.e9;
         if (!mean_rate(end-.2,end,rest_rate)) { clear_rest(); return false; }
     }

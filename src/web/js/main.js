@@ -1173,7 +1173,7 @@ function stopHeldKeys() {
   heldKeys.clear();
 }
 
-// Derive the setup from connections, keeping paired protection after arming.
+// Enable the guard before arming only when both drones have fresh room positions.
 let coordinationPaired = true;
 
 function publishCoordinationSelection() {
@@ -1184,10 +1184,11 @@ function publishCoordinationSelection() {
   const freshModes = connected.every(drone => drone.modeReceivedAt !== null &&
     now - drone.modeReceivedAt >= 0 && now - drone.modeReceivedAt <= 1500);
   if (!freshModes) return;
-  if (connected.length === 2) {
-    coordinationPaired = true;
-  } else if (connected[0].field('flightMode').textContent === 'DISARMED') {
-    coordinationPaired = false;
+  if (connected.every(drone => drone.field('flightMode').textContent === 'DISARMED')) {
+    coordinationPaired = connected.length === 2 && connected.every(drone =>
+      drone.fusedPose && drone.fusionReadyAt !== null && drone.fusedReceivedAt !== null &&
+      [drone.fusionReadyAt, drone.fusedReceivedAt, drone.fusedStamp * 1000].every(stamp =>
+        Number.isFinite(stamp) && now - stamp >= 0 && now - stamp <= 500));
   }
   if (previous !== coordinationPaired) connected.forEach(drone => {
     drone.preflightReceivedAt = null;
