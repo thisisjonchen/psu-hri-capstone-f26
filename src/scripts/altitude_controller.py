@@ -19,6 +19,10 @@ GRAVITY = 9.80665
 
 
 class AltitudeController(object):
+    LAND_RATE = 0.15
+    LAND_FINAL_RATE = 0.10
+    LAND_SLOW_HEIGHT = 0.15
+
     def __init__(self, hover_throttle=1510.0, takeoff_throttle=1490.0,
                  throttle_range=(1200.0, 1700.0), height_p=0.8, rate_p=1.43,
                  rate_i=0.71, rate_i_limit=0.71, climb_limit=0.3, descent_limit=0.2,
@@ -45,6 +49,7 @@ class AltitudeController(object):
         self.integral = 0.0
         self.time = None
         self.takeoff = None
+        self.landing_ground = None
         self.target = None
 
     def start_takeoff(self, height, now):
@@ -54,6 +59,15 @@ class AltitudeController(object):
 
     def cancel_takeoff(self):
         self.takeoff = None
+
+    def start_landing(self, ground_height):
+        if not 0 <= ground_height <= 0.12:
+            raise ValueError('Landing requires a valid preflight floor height')
+        self.takeoff = None
+        self.landing_ground = ground_height
+
+    def cancel_landing(self):
+        self.landing_ground = None
 
     def thrust(self, throttle):
         """Approximate thrust from RC throttle; Betaflight also scales and mixes it."""
@@ -84,6 +98,11 @@ class AltitudeController(object):
                 feed_forward = self.takeoff_rate  # The ramp's own climb rate, as PX4 does.
         rate_target = max(-self.descent_limit, min(self.climb_limit,
                                                     feed_forward + self.height_p * (self.target - height)))
+        if self.landing_ground is not None:
+            self.target = self.landing_ground
+            descent = (self.LAND_FINAL_RATE if height - self.landing_ground <= self.LAND_SLOW_HEIGHT
+                       else self.LAND_RATE)
+            rate_target = -min(self.descent_limit, descent)
         rate_error = rate_target - climb_rate
         previous = self.integral
         self.integral = max(-self.rate_i_limit, min(self.rate_i_limit,

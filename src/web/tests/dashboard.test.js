@@ -609,7 +609,7 @@ test('startup retries retain their deadline and cannot restart after timeout or 
   assert.equal(app.timers.size, 0);
 });
 
-test('terminal connection failure cancels startup but detaching a connected drone preserves telemetry', () => {
+test('terminal lifecycle handles startup failure, detachment and restart reconnection', async () => {
   const app = dashboard();
   const output = [];
   const context = vm.createContext({
@@ -668,6 +668,36 @@ test('terminal connection failure cancels startup but detaching a connected dron
   pane.socket.onclose();
   assert.equal(drone.connected, true);
   assert.equal(drone.publishers.mode.messages.length, before);
+
+  pane.attach();
+  const oldTerminal = pane.socket, oldRos = drone.ros;
+  let finishRestart;
+  pane.post = () => new Promise(resolve => { finishRestart = resolve; });
+  const restart = pane.nodeAction('restart');
+  assert.equal(drone.connected, false);
+  assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-label]').textContent, 'Restarting…');
+  oldTerminal.onclose();
+  oldRos.open();
+  assert.equal(drone.connected, false, 'old callbacks cannot restore the interrupted connection');
+  finishRestart({ output: 'Nodes restarted' });
+  await restart;
+  assert.notEqual(drone.ros, oldRos);
+  assert.notEqual(pane.socket, oldTerminal);
+  drone.ros.open();
+  assert.equal(drone.connected, true);
+  assert.equal(pane.ready, true);
+  assert.equal(drone.publishers.mode.messages.length, 0, 'reconnecting sends no flight command');
+
+  const cancelled = pane.nodeAction('restart');
+  drone.disconnect();
+  finishRestart({ output: 'Nodes restarted' });
+  await cancelled;
+  assert.equal(drone.ros, null, 'cancelling prevents a late restart response from reconnecting');
+
+  pane.post = async () => { throw new Error('Restart failed'); };
+  await assert.rejects(pane.nodeAction('restart'), /Restart failed/);
+  assert.equal(drone.waitUntil, 0);
+  assert.equal(app.elements.get('drone1-connectionStatus').title, 'Nodes failed to restart');
 });
 
 test('a dropped partner stops movement until a fresh key press', () => {
@@ -1277,16 +1307,22 @@ test('routine execution synchronizes start for one or two drones', async () => {
     awaitSyncStart(ids) { released = ids; }, confirmSyncStart() {} });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Runner = vm.runInContext('RoutineRunner', context);
-  for (const ids of [['drone2'], ['drone1', 'drone2']]) {
+  for (const [ids, target, expected] of [
+    [['drone2'], 'all', ['drone2']],
+    [['drone1', 'drone2'], 'all', ['drone1', 'drone2']],
+    [['drone1', 'drone2'], 'drone1', ['drone1']],
+    [['drone2'], 'drone1', []]
+  ]) {
+    released = null;
     const runner = Object.create(Runner.prototype);
-    Object.assign(runner, { select: { value: 'prototype-1-forward.py' },
+    Object.assign(runner, { target: { value: target }, select: { value: 'prototype-1-forward.py' },
       args: { value: '--fly --distance .3' },
       terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: ids.includes(id), ready: true,
         execute(script, args) { sends.push({ id, script, args }); } })),
       async run(label, targets, action) { return Promise.allSettled(targets.map(action)); } });
     await runner.execute();
-    assert.deepEqual(Array.from(released), ids);
-    assert.deepEqual(sends, ids.map(id => ({ id, script: 'prototype-1-forward.py', args: '--fly --distance .3' })));
+    assert.deepEqual(released ? Array.from(released) : [], expected);
+    assert.deepEqual(sends, expected.map(id => ({ id, script: 'prototype-1-forward.py', args: '--fly --distance .3' })));
     sends = [];
   }
 });

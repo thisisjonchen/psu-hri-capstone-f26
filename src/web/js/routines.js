@@ -140,12 +140,27 @@ class RoutineTerminal {
   async nodeAction(action) {
     // Restarting ends the screen session and rosbridge, so reattach both afterwards.
     const telemetry = drones[this.id];
-    const reconnect = action === 'restart' && !!telemetry.ros;
-    if (action === 'restart' && this.socket) this.socket.close();
-    const result = await this.post('/api/nodes', { action });
+    const restart = action === 'restart';
+    let deadline;
+    if (restart) {
+      const socket = this.socket;
+      this.socket = null;
+      if (socket) socket.close();
+      telemetry.disconnect('Restarting…');
+      deadline = telemetry.waitUntil = Date.now() + 90000;
+    }
+    let result;
+    try {
+      result = await this.post('/api/nodes', { action });
+    } catch (error) {
+      if (restart && telemetry.waitUntil === deadline) telemetry.failConnection('Nodes failed to restart');
+      throw error;
+    }
     this.nodes = true;
-    if (!this.socket) this.attach();
-    if (reconnect) telemetry.connect(true);
+    if (this.enabled && (!restart || telemetry.waitUntil === deadline)) {
+      if (!this.socket) this.attach();
+      if (restart) telemetry.connect(true);
+    }
     return result.output;
   }
 
@@ -159,6 +174,7 @@ class RoutineTerminal {
 class RoutineRunner {
   constructor() {
     this.select = document.getElementById('routine-script');
+    this.target = document.getElementById('routine-target');
     this.args = document.getElementById('routine-args');
     this.button = document.getElementById('routine-execute');
     this.restartButton = document.getElementById('nodes-restart');
@@ -168,6 +184,7 @@ class RoutineRunner {
     this.restartButton.addEventListener('click', () => this.nodeAction('restart'));
     this.alignButton.addEventListener('click', () => this.nodeAction('align'));
     this.select.addEventListener('change', () => this.render());
+    this.target.addEventListener('change', () => this.render());
     // The Connect and Disconnect buttons (main.js) also open and close the terminals.
     const terminal = id => this.terminals.find(candidate => candidate.id === id);
     document.addEventListener('drone-connect', event => terminal(event.detail).connectDrone());
@@ -186,9 +203,13 @@ class RoutineRunner {
     return this.terminals.filter(terminal => terminal.enabled);
   }
 
+  get targets() {
+    return this.active.filter(terminal => this.target.value === 'all' || terminal.id === this.target.value);
+  }
+
   render() {
-    const lists = this.active.filter(terminal => terminal.scripts).map(terminal => terminal.scripts);
-    // Offer only scripts every enabled drone has, so Execute runs the same file everywhere.
+    const lists = this.targets.filter(terminal => terminal.scripts).map(terminal => terminal.scripts);
+    // Offer only scripts available on every selected drone.
     const scripts = lists.length ? lists[0].filter(name => lists.every(list => list.includes(name))) : [];
     const selected = this.select.value;
     if (scripts.join() !== Array.from(this.select.options, option => option.value).filter(Boolean).join()) {
@@ -197,9 +218,10 @@ class RoutineRunner {
       this.select.replaceChildren(...options);
       this.select.value = scripts.includes(selected) ? selected : '';
     }
-    const waiting = this.active.filter(terminal => !terminal.ready).map(terminal => terminal.id);
+    const waiting = this.targets.filter(terminal => !terminal.ready).map(terminal => terminal.id);
     const loaded = this.active.length > 0 && this.active.every(terminal => terminal.scripts);
-    this.button.disabled = this.busy || !this.select.value || !this.active.length || waiting.length > 0;
+    this.button.disabled = this.busy || !this.select.value || !this.targets.length || waiting.length > 0;
+    this.target.disabled = this.busy;
     this.restartButton.disabled = this.alignButton.disabled = this.busy || !loaded ||
       !this.active.every(terminal => terminal.nodes && !terminal.running);
   }
@@ -220,7 +242,7 @@ class RoutineRunner {
   async execute() {
     const script = this.select.value;
     const args = this.args.value.trim();
-    const targets = this.active;
+    const targets = this.targets;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
     awaitSyncStart(targets.map(terminal => terminal.id));
     const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));

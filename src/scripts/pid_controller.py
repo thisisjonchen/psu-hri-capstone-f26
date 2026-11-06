@@ -16,7 +16,7 @@ from pid_class import PIDaxis
 from velocity_controller import VelocityController
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import Mode, RC, State, FlightReadiness
-from std_msgs.msg import Empty, Bool, UInt32
+from std_msgs.msg import Empty, Bool, UInt32, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, automatic_coordination
 from localization.uwb_locator import monotonic
@@ -347,6 +347,7 @@ class PIDController(object):
             rospy.logwarn('Ignoring invalid altitude target: %s', desired_z)
             return
         self.altitude.cancel_takeoff()
+        self.altitude.cancel_landing()
         # set the desired positions equal to the desired pose message
         if self.absolute_desired_position:
             self.desired_position.x = msg.position.x
@@ -359,6 +360,15 @@ class PIDController(object):
             self.desired_position.x = self.current_position.x + offset[0]
             self.desired_position.y = self.current_position.y + offset[1]
         self.desired_position.z = desired_z
+
+    @synchronized
+    def landing_callback(self, msg):
+        """Descend using the floor height measured before this flight."""
+        if self.current_mode != 'FLYING' or not np.isfinite(msg.data) or not 0 <= msg.data <= 0.12:
+            rospy.logwarn('Ignoring landing request: flight mode or floor height invalid')
+            return
+        self.altitude.start_landing(msg.data)
+        self.desired_position.z = msg.data
 
     @synchronized
     def desired_twist_callback(self, msg):
@@ -392,6 +402,7 @@ class PIDController(object):
             self.peer_state = self.peer_received = None
             self.peer_preview = self.peer_preview_received = None
             self.altitude.cancel_takeoff()
+            self.altitude.cancel_landing()
             rospy.loginfo('PID mode %s -> %s', previous, msg.mode)
             if msg.mode in ('ARMED', 'FLYING'):
                 self.reset()
@@ -419,6 +430,7 @@ class PIDController(object):
         """ Reset the desired and current poses of the drone and set
         desired velocities to zero """
         self.cancel_room_target()
+        self.altitude.cancel_landing()
         if not self.use_fusion:
             self.current_position = Position(z=self.current_position.z)
         self.desired_position = Position(self.current_position.x, self.current_position.y, self.desired_position.z)
@@ -670,6 +682,7 @@ def main(ControllerClass):
     rospy.Subscriber('/pidrone/state', State, pid_controller.current_state_callback,
                      queue_size=1, tcp_nodelay=True)
     rospy.Subscriber('/pidrone/desired/pose', Pose, pid_controller.desired_pose_callback)
+    rospy.Subscriber('/pidrone/desired/land', Float32, pid_controller.landing_callback, queue_size=1)
     rospy.Subscriber('/pidrone/desired/twist', Twist, pid_controller.desired_twist_callback)
     rospy.Subscriber('/pidrone/mode', Mode, pid_controller.current_mode_callback)
     rospy.Subscriber('/pidrone/desired/mode', Mode, pid_controller.desired_mode_callback)

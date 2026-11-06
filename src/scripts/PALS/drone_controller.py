@@ -10,7 +10,7 @@ from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
-from std_msgs.msg import Bool, Empty
+from std_msgs.msg import Bool, Empty, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 
 
@@ -22,8 +22,6 @@ class Drone(object):
 
     # Control Variables
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
-    LAND_STEP_M = 0.05 # Target height decrease per landing step (meters)
-    LAND_STEP_SECONDS = 1.0 # Time between landing steps (seconds)
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
@@ -51,6 +49,7 @@ class Drone(object):
         self.mode_pub = rospy.Publisher('/pidrone/desired/mode', Mode, queue_size=1)
         self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
         self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
+        self.landing_pub = rospy.Publisher('/pidrone/desired/land', Float32, queue_size=1)
         self.position_mode_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
         self.heartbeat_pub = rospy.Publisher(
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
@@ -162,7 +161,7 @@ class Drone(object):
         if '/state_estimator' in rosnode.get_node_names():
             raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
-        publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
+        publishers = (self.mode_pub, self.twist_pub, self.pose_pub, self.landing_pub,
                       self.position_mode_pub, self.heartbeat_pub)
         reason = 'Waiting for flight nodes'
         reported_reason = None
@@ -486,10 +485,18 @@ class Drone(object):
             self.unlock_xy()
         if self.ground_height is None:
             raise RuntimeError('Ground height was not measured before takeoff')
-        steps = math.ceil(max(0.0, self.height - self.ground_height) / self.LAND_STEP_M)
-        deadline = time.time() + max(20.0, (steps + 1) * self.LAND_STEP_SECONDS + 5.0)
+        if self.mode == 'DISARMED':
+            self.unlock_xy()
+            return
+        self._check_flight('landing', check_battery=False)
+        if not 0 <= self.ground_height <= 0.12:
+            raise RuntimeError('Invalid preflight floor height')
+        # Allow a slower-than-commanded descent before requiring manual recovery.
+        deadline = time.time() + max(20.0, max(0.0, self.height - self.ground_height) / 0.05 + 5.0)
         disarm_height = self.ground_height + self.LAND_DISARM_CLEARANCE_M
-        last_step = 0
+        self.landing_pub.publish(Float32(data=self.ground_height))
+        self.target_height = self.ground_height
+        rospy.loginfo('Landing toward preflight floor height %.3f m', self.ground_height)
         while time.time() < deadline:
             if self.mode == 'DISARMED':
                 self.unlock_xy()
@@ -508,9 +515,5 @@ class Drone(object):
                     rospy.logwarn('Releasing X/Y hold during landing: %s', error)
                     self.unlock_xy()
                     hold_xy = False
-            now = time.time()
-            if now - last_step >= self.LAND_STEP_SECONDS:
-                self._set_altitude(max(0.0, self.target_height - self.LAND_STEP_M))
-                last_step = now
             rospy.sleep(0.1)
         raise RuntimeError('Landing was not confirmed; drone is still armed')

@@ -247,10 +247,16 @@ class RoutineControlTest(unittest.TestCase):
         drone.height, drone.ground_height = .25, .05
         self.fusion.ros_now += 1
         self.globals['Mode'] = lambda name: NS(mode=name)
-        drone.mode_pub.publish = drone._mode_received
+        controller = self.fusion.controller()
+        drone.landing_pub.publish = controller.landing_callback
+        def mode_received(msg):
+            drone._mode_received(msg)
+            controller.current_mode_callback(msg)
+        drone.mode_pub.publish = mode_received
 
         def tick(seconds):
             self.assertEqual(drone.xy_anchor, (1, 2))
+            self.assertEqual(controller.altitude.landing_ground, .05)
             self.fusion.now += seconds
             self.fusion.ros_now += seconds
             drone.mode_at = drone.height_at = self.fusion.now
@@ -260,8 +266,29 @@ class RoutineControlTest(unittest.TestCase):
         drone.land(hold_xy=True)
         self.assertEqual(drone.mode, 'DISARMED')
         self.assertIsNone(drone.xy_anchor)
+        self.assertIsNone(controller.altitude.landing_ground)
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
+
+        controller.landing_callback(NS(data=.05))
+        self.assertIsNone(controller.altitude.landing_ground, 'ignore landing requests while disarmed')
+        controller.current_mode = 'FLYING'
+        for ground in (float('nan'), -.1, .5):
+            controller.landing_callback(NS(data=ground))
+            self.assertIsNone(controller.altitude.landing_ground)
+        controller.landing_callback(NS(data=.05))
+        controller.desired_pose_callback(NS(position=NS(x=0, y=0, z=.2)))
+        self.assertIsNone(controller.altitude.landing_ground, 'manual altitude input cancels descent')
+
+        drone.mode = 'FLYING'
+        drone.height = .25
+        def stuck(seconds):
+            self.fusion.now += seconds
+            drone.mode_at = drone.height_at = self.fusion.now
+        self.ros.sleep = stuck
+        with self.assertRaisesRegex(RuntimeError, 'Landing was not confirmed'):
+            drone.land()
+        self.assertEqual(drone.mode, 'FLYING', 'a landing timeout must not disarm in the air')
 
     def test_finish_preserves_disarm_and_manual_landing_recovery(self):
         drone = self.drone
@@ -407,7 +434,7 @@ class RoutineControlTest(unittest.TestCase):
             self.drone.ready()
         self.nodes.get_node_names.return_value = ['/fusion_localization']
         drone = self.drone
-        for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub,
+        for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub, drone.landing_pub,
                           drone.position_mode_pub, drone.heartbeat_pub):
             publisher.get_num_connections = lambda: 1
         drone.voltage, drone.battery_at = 16, self.fusion.now

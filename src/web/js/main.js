@@ -716,8 +716,8 @@ class DroneSession {
 
 
   setStatus(text, connected = false) {
-    const state = connected ? 'connected' : ['Connecting…', 'Waiting for nodes…'].includes(text) ? 'connecting'
-      : ['Connection error', 'Connection timed out', 'Nodes failed to start'].includes(text) ? 'error' : 'disconnected';
+    const state = connected ? 'connected' : ['Connecting…', 'Waiting for nodes…', 'Restarting…'].includes(text) ? 'connecting'
+      : ['Connection error', 'Connection timed out', 'Nodes failed to start', 'Nodes failed to restart'].includes(text) ? 'error' : 'disconnected';
     const status = document.getElementById(this.id + '-connectionStatus');
     status.dataset.state = state;
     const button = document.getElementById(this.id + '-connectionToggle');
@@ -733,7 +733,7 @@ class DroneSession {
     if (!active && document.activeElement === status) button.focus();
     const icon = status.querySelector('[data-state-icon]');
     status.querySelector('[data-connection-label]').textContent = {
-      connected: 'Connected', connecting: 'Connecting', error: 'Error', disconnected: 'Offline'
+      connected: 'Connected', connecting: text === 'Restarting…' ? 'Restarting…' : 'Connecting', error: 'Error', disconnected: 'Offline'
     }[state];
     icon.title = text;
     status.title = active ? (connected ? 'Disconnect' : 'Cancel connection') : text;
