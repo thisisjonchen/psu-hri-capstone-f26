@@ -56,6 +56,7 @@ add_message_files(
   StateGroundTruth.msg
   TagDetection.msg
   PayloadDetection.msg
+  PayloadMapPoint.msg
   TagMap.msg
   AnchorLayout.msg
   PeerState.msg

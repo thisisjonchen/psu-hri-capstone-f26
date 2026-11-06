@@ -51,19 +51,23 @@ class AprilTagGeometryTests(unittest.TestCase):
 class AprilTagMappingTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
-        self.maps = []
+        self.maps, self.payload_points = [], []
         ros = ModuleType('rospy')
         # These expectations are worked out for a 60 degree mounting; set it explicitly.
-        params = {'~camera_pitch_down_deg': 60.0}
+        params = {'~camera_pitch_down_deg': 60.0, '~payload_plane_z': .25}
         ros.get_param = lambda name, default: params.get(name, default)
         ros.Time = NS(now=lambda: Stamp(self.now))
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
+        reports = {'/pidrone/apriltag/map': self.maps,
+                   '/pidrone/payload/map_point': self.payload_points}
         ros.Publisher = lambda topic, *args, **kwargs: NS(
-            publish=lambda msg: self.maps.append(copy.deepcopy(msg)))
+            publish=lambda msg: reports[topic].append(copy.deepcopy(msg)))
         modules = {'rospy': ros}
         for package, messages in [
                 ('geometry_msgs', {'Point': NS, 'PoseWithCovarianceStamped': Pose}),
-                ('pidrone_pkg', {'TagDetection': NS, 'TagMap': lambda: NS(
+                ('pidrone_pkg', {'PayloadDetection': NS,
+                    'PayloadMapPoint': lambda: NS(header=NS(), point=NS(), valid=False),
+                    'TagDetection': NS, 'TagMap': lambda: NS(
                     header=NS(), tag_ids=[], zones=[], positions=[], sample_counts=[])}),
                 ('sensor_msgs', {'CameraInfo': NS}),
                 ('std_msgs', {'Bool': NS, 'UInt32': NS})]:
@@ -79,19 +83,51 @@ class AprilTagMappingTests(unittest.TestCase):
         self.node.generation_callback(NS(data=1))
         self.node.ready_callback(NS(data=True))
         self.node.camera_callback(NS(width=320, height=240, K=AprilTagGeometryTests.K,
-                                     D=[0] * 5, distortion_model='plumb_bob'))
+                                     D=[0] * 5, distortion_model='plumb_bob',
+                                     header=NS(frame_id='camera')))
 
-    def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
+    def set_pose(self, pose_stamp):
         pose = Pose()
         pose.header.frame_id, pose.header.stamp = 'map', Stamp(pose_stamp)
         pose.pose.pose.position = NS(x=1, y=2, z=1)
         pose.pose.pose.orientation.w = 1
         self.node.pose_callback(pose)
+
+    def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
+        self.set_pose(pose_stamp)
         message = NS(header=NS(stamp=Stamp(image_stamp)), camera_online=True,
                      image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PICKUP'],
                      center_x=[pixel[0]], center_y=[pixel[1]])
         self.node.detection_callback(message)
         return message
+
+    def test_payload_projects_at_configured_height_and_invalidates_without_fresh_input(self):
+        self.set_pose(99.98)
+        detection = NS(header=NS(stamp=Stamp(99.9), frame_id='camera'), camera_online=True,
+                       detected=True, image_width=320, image_height=240, center_x=190, center_y=120)
+        self.node.payload_callback(detection)
+        result, = self.payload_points
+        self.assertTrue(result.valid)
+        self.assertEqual((result.header.frame_id, result.header.stamp.to_sec(), result.generation),
+                         ('map', 99.9, 1))
+        np.testing.assert_allclose((result.point.x, result.point.y, result.point.z),
+                                   (1 + .15/math.sqrt(3), 2 + .75/math.sqrt(3), .25), atol=1e-7)
+        self.node.payload_callback(detection)
+        self.assertEqual(len(self.payload_points), 1)
+
+        self.now = 100.4
+        detection.header.stamp = Stamp(100.38)
+        self.node.payload_callback(detection)  # The fused pose has expired.
+        self.assertFalse(self.payload_points[-1].valid)
+        self.assertEqual(self.payload_points[-1].header.stamp.to_sec(), 99.9)
+        self.set_pose(self.now)
+        self.node.payload_callback(detection)
+        self.assertTrue(self.payload_points[-1].valid)
+        detection.header.stamp = Stamp(100.39)
+        detection.detected = False
+        self.node.payload_callback(detection)
+        self.assertFalse(self.payload_points[-1].valid)
+        self.assertEqual(self.maps[-1].tag_ids, [])
 
     def test_delayed_detections_publish_coordinates_once_per_image(self):
         # Pose updates can overtake image processing; older poses also remain valid.
