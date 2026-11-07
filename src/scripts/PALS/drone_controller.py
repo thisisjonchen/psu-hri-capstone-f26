@@ -24,6 +24,9 @@ class Drone(object):
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
+    YAW_GAIN = 2.0 # RC microseconds of yaw stick per degree of heading error
+    YAW_COMMAND_LIMIT = 50.0 # Same stick deflection as the dashboard yaw keys
+    YAW_SETTLE_SECONDS = 0.5 # How long heading must stay within tolerance
 
     def __init__(self):
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
@@ -455,6 +458,49 @@ class Drone(object):
             raise ValueError('Waypoint requires a frame and finite coordinates')
         self.move(speed_limit=speed_limit, timeout=timeout,
                   room_target=(x, y, frame), check=check)
+
+    def turn_to(self, yaw_deg, tolerance_deg=5.0, timeout=20.0, check=None):
+        """Turn in place to a room yaw in degrees (CCW; 0 faces +Y, 180 faces -Y).
+
+        Call while stopped; an active lock_xy() anchor is held during the turn.
+        """
+        if self.mode != 'FLYING':
+            raise RuntimeError('Drone must be flying before turning')
+        values = (yaw_deg, tolerance_deg, timeout)
+        if any(math.isnan(v) or math.isinf(v) for v in values) or tolerance_deg <= 0 or timeout <= 0:
+            raise ValueError('Turn requires a finite yaw and positive tolerance and timeout')
+        target = math.radians(yaw_deg)
+        deadline = time.time() + timeout
+        settled_since = None
+        try:
+            while time.time() < deadline:
+                if check is not None:
+                    check()
+                self._check_flight('turn')
+                q = self._hold_pose(local=True).pose.pose.orientation
+                yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+                error = math.degrees(math.atan2(math.sin(target - yaw), math.cos(target - yaw)))
+                now = time.time()
+                if abs(error) > tolerance_deg:
+                    settled_since = None
+                elif settled_since is None:
+                    settled_since = now
+                elif now - settled_since >= self.YAW_SETTLE_SECONDS:
+                    return
+                command = self._xy_hold_command()
+                # Positive RC yaw turns clockwise (dashboard "yaw right"), reducing room yaw.
+                command.angular.z = -max(-self.YAW_COMMAND_LIMIT,
+                                         min(self.YAW_COMMAND_LIMIT, self.YAW_GAIN * error))
+                rospy.loginfo_throttle(1, 'Turn: yaw=%.1f target=%.1f deg' % (
+                    math.degrees(yaw), yaw_deg))
+                self.twist_pub.publish(command)
+                rospy.sleep(0.1)
+            raise RuntimeError('Turn timed out')
+        except Exception as error:
+            rospy.logerr('Turn failed: %s', error)
+            raise
+        finally:
+            self.twist_pub.publish(self._xy_hold_command())
 
     def move_forward(self, meters, speed_limit=0.15, timeout=15.0):
         if meters <= 0:
