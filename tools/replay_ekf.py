@@ -8,6 +8,9 @@ Image-pair flow rates are fused at their midpoint using the matching IMU interva
 Optional stationary_intervals_s lists verified periods at rest as [start, end)
 seconds since the first IMU stamp, for zero velocity and gyro-bias updates.
 Disarmed hand-carried motion is not stationary.
+With /pidrone/localization/uwb recorded, the EKF starts in the room frame facing +Y at the mean
+UWB fix over the first 4 s of the first stationary interval, then fuses each fix (uwb.csv),
+shifted earlier by uwb_delay_s; --no-uwb keeps that start but ignores later fixes.
 """
 import argparse
 from collections import Counter
@@ -22,10 +25,12 @@ from rosbags.typesys import Stores, get_typestore, get_types_from_msg
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
 from localization.ekf import ErrorStateEKF, _array
 from localization.ekf_native import imu_means
-from localization.rotations import quaternion_matrix
+from localization.rotations import quaternion_matrix, quaternion_multiply
 from localization.ekf_replay import DelayedEKF
-from localization.ekf_sensors import FloorCamera, FloorRange, mounting_rotation
+from localization.ekf_sensors import FloorCamera, FloorRange, UwbTag, mounting_rotation
 from flow_capture import read_ekf_events
+
+UWB_TOPIC = '/pidrone/localization/uwb'
 
 
 class CaptureDecoder:
@@ -53,7 +58,7 @@ class CaptureDecoder:
 
 
 class Replay:
-    def __init__(self, profile, camera_source='images'):
+    def __init__(self, profile, camera_source='images', uwb_start=None, fuse_uwb=True):
         self.profile = profile
         self.camera_topic = {'images': '/raspicam_node/image/compressed',
                              'encoder': '/raspicam_node/motion_vectors_raw'}[camera_source]
@@ -68,6 +73,9 @@ class Replay:
         self.camera_delay = float(profile.get('camera_delay_s', 0.))
         if not 0 <= self.camera_delay <= float(profile.get('fusion_delay_s', .25)):
             raise ValueError('Camera delay must fit within the fusion delay')
+        self.uwb_delay = float(profile.get('uwb_delay_s', 0.))
+        if not 0 <= self.uwb_delay <= float(profile.get('fusion_delay_s', .25)):
+            raise ValueError('UWB delay must fit within the fusion delay')
         self.stationary_intervals = []
         for interval in profile.get('stationary_intervals_s', []):
             start, end = _array(interval, (2,))
@@ -77,10 +85,22 @@ class Replay:
             self.stationary_intervals.append((start, end))
         self.ekf = ErrorStateEKF()
         initial = profile['initial']
-        self.ekf.initialize(0., initial['quaternion'], position=initial['position'],
+        quaternion, position, covariance = initial['quaternion'], initial['position'], None
+        self.uwb, self.uwb_rows = None, []
+        if uwb_start is not None:
+            # Room frame: face +Y and start at the tag mean, less the tag offset.
+            self.uwb = UwbTag(profile['uwb_offset_body'])
+            rotation = quaternion_matrix(quaternion)
+            yaw = np.pi/2 - np.arctan2(rotation[1, 0], rotation[0, 0])
+            quaternion = quaternion_multiply([0., 0., np.sin(yaw/2), np.cos(yaw/2)], quaternion)
+            position = np.r_[uwb_start - quaternion_matrix(quaternion).dot(self.uwb.offset)[:2], position[2]]
+            std = np.r_[.02, .02, .1, [.2]*3, np.deg2rad([10., 10., 5.]), [.5]*3, [.05]*3]
+            covariance = np.diag(std**2)
+        self.fuse_uwb = fuse_uwb and self.uwb is not None
+        self.ekf.initialize(0., quaternion, position=position,
             velocity=initial['velocity'],
             acceleration_bias=initial.get('acceleration_bias', (0., 0., 0.)),
-            gyro_bias=initial.get('gyro_bias', (0., 0., 0.)))
+            gyro_bias=initial.get('gyro_bias', (0., 0., 0.)), covariance=covariance)
         self.timeline = None
         self.origin_ns = None
         self.camera = self.camera_signature = None
@@ -153,6 +173,12 @@ class Replay:
             status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9, 'range',
                 lambda f, t, m=message: self.range.correct(f, m.range, .02**2, t, m.min_range, m.max_range))
             self.counts[status] += 1
+        elif topic == UWB_TOPIC:
+            if self.fuse_uwb:
+                xy = np.array([message.pose.pose.position.x, message.pose.pose.position.y])
+                status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9-self.uwb_delay, 'uwb',
+                    lambda f, t, xy=xy: self._correct_uwb(f, xy, t))
+                self.counts[status] += 1
         elif topic == self.camera_topic:
             if self.camera is None:
                 self.counts['missing_camera_calibration'] += 1
@@ -174,15 +200,44 @@ class Replay:
                 self.counts[status] += 1
         return events
 
+    def _correct_uwb(self, ekf, xy, stamp):
+        predicted = self.uwb.linearize(ekf.position, ekf.quaternion)[0]
+        accepted, reason = self.uwb.correct(ekf, xy, .02**2, stamp)
+        self.uwb_rows.append([stamp, xy[0], xy[1], predicted[0], predicted[1], accepted, reason])
+        return accepted, reason
 
-def replay(folder, profile, out, camera_source='images'):
+
+def uwb_start(folder, profile):
+    """Mean UWB XY over the first 4 s of the first stationary interval, or None without UWB."""
+    decoder, metadata, origin, fixes = CaptureDecoder(), {}, None, []
+    for record in read_ekf_events(folder, metadata):
+        imu_topic = '/pidrone/imu_integrated' if metadata.get('integrated_imu') else '/pidrone/imu_msp'
+        if record['topic'] == imu_topic and origin is None:
+            origin = record['header_stamp_ns']
+        elif record['topic'] == UWB_TOPIC and origin is not None:
+            p = decoder.decode(record).pose.pose.position
+            fixes.append(((record['header_stamp_ns']-origin)/1e9, p.x, p.y))
+    if not fixes:
+        return None
+    intervals = profile.get('stationary_intervals_s', [])
+    if not intervals:
+        raise ValueError('UWB replay needs stationary_intervals_s to average the starting position')
+    start = intervals[0][0]
+    window = [(x, y) for t, x, y in fixes if start <= t < min(start+4., intervals[0][1])]
+    if len(window) < 30:
+        raise ValueError('Need at least 30 UWB fixes in the first 4 s at rest; found %d' % len(window))
+    return np.mean(window, axis=0)
+
+
+def replay(folder, profile, out, camera_source='images', fuse_uwb=True):
     """Save EKF estimates, baseline estimates, and update counts."""
-    runner, decoder = Replay(profile, camera_source), CaptureDecoder()
+    runner = Replay(profile, camera_source, uwb_start(folder, profile), fuse_uwb)
+    decoder = CaptureDecoder()
     out.mkdir(parents=True)
     metadata, outcomes, baselines = {}, Counter(), 0
     used = {'/pidrone/imu_msp', '/pidrone/imu_integrated', '/pidrone/range', '/raspicam_node/camera_info',
             runner.camera_topic, '/raspicam_node/motion_vectors',
-            '/pidrone/state', '/pidrone/localization/odometry'}
+            '/pidrone/state', '/pidrone/localization/odometry', UWB_TOPIC}
     with (out/'estimates.csv').open('w', newline='') as stream, (out/'baseline.csv').open('w', newline='') as reference:
         writer, baseline = csv.writer(stream), csv.writer(reference)
         writer.writerow(['time_s', 'sensor', 'accepted', 'reason', 'nis'] +
@@ -220,6 +275,11 @@ def replay(folder, profile, out, camera_source='images'):
                              '; use --camera encoder for recordings with raw vectors only.')
         events, beyond_imu = runner.timeline.finish()
         write_events(events)
+    if runner.uwb_rows:
+        with (out/'uwb.csv').open('w', newline='') as stream:
+            rows = csv.writer(stream)
+            rows.writerow(['time_s', 'measured_x', 'measured_y', 'predicted_x', 'predicted_y', 'accepted', 'reason'])
+            rows.writerows(runner.uwb_rows)
     summary = dict(profile=profile, camera_source=camera_source, camera_model='flow_rates',
                    capture_metadata=metadata, origin_ns=runner.origin_ns,
                    arrivals=dict(runner.counts), updates=dict(outcomes),
@@ -238,8 +298,11 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--camera', choices=('images', 'encoder'), default='images',
                         help='camera measurement source (default: images)')
+    parser.add_argument('--no-uwb', action='store_true',
+                        help='start from UWB in the room frame but ignore later fixes')
     args = parser.parse_args()
-    summary = replay(args.capture, json.loads(args.calibration.read_text()), args.out, args.camera)
+    summary = replay(args.capture, json.loads(args.calibration.read_text()), args.out, args.camera,
+                     not args.no_uwb)
     print(json.dumps({'updates': summary['updates'], 'arrivals': summary['arrivals'],
                       'output': str(args.out)}, indent=2))
 

@@ -5,6 +5,6 @@ max_sensor_skew: 0.15
 rate: 20.0
 reconnect_delay: 5.0
 max_tilt_degrees: 45.0
-# Initial uncertainty estimates in meters; measure and tune before control use.
-xy_stddev: 0.15
+# Per-fix uncertainty (m). 0.02 is the stationary noise; moving fixes scatter more.
+xy_stddev: 0.02
 z_stddev: 0.03

@@ -16,7 +16,7 @@ TOPICS = (
     '/pidrone/battery',
     '/raspicam_node/image/compressed',
     '/raspicam_node/camera_info',
-    '/pidrone/state', '/pidrone/localization/odometry',
+    '/pidrone/state', '/pidrone/localization/odometry', '/pidrone/localization/uwb',
 )
 
 

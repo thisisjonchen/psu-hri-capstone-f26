@@ -9,17 +9,15 @@
     <node pkg="pidrone_pkg" type="fusion_localization_node" name="fusion_localization" output="screen"
           required="true">
       <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
-      <!-- Use the mapper's camera mounting. -->
-      <rosparam command="load" file="$(find pidrone_pkg)/params/apriltag_mapping.yaml" ns="tag_camera"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="tof_offset_z" value="$(arg tof_offset_z)"/>
       <param name="body_frame" value="$(arg body_frame)"/>
-      <param name="local_estimator" value="ekf"/>
     </node>
     <include file="$(find pidrone_pkg)/launch/ekf_localization.launch">
       <arg name="calibration" value="$(arg ekf_calibration)"/>
       <arg name="body_frame" value="$(arg body_frame)"/>
+      <arg name="frame_id" value="$(arg frame_id)"/>
     </include>
   </group>
 </launch>

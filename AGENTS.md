@@ -57,10 +57,12 @@ can lag behind the code; verify the actual launch configuration and data path.
   verification. A file named `test` may be an executable hardware utility; inspect it first.
 - The EKF is the sole runtime motion estimator: MSP IMU predicts position, velocity,
   attitude and biases; camera-image tracking and ToF correct it. Ground-rest aiding
-  requires quiet IMU data and fresh floor range. The fusion node adapts EKF output
-  for the controller and handles room alignment; it runs no second motion filter.
-  UWB only corrects the room offset, so hold and relative moves work without UWB
-  and room waypoints require it. The floor is assumed textured.
+  requires quiet IMU data and fresh floor range. The EKF runs in room coordinates:
+  it initializes from 4 s of UWB at rest, and UWB (delayed about 0.3 s) then corrects
+  horizontal position only, never velocity, attitude or biases. UWB dropouts after
+  startup coast on IMU, camera and ToF. The fusion node rate-limits XY corrections to
+  the controller and validates the anchor layout; it runs no second motion filter.
+  The floor is assumed textured.
 - The camera is a fisheye tilted about 45 degrees below horizontal (`ekf.yaml`).
   The EKF tracks original JPEG images and models floor geometry and angular motion.
   Encoder vectors are disabled. Both drones share drone2's calibration by assumption;
@@ -69,7 +71,7 @@ can lag behind the code; verify the actual launch configuration and data path.
   thrust curve and a conservative angle boost). Roll/pitch come from a velocity PI
   with a lean limit in degrees; its integral learns constant pushes and is held, not
   cleared, while the velocity estimate is unavailable.
-- Heading alignment belongs at fusion-node startup while disarmed and facing map
+- Heading alignment belongs at EKF initialization while disarmed and facing map
   +Y, not in individual routines. It does not remove ongoing yaw drift.
 - Preserve an existing hold target through supported sensor gaps. Do not silently
   recapture the target, extend freshness indefinitely, or substitute UWB Z for ToF.

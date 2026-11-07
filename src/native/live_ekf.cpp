@@ -62,19 +62,23 @@ void Profile::validate() const {
     require(proper(imu_rotation) && proper(camera_rotation),"Mounting must be a proper rotation");
     require(std::isfinite(acceleration_scale) && acceleration_scale>0. && std::isfinite(gyro_scale)
             && gyro_scale>0.,"Positive finite IMU scales are required");
-    require(finite(acceleration_offset) && finite(range_offset) && finite(camera_offset)
+    require(finite(acceleration_offset) && finite(range_offset) && finite(camera_offset) && finite(uwb_offset)
             && finite(range_beam) && std::abs(cv::norm(range_beam)-1.)<=1.e-8,"Invalid sensor geometry");
     require(std::isfinite(delay) && delay>=0. && delay<=.4,"Live fusion delay must be in [0, 0.4]");
     require(std::isfinite(camera_delay) && camera_delay>=0. && camera_delay<=delay,
             "Camera delay must fit within the fusion delay");
+    require(std::isfinite(uwb_delay) && uwb_delay>=0. && uwb_delay<=delay,
+            "UWB delay must fit within the fusion delay");
 }
-void Filter::initialize(double height, const Quaternion& q, const Vec& ba, const Vec& bg) {
-    state.fill(0.); state[2]=height;
+void Filter::initialize(double x, double y, double xy_variance, double height, const Quaternion& q,
+                        const Vec& ba, const Vec& bg) {
+    state.fill(0.); state[0]=x; state[1]=y; state[2]=height;
     std::copy(q.val,q.val+4,state.begin()+6);
     std::copy(ba.val,ba.val+3,state.begin()+10);
     std::copy(bg.val,bg.val+3,state.begin()+13);
     const double pi=std::acos(-1.);
-    const double sd[]={.1,.1,.1,.2,.2,.2,pi/18,pi/18,pi/4,.5,.5,.5,.05,.05,.05};
+    const double xy=std::sqrt(xy_variance);
+    const double sd[]={xy,xy,.1,.2,.2,.2,pi/18,pi/18,pi/36,.5,.5,.5,.05,.05,.05};
     cv::Mat initial=cv::Mat::zeros(15,15,CV_64F), transform=cv::Mat::eye(15,15,CV_64F);
     for (int i=0; i<15; ++i) initial.at<double>(i,i)=sd[i]*sd[i];
     const Rotation r=rotation(q);
@@ -125,12 +129,12 @@ bool Filter::project(const std::vector<Imu>& samples) {
     state=s; covariance=p; stamp=intervals[intervals.size()-8];
     return true;
 }
-bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate) {
+bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate, bool xy_only) {
     if (!cv::checkRange(innovation) || !cv::checkRange(h) || !cv::checkRange(r)) return false;
     auto s=state; auto p=covariance;
     cv::Mat total(r.rows,r.cols,CV_64F); double nis=0.;
     if (pals_ekf_correct(s.data(),p.data(),innovation.ptr<double>(),h.ptr<double>(),r.ptr<double>(),
-                         innovation.rows,gate,total.ptr<double>(),&nis)) return false;
+                         innovation.rows,gate,xy_only,total.ptr<double>(),&nis)) return false;
     state=s; covariance=p;
     return true;
 }
@@ -159,11 +163,10 @@ cv::Mat Filter::public_covariance() const {
     return .5*(p+p.t());
 }
 bool Filter::navigation_variance_valid() const {
-    const Rotation r=rotation(quaternion());
-    for (int start:{0,3}) for (int axis=0; axis<3; ++axis) {
-        double variance=0.;
-        for (int i=0;i<3;++i) for (int j=0;j<3;++j)
-            variance+=r(i,axis)*covariance[15*(start+i)+start+j]*r(j,axis);
+    // Public covariance: internal position error grows with distance from the room origin.
+    const cv::Mat p=public_covariance();
+    for (int i=0; i<6; ++i) {
+        const double variance=p.at<double>(i,i);
         if (!std::isfinite(variance) || variance<0. || variance>.25) return false;
     }
     return true;
@@ -188,17 +191,17 @@ Output body_output(const Filter& f, const Vec& angular_rate) {
     return result;
 }
 bool Snapshot::range_ready(double now) const {
-    const double age=now-origin_ns/1.e9-range_aid;
+    const double age=now-delay-origin_ns/1.e9-range_aid;
     return initialized && age>=0. && age<=.5;
 }
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
     if (!fault.empty()) reason=fault;
-    else if (!initialized) reason="Hold still on the floor for eight seconds while disarmed";
+    else if (!initialized) reason="Hold still on the floor, facing +Y, for eight seconds with UWB streaming";
     else if (!reference_valid) reason="Local reference lost; restart on the floor before flight";
     else if (!range_ready(now)) reason="Waiting for accepted range";
     else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh EKF output";
-    else if (current-horizontal_aid>.5 && current>takeoff_deadline) reason="Coasting; waiting for accepted camera flow";
+    else if (current-delay-horizontal_aid>.5 && current>takeoff_deadline) reason="Coasting; waiting for accepted camera flow";
     else if (!estimate.navigation_variance_valid()) reason="Position or velocity uncertainty is too large";
     else { reason="Ready"; return true; }
     return false;
@@ -225,7 +228,7 @@ std::vector<Vec> Camera::undistort(const std::vector<cv::Point2d>& pixels) const
     return result;
 }
 LiveEKF::LiveEKF(const Profile& p):profile_(p) { p.validate(); }
-void LiveEKF::clear_rest() { rest_since_=0; initial_.clear(); }
+void LiveEKF::clear_rest() { rest_since_=0; initial_.clear(); uwb_initial_.clear(); }
 void LiveEKF::mode(const std::string& value,double received) {
     if (value!=mode_) {
         takeoff_handoff_=value=="FLYING" && mode_=="ARMED" && origin_ns_
@@ -280,6 +283,20 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     m.sensor="camera"; m.stamp=(start+end)/2.; m.end=end; m.value=start; m.camera=camera_;
     queue(m);
 }
+void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
+    stamp-=std::llround(profile_.uwb_delay*1.e9);
+    if (stamp<=0 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
+    if (!origin_ns_) {
+        // Average fixes from the current rest period for the starting room position.
+        if (!rest_since_ || stamp<rest_since_) return;
+        uwb_initial_.push_back({stamp,x,y,variance});
+        while (stamp-uwb_initial_.front().stamp>5000000000LL) uwb_initial_.pop_front();
+        return;
+    }
+    if (!fault_.empty()) return;
+    Measurement m; m.stamp=(stamp-origin_ns_)/1.e9; m.sensor="uwb"; m.xy=cv::Vec2d(x,y); m.value=variance;
+    queue(m);
+}
 bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,const Vec& rate) {
     Vec rest_rate=rate;
     if (origin_ns_) {
@@ -326,16 +343,28 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
         if (!rest_since_) return;
         initial_.push_back({force,rate,range_.value,ns});
         if ((ns-initial_.front().stamp)/1.e9<8.) return;
+        double tag_x=0.,tag_y=0.,tag_variance=0.; int fixes=0;
+        for (const auto& f:uwb_initial_) if (f.stamp<=ns && ns-f.stamp<=4000000000LL) {
+            tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
+        }
+        // Keep waiting for UWB over the newest eight seconds of rest.
+        if (fixes<30) { initial_.erase(initial_.begin()); return; }
+        tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }
         const double count=initial_.size(); mean_force/=count; mean_rate/=count; distance/=count;
         const Vec up=mean_force/cv::norm(mean_force),cross=up.cross(Vec(0.,0.,1.));
         Quaternion q(cross[0],cross[1],cross[2],1.+up[2]); q/=cv::norm(q);
+        // The drone starts facing room +Y.
+        const Rotation tilt=rotation(q);
+        const double yaw=std::acos(-1.)/2.-std::atan2(tilt(1,0),tilt(0,0));
+        q=product(Quaternion(0.,0.,std::sin(yaw/2.),std::cos(yaw/2.)),q);
         const Rotation r=rotation(q);
+        const Vec tag=r*profile_.uwb_offset;
         const double height=-(r*profile_.range_offset+distance*(r*profile_.range_beam))[2];
         if (!std::isfinite(height) || height<=0.) { fault_="Invalid initial floor geometry"; return; }
-        filter_.initialize(height,q,mean_force-r.t()*Vec(0.,0.,9.8),mean_rate);
-        origin_ns_=ns; ground_range_=distance; initial_.clear(); return;
+        filter_.initialize(tag_x-tag[0],tag_y-tag[1],tag_variance,height,q,mean_force-r.t()*Vec(0.,0.,9.8),mean_rate);
+        origin_ns_=ns; ground_range_=distance; initial_.clear(); uwb_initial_.clear(); return;
     }
     const double dt=stamp-last_imu_;
     sample.stamp=stamp; imu_.push_back(sample); last_imu_=stamp;
@@ -391,6 +420,19 @@ bool LiveEKF::correct(const Measurement& m) {
     if (m.sensor=="camera") {
         Vec rate; if (!mean_rate(m.value,m.end,rate)) return false;
         try { return correct_camera(m,rate); } catch (const cv::Exception&) { return false; }
+    }
+    if (m.sensor=="uwb") {
+        // UWB corrects horizontal position only, never velocity, attitude or biases.
+        const Rotation r=rotation(filter_.quaternion());
+        const Vec tag=filter_.position()+r*profile_.uwb_offset;
+        const Rotation a=r*skew(profile_.uwb_offset);
+        cv::Mat h=cv::Mat::zeros(2,15,CV_64F);
+        h.at<double>(0,0)=h.at<double>(1,1)=1.;
+        for (int i=0;i<2;++i) for (int j=0;j<3;++j) h.at<double>(i,6+j)=-a(i,j);
+        const bool accepted=filter_.correct((cv::Mat_<double>(2,1)<<m.xy[0]-tag[0],m.xy[1]-tag[1]),
+                                            h,cv::Mat::eye(2,2,CV_64F)*m.value,9.21,true);
+        uwb_rejections_=accepted ? 0 : uwb_rejections_+1;
+        return accepted;
     }
     cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
@@ -493,8 +535,8 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
     return filter_.correct(innovation,h,n,9.21);
 }
 Snapshot LiveEKF::snapshot() const {
-    Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_;
-    s.reference_valid=reference_valid_; s.fault=fault_;
+    Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
+    s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));

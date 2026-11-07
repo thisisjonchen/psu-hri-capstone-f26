@@ -272,7 +272,8 @@ extern "C" int pals_ekf_project_integrated(double* state, double* covariance, co
                                             const double* density, double start) {
     if (!count) return 0;
     const double last=intervals[9*(count-1)+1],duration=last-start;
-    if (!std::isfinite(start) || !std::isfinite(duration) || duration<=0. || duration>.5) return 1;
+    // Must exceed the node's delayed-fusion guard (fusion delay + 0.35 s).
+    if (!std::isfinite(start) || !std::isfinite(duration) || duration<=0. || duration>1.) return 1;
     const double midpoint=start+duration/2;
     double stamp=start,mid_state[10],r[9]; bool have_midpoint=false;
     for (std::size_t i=0;i<count;++i) {
@@ -374,7 +375,7 @@ bool valid_quaternion(const double* q) {
 // Status 2 fails before consuming the measurement; 3 fails after its innovation gate.
 extern "C" int pals_ekf_correct(double* state, double* covariance, const double* innovation,
                                 const double* observation, const double* noise, std::size_t size,
-                                double gate, double* total, double* nis) {
+                                double gate, int xy_only, double* total, double* nis) {
     if (!size) return 2;
     double r[9], cross_p[9], cross_v[9];
     rotation(state+6, r); skew(state, cross_p); skew(state+3, cross_v);
@@ -408,6 +409,15 @@ extern "C" int pals_ekf_correct(double* state, double* covariance, const double*
     for (std::size_t i=0; i<size; ++i) *nis += innovation[i]*rhs[16*i];
     if (!std::isfinite(*nis)) return 2;
     if (*nis > gate) return 1;
+    if (xy_only) {
+        // Restrict in public coordinates; internal position error includes p x attitude.
+        for (std::size_t k=0; k<size; ++k) {
+            double* gain=&rhs[16*k+1];
+            const double x=gain[0]-cross_p[0]*gain[6]-cross_p[1]*gain[7]-cross_p[2]*gain[8];
+            const double y=gain[1]-cross_p[3]*gain[6]-cross_p[4]*gain[7]-cross_p[5]*gain[8];
+            std::fill(gain,gain+15,0.); gain[0]=x; gain[1]=y;
+        }
+    }
     double delta[15] = {};
     Matrix remainder = {};
     for (int i=0; i<15; ++i) {

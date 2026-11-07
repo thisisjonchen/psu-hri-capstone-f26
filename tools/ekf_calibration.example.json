@@ -8,6 +8,7 @@
   "range_beam_body": null,
   "rotation_body_camera": null,
   "camera_offset_body": null,
+  "uwb_offset_body": [0.0, 0.038, 0.0],
   "initial": {
     "quaternion": null,
     "position": null,
@@ -15,7 +16,8 @@
     "acceleration_bias": [0.0, 0.0, 0.0],
     "gyro_bias": [0.0, 0.0, 0.0]
   },
-  "fusion_delay_s": 0.25,
+  "fusion_delay_s": 0.35,
   "camera_delay_s": 0.04,
+  "uwb_delay_s": 0.3,
   "stationary_intervals_s": []
 }

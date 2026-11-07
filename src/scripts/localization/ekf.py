@@ -192,7 +192,7 @@ class ErrorStateEKF(object):
         self.last_update = dict(accepted=False, reason=reason)
         return False, reason
 
-    def _correct(self, measured, predicted, observation, noise, stamp, sensor, gate):
+    def _correct(self, measured, predicted, observation, noise, stamp, sensor, gate, xy_only=False):
         size = len(predicted)
         try:
             stamp = _stamp(stamp)
@@ -218,7 +218,7 @@ class ErrorStateEKF(object):
                                 self.acceleration_bias, self.gyro_bias))
         covariance = self._covariance.copy()
         status, total, nis = ekf_native.correct(state, covariance, innovation,
-                                               observation, noise, gate)
+                                               observation, noise, gate, xy_only)
         if status == 2:
             return self._reject('numerical_failure')
         # Use state time so timestamp rounding cannot admit a sample twice.

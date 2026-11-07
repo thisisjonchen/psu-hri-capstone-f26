@@ -1,5 +1,6 @@
 #include "live_ekf.h"
 #include <ros/ros.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/CompressedImage.h>
@@ -34,16 +35,18 @@ pals::Profile profile(ros::NodeHandle& node) {
     p.gyro_scale=parameter(node,"gyro_rad_s_per_count",1)[0];
     p.delay=parameter(node,"fusion_delay_s",1)[0];
     node.param("calibration/camera_delay_s",p.camera_delay,0.);
+    p.uwb_delay=parameter(node,"uwb_delay_s",1)[0];
     p.acceleration_offset=pals::Vec(parameter(node,"acceleration_offset_msp_counts",3).data());
     p.imu_rotation=pals::Rotation(parameter(node,"rotation_body_msp",9).data());
     p.range_offset=pals::Vec(parameter(node,"range_offset_body",3).data());
     p.range_beam=pals::Vec(parameter(node,"range_beam_body",3).data());
     p.camera_offset=pals::Vec(parameter(node,"camera_offset_body",3).data());
+    p.uwb_offset=pals::Vec(parameter(node,"uwb_offset_body",3).data());
     p.camera_rotation=pals::Rotation(parameter(node,"rotation_body_camera",9).data());
     p.validate(); return p;
 }
 struct Event {
-    enum Kind { IMU, RANGE, IMAGE, CAMERA, MODE } kind;
+    enum Kind { IMU, RANGE, IMAGE, CAMERA, MODE, UWB } kind;
     double received;
     std::int64_t stamp=0;
     pals::Imu imu;
@@ -51,12 +54,14 @@ struct Event {
     sensor_msgs::CompressedImage::ConstPtr image;
     sensor_msgs::CameraInfo::ConstPtr camera;
     pidrone_pkg::Mode::ConstPtr mode;
+    geometry_msgs::PoseWithCovarianceStamped::ConstPtr uwb;
 };
 
 class Node {
 public:
     Node():private_("~"),profile_(profile(private_)),filter_(profile_) {
         private_.param<std::string>("body_frame",body_frame_,"pidrone_body");
+        private_.param<std::string>("frame_id",frame_,"map");
         cv::setNumThreads(1);
         state_pub_=node_.advertise<pidrone_pkg::State>("pidrone/ekf/state",1);
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
@@ -67,6 +72,7 @@ public:
         image_sub_=node_.subscribe("raspicam_node/image/compressed",10,&Node::image,this,transport);
         camera_sub_=node_.subscribe("raspicam_node/camera_info",1,&Node::camera,this);
         mode_sub_=node_.subscribe("pidrone/mode",10,&Node::mode,this,transport);
+        uwb_sub_=node_.subscribe("pidrone/localization/uwb",10,&Node::uwb,this,transport);
         timer_=node_.createWallTimer(ros::WallDuration(.05),&Node::watchdog,this);
         worker_=std::thread(&Node::work,this);
     }
@@ -79,9 +85,9 @@ private:
     pals::Profile profile_;
     pals::LiveEKF filter_;
     ros::Publisher state_pub_,odom_pub_,ready_pub_;
-    ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_;
+    ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_,uwb_sub_;
     ros::WallTimer timer_;
-    std::string body_frame_;
+    std::string body_frame_,frame_;
     std::thread worker_;
     std::mutex queue_mutex_,snapshot_mutex_;
     std::condition_variable available_;
@@ -123,6 +129,10 @@ private:
     void image(const sensor_msgs::CompressedImage::ConstPtr& msg) { Event e; e.kind=Event::IMAGE; e.image=msg; enqueue(e); }
     void camera(const sensor_msgs::CameraInfo::ConstPtr& msg) { Event e; e.kind=Event::CAMERA; e.camera=msg; enqueue(e); }
     void mode(const pidrone_pkg::Mode::ConstPtr& msg) { Event e; e.kind=Event::MODE; e.mode=msg; enqueue(e); }
+    void uwb(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg) {
+        if (msg->header.frame_id!=frame_) { ROS_WARN_THROTTLE(5.,"Ignoring UWB in frame %s",msg->header.frame_id.c_str()); return; }
+        Event e; e.kind=Event::UWB; e.uwb=msg; enqueue(e);
+    }
     void imu(const pidrone_pkg::IntegratedImu::ConstPtr& msg) {
         const std::int64_t stamp=msg->header.stamp.toNSec();
         if (stamp<=0 || stamp<=last_imu_) return;
@@ -162,6 +172,7 @@ private:
     }
     void watchdog(const ros::WallTimerEvent&) {
         const auto s=snapshot(); std::string reason;
+        if (s.uwb_rejections>=20) ROS_WARN_THROTTLE(5.,"EKF: %d consecutive UWB fixes rejected",s.uwb_rejections);
         const bool ready=s.ready(ros::Time::now().toSec(),last_published_ ? last_output_ : s.filter,reason);
         publish_ready(!failed_ && ready,reason);
     }
@@ -169,8 +180,8 @@ private:
         const double now=ros::Time::now().toSec(),age=now-stamp/1.e9;
         if (failed_ || !s.fault.empty() || !s.initialized || stamp<=last_published_
             || age<0. || age>.15 || !s.range_ready(now)) { watchdog(ros::WallTimerEvent()); return; }
-        if ((stamp-s.origin_ns)/1.e9-s.filter.stamp>.5) {
-            publish_ready(false,"Delayed fusion is more than 0.5 seconds behind"); return;
+        if ((stamp-s.origin_ns)/1.e9-s.filter.stamp>profile_.delay+.35) {
+            publish_ready(false,"Delayed fusion is more than 0.35 seconds behind its horizon"); return;
         }
         std::vector<pals::Imu> intervals;
         const double first=last_published_ ? std::min(s.filter.stamp,last_output_.stamp) : s.filter.stamp;
@@ -206,7 +217,7 @@ private:
         for (int i=0;i<3;++i) for (int j=0;j<3;++j)
             output.twist_covariance[6*i+j]+=velocity_error[i]*velocity_error[j];
         nav_msgs::Odometry odom;
-        odom.header.stamp.fromNSec(stamp); odom.header.frame_id="ekf_odom"; odom.child_frame_id=body_frame_;
+        odom.header.stamp.fromNSec(stamp); odom.header.frame_id=frame_; odom.child_frame_id=body_frame_;
         auto& p=odom.pose.pose.position; p.x=estimate.state[0]; p.y=estimate.state[1]; p.z=vertical[0];
         auto& q=odom.pose.pose.orientation;
         q.x=output.quaternion[0]; q.y=output.quaternion[1]; q.z=output.quaternion[2]; q.w=output.quaternion[3];
@@ -243,6 +254,10 @@ private:
                 else if (e.kind==Event::CAMERA) {
                     const auto& m=*e.camera;
                     filter_.camera(m.width,m.height,std::vector<double>(m.K.begin(),m.K.end()),m.D,m.distortion_model);
+                } else if (e.kind==Event::UWB) {
+                    const auto& m=*e.uwb;
+                    filter_.uwb(m.header.stamp.toNSec(),m.pose.pose.position.x,m.pose.pose.position.y,
+                                std::max(m.pose.covariance[0],m.pose.covariance[7]));
                 } else filter_.mode(e.mode->mode,e.received);
                 const auto completed=filter_.snapshot();
                 if (!completed.fault.empty()) { fail(completed.fault); continue; }

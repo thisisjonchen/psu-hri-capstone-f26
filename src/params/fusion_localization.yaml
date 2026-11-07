@@ -1,13 +1,6 @@
-# Heading is aligned automatically at node startup while disarmed and facing map +Y.
-# Floor tag 5, printed top toward +Y, corrects yaw in all modes when visible.
-
-# Room position: UWB corrects only the map->odom offset.
-# Local odometry drift rate (m per sqrt(s)); larger lets UWB pull harder.
-drift_stddev: 0.08
-# Freshness for height and newly received fixes; the room pose itself
-# survives UWB gaps up to 1.5 s (localization.fusion.XY_PREDICTION_TIMEOUT).
+# The EKF fuses UWB into horizontal position and starts facing map +Y (ekf.yaml).
+# Freshness for height and the EKF estimate.
 sensor_timeout: 0.5
 max_sensor_skew: 0.15
-# 99% chi-square gate for two-dimensional innovations (UWB).
-innovation_gate: 9.21
-max_innovation: 1.0
+# Maximum speed (m/s) at which EKF XY corrections reach the controller.
+max_correction_speed: 0.05

@@ -25,17 +25,19 @@ _correction_state = np.ctypeslib.ndpointer(dtype=np.float64, shape=(16,),
                                           flags=('C_CONTIGUOUS', 'WRITEABLE'))
 _correct = _library.pals_ekf_correct
 _correct.argtypes = [_correction_state, _writable_matrix, _float_vector, _float_matrix,
-                     _float_matrix, ctypes.c_size_t, ctypes.c_double, _float_matrix, _float_vector]
+                     _float_matrix, ctypes.c_size_t, ctypes.c_double, ctypes.c_int,
+                     _float_matrix, _float_vector]
 _correct.restype = ctypes.c_int
 
 
-def correct(state, covariance, innovation, observation, noise, gate):
+def correct(state, covariance, innovation, observation, noise, gate, xy_only=False):
     size = len(innovation)
     observation = np.ascontiguousarray(observation, dtype=float)
     if observation.shape != (size, 15):
         raise ValueError('Invalid observation shape')
     total, nis = np.empty((size, size)), np.zeros(1)
-    status = _correct(state, covariance, innovation, observation, noise, size, gate, total, nis)
+    status = _correct(state, covariance, innovation, observation, noise, size, gate, int(xy_only),
+                      total, nis)
     return status, total, float(nis[0])
 
 

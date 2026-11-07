@@ -59,6 +59,25 @@ class FloorRange(object):
         return ekf._correct([distance], [prediction], observation, variance, stamp, 'range', 6.63)
 
 
+class UwbTag(object):
+    """Room XY of a tag mounted at offset_body; corrects horizontal position only."""
+    def __init__(self, offset_body):
+        self.offset = _array(offset_body, (3,))
+
+    def linearize(self, position, quaternion):
+        rotation = quaternion_matrix(quaternion)
+        observation = np.zeros((2, 15))
+        observation[:, :2] = np.eye(2)
+        observation[:, 6:9] = -rotation.dot(skew(self.offset))[:2]
+        return (position + rotation.dot(self.offset))[:2], observation
+
+    def correct(self, ekf, xy, variance, stamp):
+        if ekf.stamp is None:
+            return ekf._reject('not_initialized')
+        prediction, observation = self.linearize(ekf.position, ekf.quaternion)
+        return ekf._correct(xy, prediction, observation, variance, stamp, 'uwb', 9.21, xy_only=True)
+
+
 class FloorCamera(object):
     """Fuse image-motion rates using velocity, attitude and height above the floor.
 

@@ -9,7 +9,7 @@ from unittest import mock
 
 import numpy as np
 
-from localization.fusion import (RoomOffset, VelocityFilter, VerticalFilter, body_angle, horizontal_acceleration,
+from localization.fusion import (VelocityFilter, VerticalFilter, body_angle, horizontal_acceleration,
                                  rotate, target_velocity, vertical_acceleration)
 from localization import test_ros_node as ros_doubles
 from localization.test_ros_node import Pose, Stamp, Layout
@@ -185,46 +185,6 @@ class FusionMathTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 VelocityFilter(**kwargs)
 
-    def test_uwb_corrects_only_the_room_offset_and_filters_its_noise(self):
-        random = np.random.RandomState(3)
-        room, errors = RoomOffset(yaw_offset=.3), []
-        origin = np.array((1., 2.))
-        for i in range(200):
-            t, odom = 10 + i*.05, np.array((.01*i, 0.))
-            truth = origin + rotate(odom, .3)
-            self.assertTrue(room.update(truth + random.normal(0, .1, 2), np.eye(2)*.15**2, t, odom)[0])
-            if i > 40:
-                errors.append(room.position(odom) - truth)
-        self.assertLess(np.std(errors), .05)  # From 0.10 m raw UWB noise.
-        offset = room.offset.copy()
-        for position, covariance, stamp in [((20, 20), np.eye(2)*.0225, t + .05),
-                                            (truth, np.zeros((2, 2)), t + .05), (truth, np.eye(2), t)]:
-            self.assertFalse(room.update(position, covariance, stamp, odom)[0])
-            np.testing.assert_array_equal(room.offset, offset)
-        self.assertFalse(room.update(truth, np.eye(2), t + .1, None)[0])
-        self.assertTrue(room.ready(t + 1.5))
-        self.assertFalse(room.ready(t + 1.51))
-        self.assertGreater(room.covariance(t + 1)[0, 0], room.covariance(t)[0, 0])
-
-    def test_uwb_multipath_burst_is_ignored_but_a_real_shift_is_not_locked_out(self):
-        room, odom, truth = RoomOffset(yaw_offset=0.), np.zeros(2), np.array((1., 2.))
-        t = 10.
-        for i in range(40):
-            t += .05
-            room.update(truth, np.eye(2)*.15**2, t, odom)
-        for i in range(20):  # One second of 0.6 m multipath reflections.
-            t += .05
-            room.update(truth + (.6, 0), np.eye(2)*.15**2, t, odom)
-        self.assertLess(np.linalg.norm(room.position(odom) - truth), .05)
-        moved = truth + (.6, 0)  # Odometry was wrong: the drone really is 0.6 m away.
-        for i in range(60):
-            t += .05
-            if room.offset is not None and not room.ready(t):
-                room.reset()  # As the fusion node expires an unconfirmed room pose.
-            room.update(moved, np.eye(2)*.15**2, t, odom)
-        self.assertTrue(room.ready(t))
-        self.assertLess(np.linalg.norm(room.position(odom) - moved), .05, 'locked out of the real position')
-
     def test_vertical_acceleration_is_world_up_at_any_tilt(self):
         tilt = math.pi/6
         self.assertAlmostEqual(vertical_acceleration((0, 0, 1), (0, 0, 2)), 1)
@@ -258,19 +218,6 @@ class FusionMathTest(unittest.TestCase):
         self.assertTrue(f.predict(None, t + .6))  # A gap stops the estimate.
         self.assertEqual(f.climb_rate, 0)
 
-    def test_yaw_correction_keeps_the_current_room_position(self):
-        room = RoomOffset(yaw_offset=.3)
-        odom = np.array((.4, -.2))
-        room.update((1, 2), np.eye(2)*.01, 10, odom)
-        before = room.position(odom)
-        self.assertTrue(room.correct_yaw(.2, odom))
-        self.assertAlmostEqual(room.yaw_offset, .5)
-        np.testing.assert_allclose(room.position(odom), before)
-        # Later motion is rotated by the corrected heading.
-        np.testing.assert_allclose(room.position(odom + (1, 0)) - before, rotate((1, 0), .5))
-        self.assertFalse(RoomOffset().correct_yaw(.1, odom))
-
-
 class FusionNodeTest(unittest.TestCase):
     def setUp(self):
         # Reuse the existing transport doubles; execute the real node/controller.
@@ -296,8 +243,6 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['pidrone_pkg.msg'].State = state
         sys.modules['pidrone_pkg.msg'].FlightReadiness = lambda: NS(
             header=NS(stamp=Stamp(0), frame_id=''), mode='', paired=False, ready=False, reason='')
-        sys.modules['pidrone_pkg.msg'].TagCorners = NS
-        sys.modules['sensor_msgs.msg'].CameraInfo = NS
         sys.modules['pidrone_pkg.msg'].Mode = sys.modules['pidrone_pkg.msg'].RC = NS
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
@@ -306,24 +251,22 @@ class FusionNodeTest(unittest.TestCase):
         self.ros.Subscriber.reset_mock()
         self.node = runpy.run_path(script)['FusionLocalizationNode']()
         self.node.step.__globals__['monotonic'] = lambda: self.now
-        self.node.mode_callback(NS(mode='DISARMED'))
         self.refresh()
         self.report_anchors()
-        self.uwb()
         self.node.step()
 
-    def refresh(self, yaw=0, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
-                position=(0, 0), roll=0, pitch=0, ready=True):
+    def refresh(self, yaw=math.pi/2, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
+                position=(1, 2), roll=0, pitch=0, ready=True):
         self.node.range_callback(NS(range=height, min_range=.01, max_range=4,
                                    header=NS(stamp=Stamp(self.ros_now))))
         msg = self.ekf_message(yaw, height, velocity, omega, position, roll, pitch)
         self.node.update_ekf(msg)
         self.node.ekf_ready_callback(NS(data=ready))
 
-    def ekf_message(self, yaw=0, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
-                    position=(0, 0), roll=0, pitch=0):
+    def ekf_message(self, yaw=math.pi/2, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
+                    position=(1, 2), roll=0, pitch=0):
         msg = state()
-        msg.header = NS(frame_id='ekf_odom', stamp=Stamp(self.ros_now))
+        msg.header = NS(frame_id='map', stamp=Stamp(self.ros_now))
         msg.child_frame_id = 'pidrone_body'
         msg.pose, msg.twist = msg.pose_with_covariance, msg.twist_with_covariance
         q = multiply(quaternion(roll, pitch, yaw), quaternion(yaw=-math.pi/2))
@@ -339,121 +282,21 @@ class FusionNodeTest(unittest.TestCase):
         self.ros_now += seconds
         self.refresh(**kwargs)
 
-    def tag_reference(self):
-        from localization.apriltag_geometry import camera_rotation
-        self.node.tag_rotation = camera_rotation(90)
-        self.node.camera_callback(NS(header=NS(frame_id='camera'), width=320, height=240,
-            K=[300, 0, 160, 0, 300, 120, 0, 0, 1], D=[0]*5, distortion_model='plumb_bob'))
-        return NS(header=NS(frame_id='camera', stamp=Stamp(self.ros_now)), tag_id=5,
-                  image_width=320, image_height=240,
-                  corner_x=[130, 190, 190, 130], corner_y=[90, 90, 150, 150])
-
-    def test_tag5_corrects_in_all_modes_without_jumps_or_losing_hold_and_freezes_on_loss(self):
-        controller = self.controller()
-        controller.room_target = (1.2, 2.1, .5)
-        generation, offset = self.node.generation, self.node.room.yaw_offset
-        reference = self.tag_reference()
-        for mode in ('DISARMED', 'ARMED', 'FLYING'):
-            for i in range(6):
-                self.ros_now += .1
-                self.refresh(yaw=.2)  # IMU drift; tag orientation remains unchanged.
-                self.node.mode_callback(NS(mode=mode))
-                self.uwb()
-                self.node.step()
-                reference.header.stamp = Stamp(self.ros_now)
-                before = self.node.room.yaw_offset
-                odom = self.node.local_odom().copy()
-                room = self.node.room.position(odom)
-                self.node.tag_callback(reference)
-                delta = self.node.room.yaw_offset - before
-                self.assertLessEqual(abs(delta), math.radians(.2)+1e-12)
-                if i >= 2:
-                    self.assertLess(delta, 0)
-                np.testing.assert_allclose(self.node.room.position(odom), room, atol=1e-12)
-                np.testing.assert_array_equal(self.node.local_odom(), odom)
-                self.assertEqual(self.node.generation, generation)
-                after = self.node.room.yaw_offset
-                self.node.tag_callback(reference)
-                self.assertEqual(self.node.room.yaw_offset, after, 'cached frame must not correct twice')
-                self.node.step()
-                controller.current_state_callback(self.messages['pidrone/state'][-1])
-                controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
-                controller.room_generation_callback(NS(data=self.node.generation))
-                self.assertEqual(controller.room_target, (1.2, 2.1, .5))
-        self.assertLess(self.node.room.yaw_offset, offset)
-        offset = self.node.room.yaw_offset
-        for _ in range(8):
-            self.ros_now += .1
-            self.refresh(yaw=.3)
-            self.uwb()
-            self.node.step()
-        self.node.tag_callback(reference)  # Delayed stale observation.
-        self.assertEqual(self.node.room.yaw_offset, offset)
-        self.assertEqual(self.params['~room_yaw_offset'], offset)
-
-    def test_tag_yaw_rejects_bad_observations_and_matches_historical_imu_across_wrap(self):
-        reference = self.tag_reference()
-        offset = self.node.room.yaw_offset
-        # Every invalid condition is repeated across enough frames to calibrate.
-        for field, bad in [('tag_id', 4), ('image_width', 240), ('corner_x', [0]*3),
-                           ('corner_x', [float('nan')]*4), ('corner_y', [-1]*4)]:
-            original = getattr(reference, field)
-            setattr(reference, field, bad)
-            for _ in range(3):
-                self.ros_now += .02
-                self.refresh()
-                reference.header.stamp = Stamp(self.ros_now)
-                self.node.tag_callback(reference)
-            self.assertEqual(self.node.room.yaw_offset, offset)
-            setattr(reference, field, original)
-        for focal_length, model in ((0, 'plumb_bob'), (float('nan'), 'plumb_bob'), (300, 'unknown')):
-            self.node.camera_callback(NS(header=NS(frame_id='camera'), width=320, height=240,
-                K=[focal_length, 0, 160, 0, 300, 120, 0, 0, 1], D=[0]*5, distortion_model=model))
-            for _ in range(3):
-                self.ros_now += .02
-                self.refresh()
-                reference.header.stamp = Stamp(self.ros_now)
-                self.node.tag_callback(reference)
-            self.assertEqual(self.node.room.yaw_offset, offset)
-        self.tag_reference()  # Restore valid calibration.
-        for invalid_stamp in (0, self.ros_now+1, self.ros_now-1):
-            reference.header.stamp = Stamp(invalid_stamp)
-            self.node.tag_callback(reference)
-        self.assertEqual(self.node.room.yaw_offset, offset)
-        self.ros_now += .1  # No matching IMU, though the last IMU is still fresh.
-        reference.header.stamp = Stamp(self.ros_now)
-        self.node.tag_callback(reference)
-        self.assertEqual(self.node.room.yaw_offset, offset)
-        # Observations straddle +/-pi, and detection arrives after a newer turn.
-        self.node.room.yaw_offset = math.pi-.03
-        for bias in (-.01, .01, -.01):
-            self.ros_now += .1
-            self.refresh(yaw=-math.pi/2+bias)
-            reference.header.stamp = Stamp(self.ros_now)
-            self.ros_now += .03
-            self.refresh(yaw=-math.pi/2+.4)
-            self.node.tag_callback(reference)
-        self.assertGreater(self.node.room.yaw_offset, math.pi-.03)
-        self.assertLess(self.node.room.yaw_offset, math.pi)
-        self.assertEqual(len(self.node.tag_samples), 3)
-        self.assertAlmostEqual(abs(self.node.tag_samples[-1][1]), math.pi-.01)
-
-    def test_ekf_motion_and_readiness_work_without_uwb(self):
+    def test_ekf_motion_and_readiness_without_anchors(self):
         self.node = type(self.node)()
-        self.node.mode_callback(NS(mode='DISARMED'))
         self.tick(height=.05)
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
         self.assertEqual(self.messages['pidrone/localization/fused'], [])
-        self.tick(yaw=math.pi/2, velocity=(.1, .2, .03), position=(.4, .5))
+        self.tick(yaw=math.pi/2, velocity=(.1, .2, .03))
         self.node.step()
         msg = self.messages['pidrone/state'][-1]
-        self.assertEqual(msg.header.frame_id, 'ekf_odom')
+        self.assertEqual(msg.header.frame_id, 'map')
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.x, .1)
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.y, .2)
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.z, .03)
-        self.assertEqual(msg.pose_with_covariance.pose.position.x, .4)
+        self.assertAlmostEqual(msg.pose_with_covariance.pose.position.x, 1, delta=.005)
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.tick(ready=False, position=(.4, .5))
         self.node.step()
@@ -465,57 +308,6 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(len(self.messages['pidrone/state']), count)
         self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
 
-
-    def test_startup_heading_waits_for_disarmed_mode_and_fresh_imu(self):
-        self.node.room.yaw_offset = None
-        self.node.invalidate_room()
-        for mode, mode_at, imu in [
-                (None, None, self.node.attitude),
-                ('ARMED', self.ros_now, self.node.attitude),
-                ('FLYING', self.ros_now, self.node.attitude),
-                ('DISARMED', self.ros_now - 1, self.node.attitude),
-                ('DISARMED', self.ros_now, None),
-                ('DISARMED', self.ros_now, (self.ros_now - 1,) + self.node.attitude[1:])]:
-            with self.subTest(mode=mode, mode_at=mode_at, imu=imu):
-                self.node.mode, self.node.mode_at, self.node.attitude = mode, mode_at, imu
-                self.node.step()
-                self.assertIsNone(self.node.room.yaw_offset)
-                # Velocity needs no room heading, but the room pose does.
-                self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-
-    def test_startup_heading_aligns_once_and_preserves_position_height_and_turns(self):
-        self.node = type(self.node)()
-        self.assertIsNone(self.node.room.yaw_offset)
-        self.node.mode_callback(NS(mode='DISARMED'))
-        self.refresh(yaw=math.radians(64))
-        self.report_anchors()
-        self.uwb()
-        self.node.step()
-        self.assertAlmostEqual(self.node.room.yaw_offset, math.radians(26))
-        self.assertEqual(self.params['~room_yaw_offset'], self.node.room.yaw_offset)
-        pose = self.messages['pidrone/localization/fused'][-1].pose.pose
-        self.assertEqual((pose.position.x, pose.position.y, pose.position.z), (1, 2, .5))
-        self.assertAlmostEqual(pose.orientation.z, 0)
-        self.assertAlmostEqual(pose.orientation.w, 1)
-        np.testing.assert_array_equal(self.node.local_odom(), (0, 0))
-        # Turning, disarming and losing UWB must not recapture heading.
-        for mode in ('FLYING', 'DISARMED'):
-            self.ros_now += .05
-            self.refresh(yaw=math.radians(74))
-            self.node.mode_callback(NS(mode=mode))
-            self.node.invalidate_room()
-            self.uwb()
-            self.node.step()
-            self.assertAlmostEqual(self.node.room.yaw_offset, math.radians(26))
-            q = self.messages['pidrone/localization/fused'][-1].pose.pose.orientation
-            self.assertAlmostEqual(q.z, math.sin(math.radians(5)))
-
-    def uwb(self, x=1, y=2):
-        msg = Pose()
-        msg.header.frame_id, msg.header.stamp = 'map', Stamp(self.ros_now)
-        msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z = x, y, 999
-        msg.pose.covariance[0] = msg.pose.covariance[7] = .0225
-        self.node.uwb_callback(msg)
 
     def report_anchors(self, shift=0):
         msg = Layout()
@@ -550,7 +342,8 @@ class FusionNodeTest(unittest.TestCase):
         self.assertAlmostEqual(output.header.stamp.to_sec(), self.ros_now-.05)
         odometry = self.messages['pidrone/localization/odometry'][-1]
         self.assertEqual(odometry.twist, msg.twist)
-        self.assertEqual(odometry.pose, msg.pose)
+        self.assertEqual(odometry.pose.pose.orientation, msg.pose.pose.orientation)
+        self.assertEqual(odometry.pose.pose.position, output.pose_with_covariance.pose.position)
         self.assertEqual(odometry.header.stamp.to_sec(), msg.header.stamp.to_sec())
         count = len(self.messages['pidrone/state'])
         self.node.step()
@@ -559,7 +352,6 @@ class FusionNodeTest(unittest.TestCase):
 
     def test_ekf_reaches_controller_and_invalid_outputs_do_not_renew_it(self):
         self.tick(yaw=math.pi/2, velocity=(.1, .2, 0))
-        self.uwb()
         self.node.step()
         controller = self.controller()
         output = controller.step()
@@ -571,7 +363,7 @@ class FusionNodeTest(unittest.TestCase):
             msg = self.ekf_message()
             if change == 'stale': msg.header.stamp = Stamp(self.ros_now-1)
             elif change == 'future': msg.header.stamp = Stamp(self.ros_now+.1)
-            elif change == 'frame': msg.header.frame_id = 'map'
+            elif change == 'frame': msg.header.frame_id = 'ekf_odom'
             elif change == 'body': msg.child_frame_id = 'wrong_body'
             elif change == 'nan': msg.twist.twist.linear.x = float('nan')
             elif change == 'quaternion': msg.pose.pose.orientation.w = 2
@@ -605,59 +397,48 @@ class FusionNodeTest(unittest.TestCase):
         controller.current_velocity.z = 0
         self.assertGreater(controller.step()[3], level, 'angle boost while leaning')
 
-    def test_tof_remains_z_and_room_corrections_leave_controller_pose_unchanged(self):
+    def test_tof_remains_z_and_room_pose_matches_controller_pose(self):
         state_msg = self.messages['pidrone/state'][-1]
         fused = self.messages['pidrone/localization/fused'][-1]
-        self.assertEqual(state_msg.header.frame_id, 'ekf_odom')
+        self.assertEqual(state_msg.header.frame_id, 'map')
         self.assertEqual(state_msg.pose_with_covariance.pose.position.z, .5)
         self.assertEqual(fused.pose.pose.position.z, .5)
-        self.assertEqual(fused.pose.pose.position.x, 1)
-        self.assertEqual(state_msg.pose_with_covariance.pose.position.x, 0)
+        self.assertEqual(fused.pose.pose.position.x, state_msg.pose_with_covariance.pose.position.x)
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertEqual(self.node.broadcaster.sendTransform.call_count, 2)
         self.node.height.floor_z = .7
         self.tick()
         self.node.step()
         self.assertAlmostEqual(self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.z, .5)
         self.assertAlmostEqual(self.messages['pidrone/localization/fused'][-1].pose.pose.position.z, 1.2)
-        self.assertEqual(self.node.broadcaster.sendTransform.call_args[0][0][2], .7)
+        self.assertAlmostEqual(self.node.broadcaster.sendTransform.call_args[0][0][2], 1.2)
 
-    def test_uwb_never_changes_velocity_and_room_pose_survives_a_1_5_s_gap(self):
-        generation = self.node.generation
-        self.node.mode_callback(NS(mode='FLYING'))
-        for _ in range(20):
-            self.tick()
-            self.uwb()
-            self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        self.tick()
-        velocity = self.node.ekf_odom.twist.twist.linear
-        self.uwb(x=1.3)  # A 0.3 m UWB jump.
+    def test_xy_corrections_are_rate_limited_but_motion_and_velocity_pass_through(self):
+        speed = self.node.max_correction_speed
+        self.tick(position=(1.3, 2))  # A 0.3 m EKF correction from UWB.
         self.node.step()
-        self.assertEqual(self.node.ekf_odom.twist.twist.linear, velocity)
-        x = self.messages['pidrone/localization/fused'][-1].pose.pose.position.x
-        self.assertGreater(x, 1)
-        self.assertLess(x, 1.3)  # Filtered, not copied.
-        controller = self.controller()
-        last_fix = self.node.room.stamp
-        while self.ros_now - last_fix < 1.45:
-            self.tick()
+        x = self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.x
+        self.assertAlmostEqual(x, 1 + speed/60.0)
+        self.assertGreater(self.messages['pidrone/localization/fused'][-1].pose.covariance[0], .25**2)
+        for _ in range(59):
+            self.tick(position=(1.3, 2))
             self.node.step()
-            self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        controller.current_state_callback(self.messages['pidrone/state'][-1])
-        controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
-        self.assertTrue(controller.room_ready())
-        self.assertFalse(controller.room_ready(allow_prediction=False))
-        for _ in range(6):
-            self.tick()
-            self.node.step()
-        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
-        # New UWB restores the same frame without a generation change.
-        self.uwb(x=1.3, y=2.6)
+        state_msg = self.messages['pidrone/state'][-1]
+        self.assertAlmostEqual(state_msg.pose_with_covariance.pose.position.x, 1 + speed, places=6)
+        self.assertEqual(self.messages['pidrone/localization/odometry'][-1].pose.pose.position.x,
+                         state_msg.pose_with_covariance.pose.position.x)
+        # Motion is followed at once; only the remaining gap closes at the limit.
+        before = state_msg.pose_with_covariance.pose.position.x
+        self.tick(yaw=0, position=(1.3 + .5/60.0, 2), velocity=(0, .5, 0))  # Forward is +X at yaw 0.
         self.node.step()
-        self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertEqual(self.node.generation, generation)
+        state_msg = self.messages['pidrone/state'][-1]
+        self.assertAlmostEqual(state_msg.pose_with_covariance.pose.position.x - before, (.5 + speed)/60.0)
+        self.assertAlmostEqual(state_msg.twist_with_covariance.twist.linear.y, .5)
+        # Losing readiness discards the gap rather than carrying it into the next flight.
+        self.tick(ready=False, position=(1.3, 2))
+        self.node.step()
+        self.tick(position=(1.3, 2))
+        self.node.step()
+        self.assertEqual(self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.x, 1.3)
 
     def test_ekf_keeps_local_origin_but_withholds_state_when_tof_is_missing(self):
         topics = [call.args[0] for call in self.ros.Subscriber.call_args_list]
@@ -680,25 +461,23 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(len(self.messages['pidrone/state']), count+1)
 
 
-    def test_uwb_grace_does_not_extend_imu_or_height_freshness(self):
+    def test_imu_and_height_freshness_are_required(self):
         for missing in ('imu', 'height'):
             with self.subTest(missing=missing):
                 self.node = type(self.node)()
-                self.node.mode_callback(NS(mode='DISARMED'))
                 self.refresh()
                 self.report_anchors()
-                self.uwb()
                 self.node.step()
                 controller = self.controller()
                 for _ in range(7):
-                    old_imu = self.node.attitude
+                    old_imu = self.node.attitude_stamp
                     old_attitude = self.node.height.attitude
                     old_range = self.node.height.range
                     self.ros_now += .1
                     self.now += .1
                     self.refresh()
                     if missing == 'imu':
-                        self.node.attitude, self.node.height.attitude = old_imu, old_attitude
+                        self.node.attitude_stamp, self.node.height.attitude = old_imu, old_attitude
                     else:
                         self.node.height.range = old_range
                     self.node.step()
@@ -713,7 +492,7 @@ class FusionNodeTest(unittest.TestCase):
         self.ros_now += .1
         self.report_anchors(shift=.1)
         self.assertGreater(self.node.generation, generation)
-        self.assertIsNone(self.node.room.offset)
+        self.assertTrue(self.node.layout_changed)
         self.refresh()
         self.node.step()
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
@@ -731,7 +510,6 @@ class FusionNodeTest(unittest.TestCase):
         self.node.anchors_callback(report)
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
-        self.assertIsNotNone(self.node.room.offset)
 
     def controller(self):
         script = os.path.join(os.path.dirname(__file__), '..', 'pid_controller.py')

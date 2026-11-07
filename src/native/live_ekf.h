@@ -19,8 +19,8 @@ Quaternion product(const Quaternion& a, const Quaternion& b);
 
 struct Profile {
     double acceleration_scale, gyro_scale, delay;
-    double camera_delay = 0.;
-    Vec acceleration_offset, range_offset, range_beam, camera_offset;
+    double camera_delay = 0., uwb_delay = 0.;
+    Vec acceleration_offset, range_offset, range_beam, camera_offset, uwb_offset;
     Rotation imu_rotation, camera_rotation;
     void validate() const;
 };
@@ -43,10 +43,12 @@ struct Filter {
     Quaternion quaternion() const { return Quaternion(state.data()+6); }
     Vec acceleration_bias() const { return Vec(state.data()+10); }
     Vec gyro_bias() const { return Vec(state.data()+13); }
-    void initialize(double height, const Quaternion&, const Vec& acceleration_bias, const Vec& gyro_bias);
+    void initialize(double x, double y, double xy_variance, double height, const Quaternion&,
+                    const Vec& acceleration_bias, const Vec& gyro_bias);
     bool predict(const Imu&, double end);
     bool project(const std::vector<Imu>&);
-    bool correct(const cv::Mat& innovation, const cv::Mat& observation, const cv::Mat& noise, double gate);
+    bool correct(const cv::Mat& innovation, const cv::Mat& observation, const cv::Mat& noise, double gate,
+                 bool xy_only = false);
     void reset_height(double height, const Vec& attitude_jacobian, double variance);
     cv::Mat public_covariance() const;
     bool navigation_variance_valid() const;
@@ -63,8 +65,11 @@ struct Snapshot {
     Filter filter;
     std::int64_t origin_ns = 0;
     bool initialized = false, reference_valid = true;
+    // Aid ages are measured from the fusion horizon, now minus delay.
+    double delay = 0.;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
     double takeoff_deadline = -1.e100;
+    int uwb_rejections = 0;
     std::string fault;
     bool range_ready(double now) const;
     bool ready(double now, const Filter& estimate, std::string& reason) const;
@@ -91,6 +96,7 @@ public:
                 const std::vector<double>& distortion, const std::string& model);
     void range(std::int64_t stamp, double distance, double minimum, double maximum);
     void image(std::int64_t stamp, const std::vector<unsigned char>& encoded);
+    void uwb(std::int64_t stamp, double x, double y, double variance);
     void imu(std::int64_t stamp, Imu sample, double received);
     Snapshot snapshot() const;
     const Filter& filter() const { return filter_; }
@@ -100,11 +106,13 @@ private:
         bool ground_rest = false;
         std::string sensor;
         Vec rate;
+        cv::Vec2d xy;
         cv::Mat previous, image;
         std::shared_ptr<Camera> camera;
     };
     struct Range { std::int64_t stamp = 0; double value = 0.; } range_;
     struct Initial { Vec force, rate; double range; std::int64_t stamp; };
+    struct Fix { std::int64_t stamp; double x, y, variance; };
     struct AngularInterval { double start, end; Vec rate; };
     Profile profile_;
     Filter filter_;
@@ -113,6 +121,8 @@ private:
     std::deque<AngularInterval> angular_;
     std::map<std::pair<double, std::string>, Measurement> measurements_;
     std::vector<Initial> initial_;
+    std::deque<Fix> uwb_initial_;
+    int uwb_rejections_ = 0;
     std::int64_t origin_ns_ = 0, last_imu_ns_ = 0, rest_since_ = 0;
     double last_imu_ = 0., closed_through_ = -1.e-9, mode_at_ = -1.e100;
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;

@@ -55,7 +55,6 @@ add_message_files(
   State.msg
   StateGroundTruth.msg
   TagDetection.msg
-  TagCorners.msg
   TagMap.msg
   AnchorLayout.msg
   PeerState.msg

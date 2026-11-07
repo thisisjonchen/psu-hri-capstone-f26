@@ -10,8 +10,6 @@ This is the standard loosely coupled layout (ROS REP-105):
   bias state absorbs slowly varying error such as small attitude errors.
   Absolute position fixes have no input into velocity.
 - Local odometry integrates that velocity, so it is smooth and never jumps.
-- RoomOffset: room position = rotated odometry + offset. Absolute fixes (UWB)
-  correct only the offset, which is the map -> odom transform.
 - VerticalFilter: IMU vertical acceleration predicts height and climb rate;
   tilt-compensated ToF height corrects them.
 """
@@ -20,9 +18,9 @@ from collections import deque
 
 import numpy as np
 
-# Maximum age of an accepted absolute fix while odometry carries the room pose.
+# Maximum age of the room pose used for room targets and coordination.
 XY_PREDICTION_TIMEOUT = 1.5
-# Sensor history kept for delayed camera and UWB measurements (seconds).
+# Sensor history kept for delayed measurements (seconds).
 HISTORY_SECONDS = 2.0
 
 
@@ -224,75 +222,6 @@ class VelocityFilter(object):
         self.covariance[:2, :2] = noise
         self.initialized, self.corrected_stamp, self.rejections = True, stamp, 0
         return True, reason
-
-
-class RoomOffset(object):
-    """Room XY = rotate(local odometry, yaw_offset) + offset.
-
-    Absolute fixes correct only the offset, so they never change velocity and
-    a noisy fix moves the room estimate by a filtered fraction of its error.
-    """
-
-    def __init__(self, yaw_offset=None, drift_stddev=0.08, gate=9.21,
-                 max_innovation=1.0, timeout=XY_PREDICTION_TIMEOUT):
-        if not positive(drift_stddev, gate, max_innovation, timeout):
-            raise ValueError('Room drift, gate, innovation limit and timeout must be positive')
-        if yaw_offset is not None and not np.isfinite(yaw_offset):
-            raise ValueError('Room yaw offset must be finite')
-        self.yaw_offset = yaw_offset
-        self.drift_variance = drift_stddev ** 2
-        self.gate, self.max_innovation, self.timeout = gate, max_innovation, timeout
-        self.reset()
-
-    def reset(self):
-        self.offset = None
-        self.offset_covariance = None
-        self.stamp = None
-
-    def ready(self, now):
-        return bool(self.offset is not None and 0 <= now - self.stamp <= self.timeout)
-
-    def position(self, odom):
-        return rotate(odom, self.yaw_offset) + self.offset
-
-    def covariance(self, now):
-        """Offset uncertainty grows with odometry drift since the last fix."""
-        return self.offset_covariance + np.eye(2) * self.drift_variance * max(0.0, now - self.stamp)
-
-    def update(self, position, covariance, stamp, odom):
-        """Correct the offset with an absolute fix and odometry at its timestamp."""
-        if self.yaw_offset is None:
-            return False, 'Room heading is not initialized'
-        if odom is None:
-            return False, 'Fix timestamp is outside odometry history'
-        if not valid_measurement(position, covariance, stamp):
-            return False, 'Invalid absolute position/covariance'
-        if self.stamp is not None and stamp <= self.stamp:
-            return False, 'Repeated or out-of-order absolute fix'
-        position, covariance = np.asarray(position, dtype=float), np.asarray(covariance, dtype=float)
-        observed = position - rotate(odom, self.yaw_offset)
-        if self.offset is None:
-            self.offset, self.offset_covariance, self.stamp = observed, covariance, stamp
-            return True, 'OK'
-        prior = self.covariance(stamp)
-        innovation = observed - self.offset
-        if (np.linalg.norm(innovation) > self.max_innovation
-                or not within_gate(innovation, prior + covariance, self.gate)):
-            return False, 'UWB innovation rejected'
-        self.offset, self.offset_covariance = kalman_update(
-            self.offset, prior, np.eye(2), innovation, covariance)
-        self.stamp = stamp
-        return True, 'OK'
-
-    def correct_yaw(self, delta, odom):
-        """Correct heading without moving the current room position."""
-        if self.yaw_offset is None or not np.isfinite(delta):
-            return False
-        room = self.position(odom) if self.offset is not None else None
-        self.yaw_offset += delta
-        if room is not None:
-            self.offset = room - rotate(odom, self.yaw_offset)
-        return True
 
 
 class VerticalFilter(object):
