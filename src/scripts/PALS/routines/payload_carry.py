@@ -52,8 +52,7 @@ def main():
     parser.add_argument('--distance', type=float, default=1.0,
                         help='forward distance in meters; 0 skips the move (default: 1.0)')
     parser.add_argument('--speed', type=float, default=0.05,
-                        help='forward speed in m/s; keep below the leader limit of about 0.067 '
-                             'so both drones move alike (default: 0.05)')
+                        help='forward speed in m/s, at most 0.066 (default: 0.05)')
     args = parser.parse_args()
     values = (args.height, args.attach_seconds, args.distance, args.speed)
     if any(math.isnan(v) or math.isinf(v) for v in values):

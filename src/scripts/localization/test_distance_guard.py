@@ -1,5 +1,4 @@
 """Hardware-free distance control through the real PID and peer relay parser."""
-import copy
 import math
 from pathlib import Path
 import runpy
@@ -9,9 +8,7 @@ from types import SimpleNamespace as NS
 import numpy as np
 
 from localization import test_fusion as helpers
-from localization.distance_guard import DistanceGuard, automatic_coordination
-from localization.test_ros_node import Stamp
-from localization.test_velocity_controller import SimulatedAxis
+from localization.distance_guard import DistanceGuard
 
 
 class DistanceControlTest(unittest.TestCase):
@@ -63,67 +60,29 @@ class DistanceControlTest(unittest.TestCase):
 
 
 class DistancePIDTest(unittest.TestCase):
+    """The PID no longer applies a distance guard to arming or motion."""
+
     def setUp(self):
         self.fixture = helpers.FusionNodeTest()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture.params['/pidrone/coordination'] = {
-            'drone_id': 'drone2', 'peer_id': 'drone1', 'min_distance': .6, 'max_distance': 2.,
-            'nominal_separation_m': 1.5}
         self.c = self.fixture.controller()
-        self.c.room_generation_callback(NS(data=0))
-        self.c.room_pose = copy.deepcopy(self.c.room_pose)
-        self.c.room_pose.pose.covariance[0] = self.c.room_pose.pose.covariance[7] = .0004
-        self.c.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
+        self.c.flight_readiness.__globals__['monotonic'] = lambda: self.fixture.now
 
-    def peer(self, x=2.2):
-        pose = copy.deepcopy(self.c.room_pose.pose)
-        pose.pose.position.x = x
-        return NS(header=NS(frame_id='map', stamp=Stamp(self.fixture.ros_now)),
-                  drone_id='drone1', recipient_id='drone2', recipient_generation=0,
-                  pose=pose, velocity=NS(x=0, y=0, z=0))
-
-    def test_paired_preflight_requires_fresh_comparable_positions_and_clearance(self):
+    def test_paired_preflight_and_motion_ignore_peer_spacing(self):
         self.c.current_mode_callback(NS(mode='DISARMED'))
         self.c.coordination_selection_callback(NS(data=True))
-        self.assertEqual(self.c.flight_readiness().reason, 'peer_state_stale')
-        peer = self.peer()
-        peer.header.stamp = Stamp(self.fixture.ros_now - .1)
-        self.c.peer_preview_callback(peer)
         report = self.c.flight_readiness()
-        self.assertTrue(report.ready)
+        self.assertTrue(report.ready, 'paired arming must not wait for peer data')
         self.assertTrue(report.paired)
-        self.assertEqual(report.header.stamp.to_sec(), peer.header.stamp.to_sec())
-        self.assertIsNone(self.c.peer_state, 'preflight must not enable the flight guard')
-        reports = []
-        self.c.preflight_pub = NS(publish=reports.append)
-        self.c.calc_error()
-        for _ in range(5):
-            self.c.calc_error()
-        self.assertEqual(len(reports), 1)
-        self.fixture.now += .11
-        self.c.calc_error()
-        self.assertEqual(len(reports), 2)
-        self.assertEqual(reports[-1].header.stamp.to_sec(), peer.header.stamp.to_sec())
-        peer.recipient_generation = 99
-        self.c.calc_error()
-        self.assertEqual(reports[-1].reason, 'reference_mismatch')
-        self.assertEqual(len(reports), 3, 'report readiness changes without waiting')
-        self.assertEqual(self.c.flight_readiness().reason, 'reference_mismatch')
-        peer.recipient_generation = 0
-        peer.pose.covariance[0] = .15 ** 2
-        self.assertEqual(self.c.flight_readiness().reason, 'uncertainty_too_large')
-        peer.pose.covariance[0] = .0004
-        self.c.room_ready_callback(NS(data=False))
-        self.assertEqual(self.c.flight_readiness().reason, 'local_position_unavailable')
-        self.c.room_ready_callback(NS(data=True))
         self.c.current_mode_callback(NS(mode='ARMED'))
-        self.assertFalse(self.c.flight_readiness().ready, 'arming requires a new takeoff check')
-        self.c.peer_preview_callback(peer)
-        self.assertTrue(self.c.flight_readiness().ready)
-        self.fixture.now += .51  # Let the relay time out without advancing ROS time.
-        self.c.peer_preview_callback(peer)
-        self.assertFalse(self.c.flight_readiness().ready)
+        self.c.current_mode_callback(NS(mode='FLYING'))
+        command = helpers.twist()
+        command.linear.y = .05
+        self.c.desired_twist_callback(command)
+        self.c.calc_error()
+        self.assertGreater(self.c.pid_error.y, 0)
+        self.assertEqual(self.c.coordination_status, 'disabled')
 
     def test_solo_preflight_needs_current_selection_and_local_estimate_but_not_uwb(self):
         self.c.current_mode_callback(NS(mode='DISARMED'))
@@ -137,227 +96,6 @@ class DistancePIDTest(unittest.TestCase):
         self.c.local_ready_callback(NS(data=True))
         self.fixture.now += 2.1
         self.assertEqual(self.c.flight_readiness().reason, 'flight_setup_unavailable')
-
-    def test_automatic_identity_and_legacy_flag_cannot_disable_paired_protection(self):
-        geometry = {'nominal_separation_m': 1.5, 'payload_drop_m': .5}
-        settings = {'enabled': False, 'min_distance': 1.2, 'max_distance': 1.8}
-        for own, peer in [('drone1', 'drone2'), ('drone2', 'drone1')]:
-            for suffix in ('', '.local'):
-                config = automatic_coordination(geometry, settings, 'http://%s%s:11311' % (own, suffix))
-                self.assertEqual((config['drone_id'], config['peer_id']), (own, peer))
-                self.fixture.params['/pidrone/coordination'] = config
-                controller = self.fixture.controller()
-                self.assertEqual(controller.distance_guard.follow_peer, own == 'drone2')
-                self.assertEqual(controller.distance_guard.nominal, 1.5)
-                self.assertAlmostEqual(controller.distance_guard.speed_limit, .1 * 2. / 3. if own == 'drone1' else .1)
-        for uri in ('', 'http://localhost:11311', 'http://container-id:11311'):
-            with self.assertRaises(ValueError):
-                automatic_coordination(geometry, settings, uri)
-        # Also check parameters left over from an older ROS session.
-        config['enabled'] = False
-        self.fixture.params['/pidrone/coordination'] = config
-        controller = self.fixture.controller()
-        self.assertIsNotNone(controller.distance_guard)
-        controller.desired_velocity.x = .05
-        controller.calc_error()
-        self.assertEqual(controller.coordination_status, 'peer_state_stale')
-        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
-
-    def test_filters_route_velocity_after_body_conversion_without_replacing_command(self):
-        # At map yaw +90 degrees, body +Y points map -X (away from this peer).
-        q = self.c.room_pose.pose.pose.orientation
-        q.x, q.y, q.z, q.w = helpers.quaternion(yaw=math.pi/2)
-        self.c.peer_state_callback(self.peer(1.5))
-        command = helpers.twist()
-        command.linear.y = -.1  # Route asks to move toward the too-close peer.
-        command.angular.z = .05
-        self.c.desired_twist_callback(command)
-        self.c.calc_error()
-        self.assertGreater(self.c.pid_error.y, 0)
-        self.assertEqual(self.c.desired_velocity.y, -.1)
-        self.assertEqual(self.c.desired_yaw_velocity, .05)
-        self.assertEqual(self.c.desired_position.z, .25)
-        self.assertEqual(self.c.current_mode, 'FLYING')
-        self.assertEqual(self.c.coordination_status, 'too_close')
-
-    def test_blocked_forward_request_logs_filtered_velocity_for_both_drones(self):
-        for own, other in [('drone1', 'drone2'), ('drone2', 'drone1')]:
-            self.fixture.params['/pidrone/coordination'].update(
-                drone_id=own, peer_id=other, min_distance=.85,
-                max_distance=1.15, nominal_separation_m=1.)
-            controller = self.fixture.controller()
-            controller.room_generation_callback(NS(data=0))
-            controller.room_pose = copy.deepcopy(controller.room_pose)
-            controller.room_pose.pose.covariance[0] = .01
-            controller.room_pose.pose.covariance[7] = .01
-            peer = self.peer()
-            peer.drone_id, peer.recipient_id = other, own
-            peer.pose.pose.position.x = controller.room_pose.pose.pose.position.x + 1.
-            peer.header.stamp = Stamp(self.fixture.ros_now - .1)
-            controller.peer_state_callback(peer)
-            command = helpers.twist()
-            command.linear.y = .5
-            controller.desired_twist_callback(command)
-            controller.step()
-            self.assertEqual(controller.coordination_status, 'uncertainty_too_large')
-            self.assertAlmostEqual(controller.current_velocity.y + controller.pid_error.y / 100., 0)
-            message = self.fixture.ros.loginfo_throttle.call_args[0][1]
-            self.assertIn('desired=(0.000, 0.500)', message)
-            self.assertIn('filtered=(0.000, 0.000) coordination=uncertainty_too_large', message)
-            self.assertEqual(controller.current_mode, 'FLYING')
-
-    def test_pair_recovers_from_outward_trim_after_tension_is_removed(self):
-        # Start at rest with learned outward lean balancing the string's pull.
-        # Remove that pull, retaining fresh position/velocity feedback throughout.
-        controls, plants = [], []
-        anchors, positions = [-.5, .5], [-.5, .5]
-        for index, direction in enumerate((-1, 1)):
-            self.fixture.params['/pidrone/coordination'] = dict(
-                drone_id='drone%d' % (index+1), peer_id='drone%d' % (2-index),
-                min_distance=.85, max_distance=1.15, nominal_separation_m=1.)
-            controller = self.fixture.controller()
-            controller.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
-            controller.room_generation_callback(NS(data=0))
-            controller.current_state = copy.deepcopy(controller.current_state)
-            controller.room_pose = copy.deepcopy(self.c.room_pose)
-            controller.room_pose.pose.pose.orientation = NS(x=0., y=0., z=0., w=1.)
-            controller.velocity.integral[0] = direction * .4
-            plant = SimulatedAxis()
-            plant.lean = math.atan2(direction * .4, 9.80665)
-            controls.append(controller)
-            plants.append(plant)
-
-        for _ in range(20*60):
-            self.fixture.now += 1/60.
-            self.fixture.ros_now += 1/60.
-            outputs = []
-            for index, controller in enumerate(controls):
-                pose = controller.room_pose
-                pose.header.stamp = Stamp(self.fixture.ros_now)
-                pose.pose.pose.position.x = positions[index]
-                current = controller.current_state
-                current.header.stamp = Stamp(self.fixture.ros_now)
-                current.pose_with_covariance = copy.deepcopy(pose.pose)
-                current.twist_with_covariance.twist.linear.x = plants[index].velocity
-                controller.current_state_callback(current)
-                peer = self.peer(positions[1-index])
-                peer.drone_id, peer.recipient_id = 'drone%d' % (2-index), 'drone%d' % (index+1)
-                peer.velocity.x = plants[1-index].velocity
-                controller.peer_state_callback(peer)
-                command = helpers.twist()
-                command.linear.x, command.linear.y = helpers.target_velocity(
-                    (anchors[index], 2.), (positions[index], 2.), 0., .3, .1)
-                controller.desired_twist_callback(command)
-                outputs.append(controller.step()[0])
-            for index, plant in enumerate(plants):
-                plant.step(outputs[index])
-                positions[index] += plant.velocity / 60.
-
-        for index, plant in enumerate(plants):
-            self.assertLess(abs(plant.velocity), .03, 'still drifting after the string released')
-            self.assertAlmostEqual(positions[index], anchors[index], delta=.05,
-                                   msg='did not return to the hover position')
-
-    def test_preflight_peer_cannot_activate_or_feed_flight_protection(self):
-        self.c.current_mode_callback(NS(mode='DISARMED'))
-        peer = self.peer()
-        self.c.peer_preview_callback(peer)
-        self.c.calc_error()
-        self.assertIsNone(self.c.peer_state)
-        self.assertEqual(self.c.coordination_status, 'inactive')
-        self.c.coordination_selection_callback(NS(data=False))
-        self.c.current_mode_callback(NS(mode='ARMED'))
-        self.c.current_mode_callback(NS(mode='FLYING'))
-        self.c.peer_preview_callback(self.peer())
-        self.c.calc_error()
-        self.assertEqual(self.c.coordination_status, 'solo')
-        self.assertIsNone(self.c.peer_state)
-        self.assertIsNone(self.c.peer_preview)
-
-    def test_solo_flight_enables_protection_on_peer_arrival_and_keeps_it_until_disarm(self):
-        self.c.current_mode_callback(NS(mode='DISARMED'))
-        self.c.coordination_selection_callback(NS(data=False))
-        self.c.current_mode_callback(NS(mode='ARMED'))
-        self.c.coordination_selection_callback(NS(data=True))  # Second drone connects after arming.
-        self.c.current_mode_callback(NS(mode='FLYING'))
-        command = helpers.twist()
-        command.linear.x = .05
-        self.c.desired_twist_callback(command)
-        self.c.calc_error()
-        self.assertGreater(self.c.pid_error.x, 0)
-        self.assertEqual(self.c.coordination_status, 'solo')
-        self.c.peer_state_callback(self.peer())  # Peer joins the solo flight.
-        self.c.calc_error()
-        self.assertTrue(self.c.coordination_active)
-        self.assertNotEqual(self.c.coordination_status, 'solo')
-        self.c.coordination_selection_callback(NS(data=False))  # Peer/base disconnects.
-        self.fixture.now += .6
-        self.c.calc_error()
-        self.assertTrue(self.c.coordination_active)
-        self.assertEqual(self.c.coordination_status, 'peer_state_stale')
-        self.assertEqual((self.c.pid_error.x, self.c.pid_error.y), (0, 0))
-        self.c.current_mode_callback(NS(mode='DISARMED'))
-        self.c.coordination_selection_callback(NS(data=False))
-        self.fixture.now += 3
-        self.c.current_mode_callback(NS(mode='ARMED'))
-        self.assertTrue(self.c.coordination_active, 'stale solo selection must not bypass the guard')
-
-    def test_room_target_survives_stale_peer_and_resumes_without_recapture(self):
-        target = NS(header=NS(frame_id='map', stamp=Stamp(self.fixture.ros_now)),
-                    pose=NS(position=NS(x=1, y=3)))
-        self.c.room_target_callback(target)
-        peer = self.peer()
-        self.c.peer_state_callback(peer)
-        self.c.calc_error()
-        self.assertGreater(self.c.pid_error.y, 0)
-        self.assertLess(self.c.pid_error.x, 0, 'restore nominal spacing even inside the min/max band')
-        # Let the relay time out without advancing ROS time.
-        self.fixture.now += .6
-        self.c.peer_state_callback(peer)
-        self.c.calc_error()
-        self.assertEqual((self.c.pid_error.x, self.c.pid_error.y), (0, 0))
-        self.assertEqual(self.c.coordination_status, 'peer_state_stale')
-        np.testing.assert_array_equal(self.c.room_target, (1, 3))
-        self.fixture.ros_now += .1
-        peer = self.peer()
-        self.c.peer_state_callback(peer)
-        self.c.calc_error()
-        self.assertGreater(self.c.pid_error.y, 0)
-        self.assertLess(self.c.pid_error.x, 0)
-        np.testing.assert_array_equal(self.c.room_target, (1, 3))
-
-    def test_local_hold_cannot_bypass_filter_and_explicit_disarm_remains_available(self):
-        self.c.peer_state_callback(self.peer(1.5))
-        self.c.position_control = True
-        self.c.desired_position.x = self.c.current_position.x + .5
-        self.c.calc_error()
-        self.assertLess(self.c.pid_error.x, 0)
-        self.c.current_mode_callback(NS(mode='DISARMED'))
-        self.c.calc_error()
-        self.assertIsNone(self.c.peer_state)
-        self.assertEqual(self.c.current_mode, 'DISARMED')
-        self.assertEqual(self.c.coordination_status, 'inactive')
-
-    def test_wrong_identity_reference_and_bad_covariance_do_not_enable_motion(self):
-        for field, value in [('drone_id', 'drone2'), ('recipient_id', 'drone1')]:
-            peer = self.peer()
-            setattr(peer, field, value)
-            self.c.peer_state_callback(peer)
-            self.assertIsNone(self.c.peer_state)
-        peer = self.peer()
-        peer.recipient_generation = 9
-        self.c.peer_state_callback(peer)
-        self.c.calc_error()
-        self.assertEqual(self.c.coordination_status, 'reference_mismatch')
-        self.fixture.ros_now += .1
-        peer = self.peer()
-        peer.pose.covariance[0] = -1
-        self.c.peer_state_callback(peer)
-        self.c.calc_error()
-        self.assertEqual(self.c.coordination_status, 'invalid_covariance')
-        self.assertEqual((self.c.pid_error.x, self.c.pid_error.y), (0, 0))
-        self.c.room_generation_callback(NS(data=1))
-        self.assertIsNone(self.c.peer_state)
 
 
 class PeerRelayTest(unittest.TestCase):
