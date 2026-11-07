@@ -1923,7 +1923,7 @@ test('mapped AprilTags follow changed positions across drones and clear on gener
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });
 
-test('payload map draws one fresh ground estimate and clears it on loss or room reset', () => {
+test('payload map averages fresh estimates, retains the last point and clears it on room reset', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/payload/map_point';
@@ -1938,20 +1938,31 @@ test('payload map draws one fresh ground estimate and clears it on loss or room 
   app.receive(a, topic, point(100, 1));
   assert.equal(dataset.data[0].x, 1);
   app.advanceTime(5);
-  app.receive(b, topic, point(98, 1.2)); // Independent clocks, one displayed marker.
+  // Both observations are fresh even though the drones have independent ROS clocks.
+  app.receive(b, topic, point(98, 1.5, { point: { x: 1.5, y: 3, z: .25 } }));
   assert.equal(dataset.data.length, 1);
-  assert.equal(dataset.data[0].x, 1.2);
+  assert.deepEqual([dataset.data[0].x, dataset.data[0].y], [1.25, 2.5]);
   app.receive(b, topic, point(98, 1.2, { valid: false }));
   assert.equal(dataset.data[0].x, 1);
   app.receive(b, topic, point(98, 1.2));
   assert.equal(dataset.data[0].x, 1);
 
-  app.advanceTime(751);
+  app.receive(b, topic, point(99, 1.5));
+  app.advanceTime(746);
   app.receive(a, topic, point(100, 1));
   for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(dataset.data.length, 0);
+  assert.equal(dataset.data[0].x, 1.5);
+  app.advanceTime(5);
+  for (const callback of app.maintenanceTimers.values()) callback();
+  assert.equal(dataset.data[0].x, 1.5);
+  assert.equal(dataset.label, 'Payload (last seen)');
+  assert.match(app.elements.get('map-stream-status').textContent, /Payload last seen at \(1\.50, 2\.00\) m/);
   app.receive(b, topic, point(101, 1.3));
   assert.equal(dataset.data[0].x, 1.3);
+  assert.equal(dataset.label, 'Payload (ground estimate)');
+  app.receive(b, topic, point(101, 1.3, { valid: false }));
+  assert.equal(dataset.data[0].x, 1.3);
+  assert.equal(dataset.label, 'Payload (last seen)');
   app.receive(b, generation, { data: 2 });
   app.receive(b, '/pidrone/localization/anchors', anchorsAt(102));
   app.receive(b, topic, point(102, 1.3)); // Old room generation.
@@ -1959,6 +1970,10 @@ test('payload map draws one fresh ground estimate and clears it on loss or room 
   app.receive(b, topic, point(102, 1.4, { generation: 2 }));
   assert.equal(dataset.data[0].x, 1.4);
   b.disconnect();
+  assert.equal(dataset.data[0].x, 1.4);
+  assert.equal(dataset.label, 'Payload (last seen)');
+  app.receive(a, '/pidrone/localization/anchors', anchorsAt(103,
+    [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25], [0, 6, 2.25]]));
   assert.equal(dataset.data.length, 0);
 });
 

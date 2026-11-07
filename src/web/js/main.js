@@ -30,6 +30,7 @@ class FleetMap {
     this.anchorStamps = {};
     this.tagReports = {};
     this.payloadReports = {};
+    this.lastPayload = null;
     this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
@@ -208,6 +209,7 @@ class FleetMap {
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           this.tagReports = {};
           this.payloadReports = {};
+          this.lastPayload = null;
         }
         this.room = candidate;
         this.targets = {};
@@ -353,14 +355,16 @@ class FleetMap {
 
   mappedPayload() {
     if (!this.room || !this.layoutUsable) return [];
-    let latest = null;
+    const now = Date.now();
+    let x = 0, y = 0, count = 0;
     for (const [id, report] of Object.entries(this.payloadReports)) {
       if (!report.point || !drones[id].connected || report.frame !== this.room.frame ||
-          Date.now() - report.receivedAt > 750 || !this.hasMatchingReport(id)) continue;
-      // The two ROS clocks are independent. Use dashboard receipt order in time.
-      if (!latest || report.receivedAt >= latest.receivedAt) latest = report;
+          now - report.receivedAt > 750 || !this.hasMatchingReport(id)) continue;
+      x += report.point.x;
+      y += report.point.y;
+      count++;
     }
-    return latest ? [{ x: latest.point.x, y: latest.point.y }] : [];
+    return count ? [{ x: x / count, y: y / count }] : [];
   }
 
   drawTagLabels(chart) {
@@ -575,11 +579,16 @@ class FleetMap {
     });
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
     document.getElementById('target-stop').disabled = !selected || !drones[selected].connected;
+    let lastSeenPayload = null;
     this.chart.data.datasets.forEach(dataset => {
       if (dataset.key === 'apriltags') {
         dataset.data = this.mappedTags().map(tag => ({ x: tag.x, y: tag.y }));
       } else if (dataset.key === 'payload') {
-        dataset.data = this.mappedPayload();
+        const [livePayload] = this.mappedPayload();
+        if (livePayload) this.lastPayload = livePayload;
+        else lastSeenPayload = this.lastPayload;
+        dataset.data = this.lastPayload ? [this.lastPayload] : [];
+        dataset.label = lastSeenPayload ? 'Payload (last seen)' : 'Payload (ground estimate)';
       } else if (dataset.key === 'anchors') {
         dataset.data = this.room ? [...this.room.anchors, this.room.anchors[0]] : [];
       } else if (dataset.key === 'target') {
@@ -618,6 +627,8 @@ class FleetMap {
         return x < xTicks.min || x > xTicks.max || y < yTicks.min || y > yTicks.max;
       }).map(dataset => dataset.label);
     document.getElementById('map-stream-status').textContent = [
+      lastSeenPayload ? 'Payload last seen at (' + lastSeenPayload.x.toFixed(2) + ', ' +
+        lastSeenPayload.y.toFixed(2) + ') m' : '',
       omitted.length ? 'Hidden until aligned to ' + this.room.frame + ': ' + omitted.join(', ') : '',
       outside.length ? 'Outside current view: ' + outside.join(', ') : ''
     ].filter(Boolean).join('. ');
@@ -1004,6 +1015,7 @@ class DroneSession {
         delete fleetMap.anchorReports[this.id];
         delete fleetMap.tagReports[this.id];
         delete fleetMap.payloadReports[this.id];
+        fleetMap.lastPayload = null;
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;

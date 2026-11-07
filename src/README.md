@@ -178,9 +178,12 @@ publishes `/pidrone/payload/map_point`. Set `payload_plane_z` in
 `params/apriltag_mapping.yaml` to the height of the visible yellow surface in
 the map when the payload is resting on the floor. The default 0.0 assumes that
 surface is at floor level. The mapper uses the same camera calibration, mounting
-and fresh fused pose as the floor tags. The dashboard shows a yellow diamond from
-the most recently received usable estimate and hides it when observations expire.
-This marker is for display and assumes the payload is at the configured height.
+and fresh fused pose as the floor tags. The yellow diamond shows the average XY
+of both usable estimates or the single usable estimate when only one is available.
+When neither estimate is usable, the dashboard retains the last point for the
+current map session and labels it as last seen. A room layout or localization
+generation change clears the saved point. The marker assumes the configured
+payload height.
 
 `params/payload_detection.yaml` contains the HSV thresholds and minimum image
 area. Tune these with actual images from the test area. The detector initially
