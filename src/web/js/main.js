@@ -742,11 +742,16 @@ class DroneSession {
           x + w > width || y + h > height || cx < x || cx >= x + w || cy < y || cy >= y + h ||
           area <= 0 || area > w * h))) return this.clearPayload();
     const time = stamp.secs + stamp.nsecs / 1e9;
-    // Cached reports must not keep a frozen camera observation alive.
-    if (this.payloadStamp !== null && time <= this.payloadStamp) return;
-    this.payloadStamp = time;
-    this.payloadReceivedAt = Date.now();
     const status = this.field('payloadStatus');
+    // Cached reports must not keep a frozen camera observation alive.
+    if (this.payloadStamp !== null && time < this.payloadStamp) return;
+    if (time === this.payloadStamp) {
+      // A detector can withdraw a previous detection when the height gate closes.
+      if (message.detected || status.dataset.state !== 'detected') return;
+    } else {
+      this.payloadReceivedAt = Date.now();
+    }
+    this.payloadStamp = time;
     status.textContent = message.detected ? 'Yellow payload detected' : 'No yellow payload detected';
     status.dataset.state = message.detected ? 'detected' : 'none';
     const overlay = this.field('payloadOverlay');
