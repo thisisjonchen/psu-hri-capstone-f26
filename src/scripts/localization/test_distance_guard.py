@@ -11,6 +11,7 @@ import numpy as np
 from localization import test_fusion as helpers
 from localization.distance_guard import DistanceGuard, automatic_coordination
 from localization.test_ros_node import Stamp
+from localization.test_velocity_controller import SimulatedAxis
 
 
 class DistanceControlTest(unittest.TestCase):
@@ -204,6 +205,58 @@ class DistancePIDTest(unittest.TestCase):
             self.assertIn('desired=(0.000, 0.500)', message)
             self.assertIn('filtered=(0.000, 0.000) coordination=uncertainty_too_large', message)
             self.assertEqual(controller.current_mode, 'FLYING')
+
+    def test_pair_recovers_from_outward_trim_after_tension_is_removed(self):
+        # Start at rest with learned outward lean balancing the string's pull.
+        # Remove that pull, retaining fresh position/velocity feedback throughout.
+        controls, plants = [], []
+        anchors, positions = [-.5, .5], [-.5, .5]
+        for index, direction in enumerate((-1, 1)):
+            self.fixture.params['/pidrone/coordination'] = dict(
+                drone_id='drone%d' % (index+1), peer_id='drone%d' % (2-index),
+                min_distance=.85, max_distance=1.15, nominal_separation_m=1.)
+            controller = self.fixture.controller()
+            controller.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
+            controller.room_generation_callback(NS(data=0))
+            controller.current_state = copy.deepcopy(controller.current_state)
+            controller.room_pose = copy.deepcopy(self.c.room_pose)
+            controller.room_pose.pose.pose.orientation = NS(x=0., y=0., z=0., w=1.)
+            controller.velocity.integral[0] = direction * .4
+            plant = SimulatedAxis()
+            plant.lean = math.atan2(direction * .4, 9.80665)
+            controls.append(controller)
+            plants.append(plant)
+
+        for _ in range(20*60):
+            self.fixture.now += 1/60.
+            self.fixture.ros_now += 1/60.
+            outputs = []
+            for index, controller in enumerate(controls):
+                pose = controller.room_pose
+                pose.header.stamp = Stamp(self.fixture.ros_now)
+                pose.pose.pose.position.x = positions[index]
+                current = controller.current_state
+                current.header.stamp = Stamp(self.fixture.ros_now)
+                current.pose_with_covariance = copy.deepcopy(pose.pose)
+                current.twist_with_covariance.twist.linear.x = plants[index].velocity
+                controller.current_state_callback(current)
+                peer = self.peer(positions[1-index])
+                peer.drone_id, peer.recipient_id = 'drone%d' % (2-index), 'drone%d' % (index+1)
+                peer.velocity.x = plants[1-index].velocity
+                controller.peer_state_callback(peer)
+                command = helpers.twist()
+                command.linear.x, command.linear.y = helpers.target_velocity(
+                    (anchors[index], 2.), (positions[index], 2.), 0., .3, .1)
+                controller.desired_twist_callback(command)
+                outputs.append(controller.step()[0])
+            for index, plant in enumerate(plants):
+                plant.step(outputs[index])
+                positions[index] += plant.velocity / 60.
+
+        for index, plant in enumerate(plants):
+            self.assertLess(abs(plant.velocity), .03, 'still drifting after the string released')
+            self.assertAlmostEqual(positions[index], anchors[index], delta=.05,
+                                   msg='did not return to the hover position')
 
     def test_preflight_peer_cannot_activate_or_feed_flight_protection(self):
         self.c.current_mode_callback(NS(mode='DISARMED'))

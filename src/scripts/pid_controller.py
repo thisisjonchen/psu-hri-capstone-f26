@@ -454,12 +454,11 @@ class PIDController(object):
         xy_ready = self.calc_error()
         requested_xy = (self.desired_velocity.x, self.desired_velocity.y)
 
-        # Learn the constant push only from a fresh IMU/flow velocity estimate (no UWB needed).
-        integrate_xy = xy_ready
-        if self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
-            integrate_xy = integrate_xy and self.coordination_status == 'clear'
+        # Learn the constant push only from a fresh IMU/flow velocity estimate.
+        # calc_error already applies the spacing filter to the velocity request.
+        # Keep adapting to that request so spacing corrections can unwind old trim.
         now = rospy.get_time()
-        command = self.velocity.step((self.pid_error.x / 100., self.pid_error.y / 100.), now, integrate_xy)
+        command = self.velocity.step((self.pid_error.x / 100., self.pid_error.y / 100.), now, xy_ready)
         command.append(1500 + self.desired_yaw_velocity)
         tilt_cos = np.cos(self.current_rpy.r) * np.cos(self.current_rpy.p)
         command.append(self.altitude.step(self.desired_position.z, self.current_position.z,
