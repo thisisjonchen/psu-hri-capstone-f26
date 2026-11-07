@@ -161,6 +161,11 @@ It reads `/raspicam_node/image/compressed` and publishes
 panel shows a yellow bounding box and center dot, with separate payload and tag
 status. The detector reports image coordinates.
 
+Yellow detection runs only when `/pidrone/state` reports a fresh EKF height of
+at least 10 cm above the floor. Fusion publishes this state with fresh ToF data.
+A low, missing, or stale height clears the detection while the camera feed
+stays available.
+
 The onboard AprilTag mapper projects the yellow center onto a fixed height and
 publishes `/pidrone/payload/map_point`. Set `payload_plane_z` in
 `params/apriltag_mapping.yaml` to the height of the visible yellow surface in
@@ -170,33 +175,23 @@ and fresh fused pose as the floor tags. The dashboard shows a yellow diamond fro
 the most recently received usable estimate and hides it when observations expire.
 This marker is for display and assumes the payload is at the configured height.
 
-`params/payload_detection.yaml` contains starting HSV thresholds and minimum image
-area. Tune these using actual camera images of the payload under the zone's
-lighting, including shadows and reflections. HSV hue uses OpenCV's 0..179 scale;
-saturation and brightness use 0..255. The node initially chooses the largest
-qualifying yellow region, then associates nearby regions across frames. After a
-short gap it can acquire the largest region again. Similar yellow objects can be
-mistaken for the payload; this does not establish unique identity.
-
-Detection results retain the source image's timestamp and frame. Missing, stale,
-invalid, or non-increasing image timestamps clear the observation. A fresh image
-without a candidate reports no detection immediately; association history is
-retained only for `track_timeout`. The dashboard also expires results when their
-image timestamp stops advancing. Its overlay and MJPEG video arrive separately,
-so a moving box may lag the video; the overlay is a display aid.
+`params/payload_detection.yaml` contains the HSV thresholds and minimum image
+area. Tune these with actual images from the test area. The detector initially
+picks the largest qualifying yellow region and tracks nearby regions in later
+frames. Other yellow objects can be mistaken for the payload. Observations retain
+the source image timestamp, and the box can lag the separately streamed video.
 
 After these changes are copied to a drone, rebuild the catkin workspace to
-generate the ROS messages before starting nodes. For a separate perception-only
-session with an existing camera and ROS master, use:
+generate the ROS messages before starting nodes. To start the detector separately
+with an existing camera, fusion node, and ROS master, run:
 
 ```sh
 roslaunch pidrone_pkg payload_detection.launch
 ```
 
-Check visibility and tune color thresholds while disarmed. The current camera
-stream and OpenCV dependency are reused; no extra camera or trained model is
-required. Camera mounting and lighting still determine whether the payload can
-be detected throughout transport.
+After the EKF initializes on the floor, check visibility while disarmed with
+the drone on a stable support at least 10 cm above the floor and a clear ToF
+path to the floor.
 
 ## Camera Out of Focus
 

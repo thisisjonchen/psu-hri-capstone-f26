@@ -1056,6 +1056,10 @@ test('payload boxes use image coordinates, stay isolated and expire without new 
   assert.equal(a.field('payloadCenter').cx, 70);
   assert.equal(b.field('payloadOverlay').visibility, 'hidden');
   assert.equal(a.field('detection').textContent, 'No tag data');
+  app.receive(a, topic, { ...detected, detected: false });
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
+  app.receive(a, topic, detected);
+  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
   app.advanceTime(800);
   app.receive(a, topic, detected); // Repeated source stamp cannot renew freshness.
   app.receive(b, topic, { ...detected, ...stamp(101) });

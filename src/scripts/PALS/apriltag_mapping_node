@@ -172,7 +172,9 @@ class AprilTagMappingNode(object):
                 self.clear_payload()
                 return
             observation_time = self._stamp(message)
-            if self.last_payload_stamp is not None and observation_time <= self.last_payload_stamp:
+            if (self.last_payload_stamp is not None and
+                    (observation_time < self.last_payload_stamp or
+                     (observation_time == self.last_payload_stamp and message.detected))):
                 return
             self.last_payload_stamp = observation_time
             info = self.camera_info

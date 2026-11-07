@@ -123,8 +123,7 @@ class AprilTagMappingTests(unittest.TestCase):
         self.set_pose(self.now)
         self.node.payload_callback(detection)
         self.assertTrue(self.payload_points[-1].valid)
-        detection.header.stamp = Stamp(100.39)
-        detection.detected = False
+        detection.detected = False  # Height gate can withdraw the same frame.
         self.node.payload_callback(detection)
         self.assertFalse(self.payload_points[-1].valid)
         self.assertEqual(self.maps[-1].tag_ids, [])

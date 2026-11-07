@@ -138,6 +138,7 @@ class PayloadDetectorTests(unittest.TestCase):
             modules[package] = ModuleType(package)
             modules[package + '.msg'] = ModuleType(package + '.msg')
             setattr(modules[package + '.msg'], name, cls)
+        modules['pidrone_pkg.msg'].State = object
         patcher = patch.dict(sys.modules, modules)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -155,11 +156,45 @@ class PayloadDetectorTests(unittest.TestCase):
         return SimpleNamespace(data=data, header=SimpleNamespace(
             stamp=SimpleNamespace(to_sec=lambda: timestamp), frame_id='camera'))
 
-    def observe(self, regions=()):
+    def set_height(self, height):
+        self.node.height_callback(SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: self.now)),
+            pose_with_covariance=SimpleNamespace(pose=SimpleNamespace(
+                position=SimpleNamespace(z=height)))))
+
+    def observe(self, regions=(), height=.2):
         self.now += .1
+        if height is not None:
+            self.set_height(height)
         self.node.image_callback(self.frame(regions))
         self.node.step()
         return self.messages[-1]
+
+    def test_detection_requires_fresh_height_at_or_above_ten_cm(self):
+        yellow = [(40, 80, 80, 100, (0, 255, 255))]
+        with patch.object(self.node, 'detect', wraps=self.node.detect) as detect:
+            self.assertFalse(self.observe(yellow, height=None).detected)
+            self.assertFalse(self.observe(yellow, height=.099).detected)
+            self.now += .1
+            self.node.image_callback(self.frame(yellow))
+            self.now += .1
+            self.set_height(.10)
+            self.node.step()  # Pending image was taken before reaching the threshold.
+            self.assertFalse(self.messages[-1].detected)
+            detect.assert_not_called()
+
+        active = self.observe(yellow, height=.10)
+        self.assertTrue(active.detected)
+        self.now += .1
+        self.set_height(.09)
+        self.node.step()
+        cleared = self.messages[-1]
+        self.assertTrue(cleared.camera_online)
+        self.assertFalse(cleared.detected)
+        self.assertEqual(cleared.header.stamp.to_sec(), active.header.stamp.to_sec())
+        self.assertTrue(self.observe(yellow, height=.10).detected)
+        self.now += .6
+        self.assertFalse(self.observe(yellow, height=None).detected)
 
     def test_yellow_region_reports_pixels_and_clears_when_absent(self):
         yellow = (0, 255, 255)
