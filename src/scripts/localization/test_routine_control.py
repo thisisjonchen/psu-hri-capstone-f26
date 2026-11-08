@@ -438,12 +438,9 @@ class RoutineControlTest(unittest.TestCase):
         drone.wait_for_start = mock.Mock()
         self.globals['Mode'] = lambda name: NS(mode=name)
         drone.mode_pub.publish = drone._mode_received
-        for target, rate, reaches_at, timeout in ((.75, .10, 10.2, 12.),
-                                                 (.75, .10, None, 12.),
-                                                 (.25, .10, None, 10.),
-                                                 (.75, .05, None, 19.)):
-            with self.subTest(target=target, rate=rate, reaches_at=reaches_at):
-                self.fusion.params['/pidrone/altitude/controller'] = {'takeoff_rate': rate}
+        for target, reaches_at in ((.75, 12.), (.75, None), (.25, None)):
+            with self.subTest(target=target, reaches_at=reaches_at):
+                timeout = 20.
                 drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
                 drone.voltage = 16.
                 drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now

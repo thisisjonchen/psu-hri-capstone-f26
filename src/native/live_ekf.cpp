@@ -451,15 +451,22 @@ bool LiveEKF::correct(const Measurement& m) {
     }
     cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
+        ++range_correction_.sequence;
+        range_correction_.stamp=m.stamp;
+        range_correction_.innovation=std::numeric_limits<double>::quiet_NaN();
+        range_correction_.accepted=range_correction_.ground_reset=false;
         const Rotation r=rotation(filter_.quaternion());
         const Vec center=filter_.position()+r*profile_.range_offset,direction=r*profile_.range_beam;
         // Range can correct a height prediction that has crossed below the floor.
         if (direction[2]>=-.1) return false;
         const double predicted=-center[2]/direction[2];
+        range_correction_.innovation=m.value-predicted;
         h.at<double>(0,2)=-1./direction[2];
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
         for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
-        if (filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63)) return true;
+        range_correction_.accepted=filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,
+                                                  cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63);
+        if (range_correction_.accepted) return true;
         // Recover rejected floor range only if rest still holds when delayed fusion reaches it.
         if (!m.ground_rest || mode_!="DISARMED" || !was_stationary_ || !rest_since_
             || m.stamp<(rest_since_-origin_ns_)/1.e9+.5) return false;
@@ -467,6 +474,7 @@ bool LiveEKF::correct(const Measurement& m) {
         if (!std::isfinite(height) || height<=0.) return false;
         const Vec height_jacobian(a(2,0)+m.value*b(2,0),a(2,1)+m.value*b(2,1),a(2,2)+m.value*b(2,2));
         filter_.reset_height(height,height_jacobian,.02*.02*direction[2]*direction[2]);
+        range_correction_.ground_reset=true;
         return true;
     }
     if (m.sensor=="zero_velocity") {
@@ -552,6 +560,7 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
     s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
+    s.range_correction=range_correction_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));

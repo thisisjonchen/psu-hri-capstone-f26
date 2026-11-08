@@ -306,10 +306,6 @@ class Drone(object):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
-        settings = rospy.get_param('/pidrone/altitude/controller', {})
-        takeoff_rate = float(settings.get('takeoff_rate', 0.10))
-        if math.isnan(takeoff_rate) or math.isinf(takeoff_rate) or takeoff_rate <= 0:
-            raise ValueError('Takeoff rate must be finite and positive')
         self.wait_for_start(hold_xy=hold_xy)
         self._check_sensors()
         self._check_battery()
@@ -318,8 +314,7 @@ class Drone(object):
         if self.voltage < self.MIN_START_V:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
-        timeout = (10.0 if continue_after is not None else
-                   max(10.0, max(0.0, height - self.height) / takeoff_rate + 5.0))
+        timeout = 10.0 if continue_after is not None else 20.0
         self.takeoff_pub.publish(Float32(data=height))
         rospy.loginfo('Taking off to %.2f m', height)
         self._set_mode('ARMED')
