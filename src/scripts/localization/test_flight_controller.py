@@ -138,6 +138,23 @@ class FlightControllerLoopTest(unittest.TestCase):
         fc.preflight_callback(report)
         return report
 
+    def test_height_does_not_disarm_but_heartbeat_timeouts_do(self):
+        fc = self.controller()
+        fc.battery_message.vbat = 16.0
+        fc.range = 2.0
+        fc.heartbeat_web_interface = fc.heartbeat_pid_controller = 10.0
+        fc.heartbeat_infrared = fc.heartbeat_state_estimator = 10.0
+        with mock.patch.object(self.env.ros, 'Time', NS(now=lambda: 10.0)), \
+                mock.patch.object(self.env.ros, 'Duration', NS(from_sec=float), create=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(fc.shouldIDisarm())
+            for heartbeat in ('heartbeat_web_interface', 'heartbeat_pid_controller',
+                              'heartbeat_infrared', 'heartbeat_state_estimator'):
+                with self.subTest(heartbeat=heartbeat):
+                    setattr(fc, heartbeat, 6.9)
+                    self.assertTrue(fc.shouldIDisarm())
+                    setattr(fc, heartbeat, 10.0)
+
     def test_arm_and_takeoff_require_readiness_but_disarm_does_not(self):
         fc = self.controller()
         fc.coordination_selection_callback(NS(data=True))

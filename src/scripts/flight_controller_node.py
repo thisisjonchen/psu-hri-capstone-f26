@@ -507,9 +507,6 @@ class FlightController(object):
             print('Check the infrared node\n')
             disarm = True
 
-        if self.range is not None and self.range > 1:
-            print(('\nSafety Failure: too high: ' + str(self.range)))
-            disarm = True
         if curr_time - self.heartbeat_state_estimator > rospy.Duration.from_sec(1):
             print('\nSafety Failure: not receiving a state estimate.')
             print('Check the state_estimator node\n')
