@@ -111,6 +111,13 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .calibration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-3); }
 .calibration-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-3); }
 .calibration-preview { margin: var(--space-3) 0; color: var(--ink); font: var(--type-label)/1.5 var(--font-ui); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.calibration-editor { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3); align-items: start; }
+.calibration-position-map { display: block; width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); }
+.calibration-position-map text { fill: var(--muted); font: 12px var(--font-ui); }
+.calibration-position-map .preview-grid { stroke: var(--line); stroke-width: 1; }
+.calibration-position-map .preview-outline { fill: #0072b20a; stroke: #0072b2; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.calibration-position-map circle { fill: #0072b2; stroke: var(--surface); stroke-width: 2; }
+.calibration-position-map .preview-label { fill: var(--ink); font-weight: 600; }
 .calibration-coordinates { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 1fr)); align-items: center; gap: var(--space-2); }
 .camera-viewport { display: grid; align-items: center; justify-items: start; min-width: 0; min-height: 0; }
 .camera-content { display: grid; gap: 6px; width: 100%; min-width: 0; }

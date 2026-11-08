@@ -39,18 +39,12 @@ class PansBLE:
                     pass
         return asyncio.run_coroutine_threadsafe(guarded(), self.loop).result()
 
-    async def io(self, operation):
-        try:
-            return await asyncio.wait_for(operation, timeout=10)
-        except asyncio.TimeoutError:
-            raise TimeoutError('Laptop Bluetooth operation timed out; check anchor range and other BLE connections')
-
     async def cleanup(self, *operations):
         failed = sys.exc_info()[0] is not None
         first = None
         for operation in operations:
             try:
-                await self.io(operation())
+                await operation()
             except Exception as error:
                 first = first or error
                 logging.warning('Bluetooth cleanup: %s', error)
@@ -63,21 +57,21 @@ class PansBLE:
         guard()
         device = self.devices.get(board['ble'])
         if device is None:
-            device = await self.io(BleakScanner.find_device_by_address(
-                board['ble'], timeout=5))
+            device = await BleakScanner.find_device_by_address(board['ble'], timeout=5)
         if device is None:
             raise ValueError('Anchor %s is not visible from the laptop; scan again' % board.get('id', board['ble']))
         self.devices[board['ble']] = device
-        client = BleakClient(device, timeout=10)
+        # Bleak otherwise applies its own 10-second connection deadline.
+        client = BleakClient(device, timeout=None)
         try:
-            await self.io(client.connect())
+            await client.connect()
             guard()
             yield client
         finally:
             await self.cleanup(client.disconnect)
 
     async def inspect(self, client):
-        values = [bytes(await self.io(client.read_gatt_char(key))) for key in (INFO, MODE, PAN)]
+        values = [bytes(await client.read_gatt_char(key)) for key in (INFO, MODE, PAN)]
         try:
             return decode_info(*values)
         except ValueError:
@@ -89,10 +83,10 @@ class PansBLE:
         from bleak import BleakScanner, BleakError
         self.scan_warnings = []
         self.devices.clear()
-        self.progress('Discovering Bluetooth anchors...')
+        self.progress('Scanning…')
         scanner = BleakScanner()
         try:
-            await self.io(scanner.start())
+            await scanner.start()
             for _ in range(25):
                 guard()
                 await asyncio.sleep(0.2)
@@ -110,7 +104,7 @@ class PansBLE:
                 continue
             self.devices[device.address] = device
             board = {'ble': device.address}
-            self.progress('Checking Bluetooth anchor %s; %d anchors found...' %
+            self.progress('Checking %s · %d found…' %
                           (device.address, len(boards)))
             try:
                 async with self.connect(board, guard) as client:
@@ -141,21 +135,20 @@ class PansBLE:
         rows = {}
         # Verify each board in the same connection used to read its ranges.
         # Measurement does not write coordinates; save retains its full preflight.
-        self.progress('Connecting to initiator %s (anchor 1 of 4)...' % initiator['id'])
+        self.progress('Connecting to %s (1/4)…' % initiator['id'])
         async with self.connect(initiator, guard) as client:
             await self.verify(client, initiator)
-            cluster = await self.io(client.read_gatt_char(CLUSTER))
+            cluster = await client.read_gatt_char(CLUSTER)
             if len(cluster) != 5 or cluster[0] != 0:
                 raise ValueError('Selected initiator is not the network initiator (cluster seat must be 0)')
-            previous = await self.io(client.read_gatt_char(DATA_MODE))
+            previous = await client.read_gatt_char(DATA_MODE)
             received = asyncio.Queue()
             try:
-                await self.io(client.write_gatt_char(DATA_MODE, b'\x01', response=True))
+                await client.write_gatt_char(DATA_MODE, b'\x01', response=True)
                 guard()
                 # Enabling the initiator's distance notifications starts PANS ranging.
-                await self.io(client.start_notify(LOCATION, lambda _, data: received.put_nowait(bytes(data))))
-                self.progress('Ranging from initiator %s; waiting up to %d seconds...' %
-                              (initiator['id'], self.timeout))
+                await client.start_notify(LOCATION, lambda _, data: received.put_nowait(bytes(data)))
+                self.progress('Measuring %s…' % initiator['id'])
                 deadline = self.loop.time() + self.timeout
                 while self.loop.time() < deadline:
                     guard()
@@ -177,7 +170,7 @@ class PansBLE:
         for board in boards:
             if board == initiator:
                 continue
-            self.progress('Reading distances from %s (anchor %d of 4)...' %
+            self.progress('Reading %s (%d/4)…' %
                           (board['id'], len(rows) + 1))
             async with self.connect(board, guard) as client:
                 await self.verify(client, board)
@@ -185,11 +178,11 @@ class PansBLE:
         return rows
 
     async def read_location(self, client, mode, guard):
-        previous = await self.io(client.read_gatt_char(DATA_MODE))
+        previous = await client.read_gatt_char(DATA_MODE)
         try:
-            await self.io(client.write_gatt_char(DATA_MODE, mode, response=True))
+            await client.write_gatt_char(DATA_MODE, mode, response=True)
             guard()
-            return bytes(await self.io(client.read_gatt_char(LOCATION)))
+            return bytes(await client.read_gatt_char(LOCATION))
         finally:
             await self.cleanup(lambda: client.write_gatt_char(DATA_MODE, previous, response=True))
 
@@ -199,15 +192,15 @@ class PansBLE:
         async with AsyncExitStack() as connections:
             clients = []
             for index, board in enumerate(positions, 1):
-                self.progress('Checking %s before saving (anchor %d of 4)...' % (board['id'], index))
+                self.progress('Checking %s (%d/4)…' % (board['id'], index))
                 client = await connections.enter_async_context(self.connect(board, guard))
                 await self.verify(client, board)
                 clients.append(client)
             for index, (board, client) in enumerate(zip(positions, clients), 1):
-                self.progress('Saving and verifying %s (anchor %d of 4)...' % (board['id'], index))
+                self.progress('Saving %s (%d/4)…' % (board['id'], index))
                 guard()
                 on_write()
-                await self.io(client.write_gatt_char(POSITION, encode_position(board), response=True))
+                await client.write_gatt_char(POSITION, encode_position(board), response=True)
                 guard()
                 saved, _ = decode_location(await self.read_location(client, b'\x00', guard))
                 if saved is None or not saved['quality'] or any(

@@ -321,7 +321,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   for (const id of ['fullscreen-toggle', 'separation-guard', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
     'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
-  for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
+  for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'position-map', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
   elements.get('calibration-panel').hidden = true;
   elements.get('calibration-success').hidden = true;
   for (let i = 0; i < 4; i++) {
@@ -336,6 +336,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
   elements.get('fleetGrid').dataset.count = '0';
   const document = {
     createElement: () => element(),
+    createElementNS: (_, tagName) => ({ ...element(), tagName }),
     getElementById: id => elements.get(id),
     addEventListener: (name, callback) => { listeners[name] = callback; },
     dispatchEvent: event => events.push(event)
@@ -1546,7 +1547,7 @@ test('room setup works without drones and reuses saved corners without a scan', 
   assert.equal(app.elements.get('target-send').disabled, true);
 });
 
-test('saved anchor coordinates can be adjusted without polling overwriting edits', async () => {
+test('manual anchor edits preview live without changing saved positions or being overwritten by polling', async () => {
   const app = dashboard({ discover: false });
   const boards = ['980C', '9781', 'CA83', '4D12'].map((id, i) =>
     ({ id, ble: 'uuid-' + i, active: true, initiator: i === 3, pan: null }));
@@ -1558,21 +1559,48 @@ test('saved anchor coordinates can be adjusted without polling overwriting edits
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'edit' });
   const preview = { ...state, stage: 'preview', token: 'edit-token', preview: { positions } };
   app.anchorCalibration.update(preview);
+  const svg = app.elements.get('calibration-position-map');
+  const points = () => svg.children.filter(node => node.tagName === 'circle');
+  const point = id => points().find(node => node['data-anchor'] === id);
+  assert.equal(points().length, 4);
+  const savedTopLeft = app.fleetMap.calibratedRoom.anchors.find(p => p.name === '4D12').x;
+  const previousX = point('4D12').cx;
   const topLeft = app.elements.get('calibration-x-3');
   topLeft.value = '0';
   topLeft.listeners.input();
+  assert.ok(point('4D12').cx < previousX, 'preview moves left with the edited X coordinate');
+  assert.equal(app.fleetMap.calibratedRoom.anchors.find(p => p.name === '4D12').x, savedTopLeft);
+  assert.equal(positions[3].x, 2, 'editing the preview does not mutate saved or server positions');
   app.anchorCalibration.update(preview);
   assert.equal(topLeft.value, '0');
+  assert.equal(point('4D12').cx, point('980C').cx, 'polling keeps the edited preview');
   const topRight = app.elements.get('calibration-x-2');
   topRight.value = '';
   topRight.listeners.input();
   assert.equal(app.elements.get('calibration-apply').disabled, true);
+  assert.equal(points().length, 0, 'incomplete coordinates do not leave stale markers');
   topRight.value = '2';
   topRight.listeners.input();
+  assert.equal(points().length, 4);
+  const xScale = (point('9781').cx - point('980C').cx) / 2;
+  const yScale = (point('9781').cy - point('CA83').cy) / 6;
+  assert.ok(xScale > 0 && Math.abs(xScale - yScale) < 1e-9, 'X/Y use equal scale with +Y up');
+  assert.equal(app.calibrationRequests.length, 1, 'typing sends no save request');
+  app.advanceTime(1600);
+  app.anchorCalibration.refresh();
+  assert.equal(points().length, 0, 'expired preview status is not displayed as current');
+  app.anchorCalibration.update(preview);
+  assert.equal(points().length, 4);
   await app.anchorCalibration.request('apply');
   assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'edit-token',
     positions: boards.map((p, i) => ({ id: p.id, x: [0, 2, 2, 0][i], y: [0, 0, 6, 6][i] })) });
   assert.equal(app.calibrationRequests.length, 2);
+  app.anchorCalibration.update({ ...state, stage: 'complete', preview: null, token: null,
+    layout: { ...state.layout, revision: 'edit-token', verified: true,
+      positions: positions.map((p, i) => ({ ...p, x: [0, 2, 2, 0][i] })) } });
+  assert.equal(points().length, 0);
+  assert.equal(app.elements.get('calibration-preview').hidden, true);
+  assert.equal(app.fleetMap.calibratedRoom.anchors.find(p => p.name === '4D12').x, 0);
 });
 
 test('late status and request timeouts cannot unlock calibration or trigger duplicate requests', async () => {

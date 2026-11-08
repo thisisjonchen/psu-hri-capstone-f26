@@ -312,16 +312,25 @@ class LaptopCancellationTest(unittest.TestCase):
     def test_cancellation_stops_inflight_ble_and_waits_for_cleanup(self):
         ble = PansBLE()
         self.addCleanup(ble.close)
-        started, cleaned = threading.Event(), threading.Event()
+        started = threading.Event()
+        client = mock.AsyncMock()
+        async def read(key):
+            if key == DATA_MODE:
+                return b'\x02'
+            started.set()
+            await asyncio.Event().wait()
+        client.read_gatt_char.side_effect = read
+        ble.devices[BOARDS[0]['ble']] = object()
         async def stalled(guard):
-            try:
-                started.set()
-                await asyncio.Event().wait()
-            finally:
-                cleaned.set()
-        ble._scan = stalled
+            async with ble.connect(BOARDS[0], guard) as connected:
+                await ble.read_location(connected, b'\x01', guard)
+        ble._measure = stalled
         def guard():
             if started.is_set(): raise ValueError('Calibration cancelled')
-        with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
-            ble.call('scan', guard)
-        self.assertTrue(cleaned.is_set())
+        fake = NS(BleakClient=mock.Mock(return_value=client), BleakScanner=mock.Mock())
+        with mock.patch.dict(sys.modules, {'bleak': fake}):
+            with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
+                ble.call('measure', guard)
+        client.write_gatt_char.assert_has_awaits([
+            mock.call(DATA_MODE, b'\x01', response=True), mock.call(DATA_MODE, b'\x02', response=True)])
+        client.disconnect.assert_awaited_once()

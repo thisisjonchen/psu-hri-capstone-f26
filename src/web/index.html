@@ -6,12 +6,12 @@
   <title>PALS: Paired Aerial Lift System</title>
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/xterm.css">
-  <link rel="stylesheet" href="css/main.css?v=20261106-terminal-result">
+  <link rel="stylesheet" href="css/main.css?v=20261108-anchor-preview">
   <script src="js/quaternion.min.js" defer></script>
   <script src="js/eventemitter2.min.js" defer></script>
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
-  <script src="js/anchor-calibration.js?v=20261020-adjust-layout" defer></script>
+  <script src="js/anchor-calibration.js?v=20261108-corner-labels" defer></script>
   <script src="js/main.js?v=20261108-branch-refresh" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
@@ -84,20 +84,23 @@
           </div>
           <p class="map-note" id="calibration-selection" role="status" aria-live="polite" hidden></p>
           <div class="calibration-actions">
-            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>1. Scan</button>
-            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>2. Measure</button>
-            <button class="btn btn-outline-secondary" id="calibration-edit" type="button" disabled>Adjust saved layout</button>
-            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>3. Save</button>
+            <button class="btn btn-outline-secondary" id="calibration-scan" type="button" disabled>Scan</button>
+            <button class="btn btn-outline-secondary" id="calibration-measure" type="button" disabled>Measure</button>
+            <button class="btn btn-outline-secondary" id="calibration-edit" type="button" disabled>Adjust</button>
+            <button class="btn btn-primary" id="calibration-apply" type="button" disabled>Save</button>
             <button class="btn btn-outline-secondary" id="calibration-cancel" type="button" disabled>Cancel</button>
           </div>
           <div class="calibration-preview" id="calibration-preview" hidden>
-            <p>Adjust coordinates in meters, then save. Antennas must share the same height.</p>
+            <p>Antennas must share the same height.</p>
+            <div class="calibration-editor">
+            <svg class="calibration-position-map" id="calibration-position-map" viewBox="0 0 360 240" role="img" aria-label="Anchor position preview"></svg>
             <div class="calibration-coordinates">
-              <span>Anchor</span><span>X (m)</span><span>Y (m)</span>
+              <span aria-hidden="true"></span><span>X (m)</span><span>Y (m)</span>
               <span id="calibration-label-3"></span><input id="calibration-x-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left X"><input id="calibration-y-3" type="number" step="any" min="-1000" max="1000" aria-label="Top left Y">
               <span id="calibration-label-2"></span><input id="calibration-x-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right X"><input id="calibration-y-2" type="number" step="any" min="-1000" max="1000" aria-label="Top right Y">
               <span id="calibration-label-0"></span><input id="calibration-x-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left X"><input id="calibration-y-0" type="number" step="any" min="-1000" max="1000" aria-label="Bottom left Y">
               <span id="calibration-label-1"></span><input id="calibration-x-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right X"><input id="calibration-y-1" type="number" step="any" min="-1000" max="1000" aria-label="Bottom right Y">
+            </div>
             </div>
           </div>
           <p class="map-note" id="calibration-status" role="status" aria-live="polite">Calibration server offline.</p>
