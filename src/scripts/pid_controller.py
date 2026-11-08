@@ -21,10 +21,6 @@ from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE
 from localization.uwb_locator import monotonic
 from pidrone_pkg.msg import AnchorLayout
 from three_dim_vec import Position, Velocity, Error, RPY
-try:
-    from urllib.parse import urlparse
-except ImportError:  # Python 2.7 on the drone
-    from urlparse import urlparse
 
 
 def synchronized(method):
@@ -616,10 +612,6 @@ def main(ControllerClass):
         params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
         with open(os.path.join(params_dir, 'altitude.yaml')) as stream:
             settings = yaml.safe_load(stream)
-        drone = urlparse(os.environ.get('ROS_MASTER_URI', '')).hostname or ''
-        drone = drone[:-6] if drone.endswith('.local') else drone
-        per_drone = settings.pop('hover_throttle_by_drone', None) or {}
-        settings['hover_throttle'] = per_drone.get(drone, settings['hover_throttle'])
         rospy.set_param('/pidrone/altitude/controller', settings)
     if not rospy.has_param('/pidrone/velocity/controller'):
         import yaml
