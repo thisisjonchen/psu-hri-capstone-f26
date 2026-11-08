@@ -1120,6 +1120,7 @@ function updateLayout() {
   if (countChanged) {
     stopHeldKeys();
     feedback('');
+    document.dispatchEvent(new CustomEvent('drone-connections-changed'));
   }
 }
 

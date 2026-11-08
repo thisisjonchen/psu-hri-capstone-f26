@@ -81,12 +81,17 @@ class BranchTest(unittest.TestCase):
         self.repo.mkdir()
         self.cwd = self.repo
         self.mode = 'DISARMED'
+        self.build_code = 0
+        self.build_calls = []
 
-        def command(*args):
+        def command(*args, **kwargs):
             if args[0] == 'git':
                 return subprocess.run(args, cwd=self.cwd, capture_output=True, text=True, timeout=10)
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'pgrep'):
                 return subprocess.CompletedProcess(args, 1, '', '')
+            if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'timeout'):
+                self.build_calls.append((args, kwargs))
+                return subprocess.CompletedProcess(args, self.build_code, '', 'compile failed' if self.build_code else '')
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'bash'):
                 return subprocess.CompletedProcess(args, 0, 'mode: "' + self.mode + '"\n', '')
             self.fail('Unexpected hardware command: ' + repr(args))
@@ -123,6 +128,27 @@ class BranchTest(unittest.TestCase):
         self.assertEqual(result['branch'], 'coordination-stability')
         self.assertEqual(drone_git.git('rev-parse', '--abbrev-ref', '@{upstream}'), 'origin/coordination-stability')
         self.assertEqual((self.repo / 'node.py').read_text(), 'new code\n')
+
+    def test_build_checks_mode_and_revision_and_retries_after_failure(self):
+        branch = 'coordination-stability'
+        revision = drone_git.change('prepare', branch)['target']
+        drone_git.change('switch', branch, revision)
+        self.mode = 'ARMED'
+        with self.assertRaisesRegex(RuntimeError, 'must report DISARMED'):
+            drone_git.change('build', branch, revision)
+        self.mode = 'DISARMED'
+        with self.assertRaisesRegex(RuntimeError, 'checkout changed'):
+            drone_git.change('build', branch, '0' * 40)
+        self.assertEqual(self.build_calls, [])
+        self.build_code = 1
+        with self.assertRaisesRegex(RuntimeError, 'Build failed; nodes were not restarted'):
+            drone_git.change('build', branch, revision)
+        self.build_code = 0
+        self.assertEqual(drone_git.change('build', branch, revision)['branch'], branch)
+        self.assertEqual(len(self.build_calls), 2, 'retry the build even when the revision is unchanged')
+        args, kwargs = self.build_calls[-1]
+        self.assertEqual(args[-1], 'cd ~/catkin_ws && catkin_make --pkg pidrone_pkg -j1')
+        self.assertGreater(kwargs['timeout'], 600)
 
     def test_dirty_armed_and_diverged_repositories_keep_their_work_and_branch(self):
         (self.repo / 'node.py').write_text('local work\n')
@@ -180,30 +206,67 @@ class BranchTest(unittest.TestCase):
         self.assertEqual((self.repo / 'keep.log').read_text(), 'saved log\n')
         self.assertEqual((package / 'keep.log').read_text(), 'package log\n')
 
+    def test_single_drone_status_and_actions_never_contact_the_other_drone(self):
+        for drone in drones.DRONES:
+            with self.subTest(drone=drone), mock.patch.object(
+                    drones, 'branch_command', return_value={'target': 'abc'}) as command:
+                self.assertEqual(drones.branch_results('status', [drone]), {drone: {'target': 'abc'}})
+                command.assert_called_once_with(drone, 'status', None, None)
+                command.reset_mock()
+                drones.branch_action('switch', [drone], 'new')
+                self.assertEqual(command.call_args_list, [mock.call(drone, 'prepare', 'new', None),
+                                                         mock.call(drone, 'switch', 'new', 'abc'),
+                                                         mock.call(drone, 'build', 'new', 'abc')])
+                command.reset_mock()
+                drones.branch_action('clear', [drone])
+                self.assertEqual(command.call_args_list, [mock.call(drone, 'prepare-clear', None, None),
+                                                         mock.call(drone, 'clear', None, None)])
+        with mock.patch.object(drones, 'branch_command') as command:
+            for targets in (None, [], 'drone1', ['drone3'], ['drone1', 'drone1'], [['drone1']]):
+                with self.subTest(targets=targets), self.assertRaises(ValueError):
+                    drones.branch_action('clear', targets)
+            command.assert_not_called()
+
     def test_both_drones_are_prepared_before_mutation_and_partial_failures_are_reported(self):
         for action, branch, preparation in [('switch', 'coordination-stability', 'prepare'),
                                              ('clear', None, 'prepare-clear')]:
             for failure in ({'error': 'Running routine'}, {'error': 'offline'}):
                 prepared = {'drone1': {'target': 'abc'}, 'drone2': failure}
                 with mock.patch.object(drones, 'branch_results', return_value=prepared) as calls:
-                    self.assertEqual(drones.branch_action(action, branch)['phase'], 'prepare')
-                    calls.assert_called_once_with(preparation, branch)
+                    self.assertEqual(drones.branch_action(action, drones.DRONES, branch)['phase'], 'prepare')
+                    calls.assert_called_once_with(preparation, drones.DRONES, branch)
             prepared = {drone: {'target': 'abc'} for drone in drones.DRONES}
             partial = {'drone1': {'branch': 'coordination-stability'}, 'drone2': {'error': 'connection lost'}}
             with mock.patch.object(drones, 'branch_results', side_effect=[prepared, partial]) as calls:
-                self.assertEqual(drones.branch_action(action, branch), {'phase': action, 'drones': partial})
-                self.assertEqual(calls.call_args, mock.call('clear') if action == 'clear'
-                                 else mock.call('switch', branch, 'abc'))
+                self.assertEqual(drones.branch_action(action, drones.DRONES, branch), {'phase': action, 'drones': partial})
+                self.assertEqual(calls.call_args, mock.call('clear', drones.DRONES) if action == 'clear'
+                                 else mock.call('switch', drones.DRONES, branch, 'abc'))
         with mock.patch.object(drones, 'branch_results') as calls:
             for name in ('--force', 'main; reboot', None):
                 with self.assertRaises(ValueError):
-                    drones.branch_action('switch', name)
+                    drones.branch_action('switch', drones.DRONES, name)
             with self.assertRaises(ValueError):
-                drones.branch_action('unknown')
+                drones.branch_action('unknown', drones.DRONES)
             with drones._branch_lock:
                 with self.assertRaisesRegex(RuntimeError, 'already in progress'):
-                    drones.branch_action('clear')
+                    drones.branch_action('clear', drones.DRONES)
             calls.assert_not_called()
+
+        prepared = {drone: {'target': 'abc'} for drone in drones.DRONES}
+        switched = {drone: {'branch': 'new', 'revision': 'abc'} for drone in drones.DRONES}
+        for failed in (False, True):
+            built = dict(switched)
+            if failed:
+                built['drone2'] = {'error': 'compile failed'}
+            with self.subTest(build_failed=failed), mock.patch.object(
+                    drones, 'branch_results', side_effect=[prepared, switched, built]) as calls:
+                result = drones.branch_action('switch', drones.DRONES, 'new')
+                self.assertEqual(result['phase'], 'build')
+                self.assertEqual(calls.call_args_list, [mock.call('prepare', drones.DRONES, 'new'),
+                    mock.call('switch', drones.DRONES, 'new', 'abc'),
+                    mock.call('build', drones.DRONES, 'new', 'abc')])
+                self.assertEqual(result['drones']['drone2']['branch'], 'new')
+                self.assertEqual('error' in result['drones']['drone2'], failed)
 
 
 class RestartTest(unittest.TestCase):

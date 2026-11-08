@@ -1,6 +1,6 @@
 """Python 3 Pi-host helper, sent over SSH by the laptop dashboard.
 
-Only Git working files are changed. This never starts or stops onboard nodes.
+Updates Git working files and builds the ROS package without starting or stopping nodes.
 """
 import json
 import os
@@ -9,11 +9,11 @@ import subprocess
 import sys
 
 
-def command(*args):
+def command(*args, timeout=30):
     environment = dict(os.environ, GIT_TERMINAL_PROMPT='0',
                        GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=5')
     return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          universal_newlines=True, timeout=30, env=environment)
+                          universal_newlines=True, timeout=timeout, env=environment)
 
 
 def git(*args):
@@ -66,7 +66,7 @@ def target(branch):
 def change(action, branch=None, revision=None):
     import fcntl  # Pi host only; the laptop server does not import this helper.
 
-    if action not in ('prepare', 'switch', 'prepare-clear', 'clear'):
+    if action not in ('prepare', 'switch', 'build', 'prepare-clear', 'clear'):
         raise ValueError('Unknown branch action')
     clearing = action in ('prepare-clear', 'clear')
     if not clearing:
@@ -77,6 +77,18 @@ def change(action, branch=None, revision=None):
         except BlockingIOError:
             raise RuntimeError('Another startup or maintenance action is running; try again when it finishes.')
         check_worktree(require_clean=not clearing)
+        if action == 'build':
+            if git('rev-parse', 'HEAD') != revision or git('symbolic-ref', '--short', 'HEAD') != branch:
+                raise RuntimeError('The checkout changed before building; retry.')
+            # Always run the incremental build: this also retries a previously failed build
+            # when Git is already at the requested revision.
+            result = command('docker', 'exec', 'pidrone_pkg', 'timeout', '--kill-after=10s', '600s',
+                             'bash', '-ic', 'cd ~/catkin_ws && catkin_make --pkg pidrone_pkg -j1',
+                             timeout=620)
+            if result.returncode:
+                detail = (result.stdout + '\n' + result.stderr).strip()[-4000:]
+                raise RuntimeError('Build failed; nodes were not restarted.\n' + detail)
+            return state()
         if action == 'prepare-clear':
             return state()
         if action == 'clear':
@@ -85,13 +97,13 @@ def change(action, branch=None, revision=None):
             git('-C', root, 'clean', '-fd')
             result = state()
             if result['dirty']:
-                raise RuntimeError('Some local changes could not be cleared. Check the terminal, then Refresh.')
+                raise RuntimeError('Some local changes could not be cleared. Check the terminal.')
             return result
         if action == 'prepare':
             git('fetch', '--prune', 'origin')
             return {'target': target(branch)}
         if target(branch) != revision:
-            raise RuntimeError('The remote branch changed during preparation; refresh and retry.')
+            raise RuntimeError('The remote branch changed during preparation; retry.')
         if command('git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + branch).returncode == 0:
             git('checkout', branch)
             git('merge', '--ff-only', '--no-edit', 'refs/remotes/origin/' + branch)
@@ -106,8 +118,8 @@ if __name__ == '__main__':
         action = sys.argv[1]
         if action == 'status':
             result = status()
-        elif action in ('prepare', 'switch'):
-            result = change(action, sys.argv[2], sys.argv[3] if action == 'switch' else None)
+        elif action in ('prepare', 'switch', 'build'):
+            result = change(action, sys.argv[2], sys.argv[3] if action != 'prepare' else None)
         elif action in ('prepare-clear', 'clear'):
             result = change(action)
         else:

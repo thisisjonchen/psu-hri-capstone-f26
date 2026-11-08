@@ -46,7 +46,8 @@ def branch_command(drone, action, branch=None, revision=None):
         args.append(branch)
     if revision is not None:
         args.append(revision)
-    code, output = run(drone, 'cd ' + PACKAGE + ' && ' + ' '.join(shlex.quote(arg) for arg in args) + ' 2>&1', timeout=90)
+    code, output = run(drone, 'cd ' + PACKAGE + ' && ' + ' '.join(shlex.quote(arg) for arg in args) + ' 2>&1',
+                       timeout=660 if action == 'build' else 90)
     try:
         result = json.loads(output.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -56,17 +57,22 @@ def branch_command(drone, action, branch=None, revision=None):
     return result
 
 
-def branch_results(action, branch=None, revision=None):
+def branch_results(action, targets, branch=None, revision=None):
+    if (not isinstance(targets, (list, tuple)) or not 1 <= len(targets) <= len(DRONES)
+            or any(drone not in DRONES for drone in targets) or len(set(targets)) != len(targets)):
+        raise ValueError('Select one or two distinct drones')
+    targets = tuple(targets)
+
     def perform(drone):
         try:
             return branch_command(drone, action, branch, revision)
         except (ValueError, RuntimeError) as error:
             return {'error': str(error)}
-    with ThreadPoolExecutor(max_workers=len(DRONES)) as pool:
-        return dict(zip(DRONES, pool.map(perform, DRONES)))
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        return dict(zip(targets, pool.map(perform, targets)))
 
 
-def branch_action(action, branch=None):
+def branch_action(action, targets, branch=None):
     if action not in ('switch', 'clear'):
         raise ValueError('Unknown branch action')
     if action == 'switch' and (not isinstance(branch, str) or
@@ -75,15 +81,21 @@ def branch_action(action, branch=None):
     if not _branch_lock.acquire(blocking=False):
         raise RuntimeError('A branch action is already in progress')
     try:
-        prepared = branch_results('prepare' if action == 'switch' else 'prepare-clear', branch)
+        prepared = branch_results('prepare' if action == 'switch' else 'prepare-clear', targets, branch)
         if any('error' in result for result in prepared.values()):
             return {'phase': 'prepare', 'drones': prepared}
         if action == 'clear':
-            return {'phase': 'clear', 'drones': branch_results('clear')}
+            return {'phase': 'clear', 'drones': branch_results('clear', targets)}
         revisions = {result['target'] for result in prepared.values()}
         if len(revisions) != 1:
-            raise RuntimeError('The drones fetched different revisions. Refresh and retry; no branches changed.')
-        return {'phase': 'switch', 'drones': branch_results('switch', branch, revisions.pop())}
+            raise RuntimeError('The drones fetched different revisions; no branches changed.')
+        revision = revisions.pop()
+        switched = branch_results('switch', targets, branch, revision)
+        if any('error' in result for result in switched.values()):
+            return {'phase': 'switch', 'drones': switched}
+        built = branch_results('build', targets, branch, revision)
+        return {'phase': 'build', 'drones': {
+            drone: dict(switched[drone], **result) for drone, result in built.items()}}
     finally:
         _branch_lock.release()
 

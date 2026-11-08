@@ -112,7 +112,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if url.path == '/api/calibration':
             self.respond(200, self.server.calibration.status())
         elif url.path == '/api/branches':
-            self.respond(200, {'drones': drones.branch_results('status')})
+            try:
+                targets = parse_qs(url.query).get('drone', [])
+                self.respond(200, {'drones': drones.branch_results('status', targets)})
+            except ValueError as error:
+                self.respond(400, {'error': str(error)})
         elif url.path == '/api/routine':
             query = parse_qs(url.query)
             drone = query.get('drone', [''])[0]
@@ -144,7 +148,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 raise ValueError('Request must be between 1 and 4096 bytes')
             request = json.loads(self.rfile.read(length))
             if self.path == '/api/branches':
-                self.respond(200, drones.branch_action(request['action'], request.get('branch')))
+                self.respond(200, drones.branch_action(request['action'], request['drones'], request.get('branch')))
                 return
             if self.path == '/api/execute':
                 drones.execute(request['drone'], request['script'], request['args'])

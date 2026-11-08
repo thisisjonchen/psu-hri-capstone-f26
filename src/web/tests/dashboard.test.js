@@ -5,46 +5,175 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function branchPicker(respond, confirm = () => true) {
-  const elements = new Map(['drone-branches', 'branch-select', 'branch-apply', 'branch-refresh', 'branch-clear',
+function branchPicker(respond, confirm = () => true, connected = ['drone1', 'drone2']) {
+  const elements = new Map(['drone-branches', 'branch-select', 'branch-apply', 'branch-clear',
     'branch-message', 'drone1-branch', 'drone2-branch'].map(id => [id, {
-      value: '', textContent: '', dataset: {}, addEventListener() {},
+      value: '', textContent: '', dataset: {}, listeners: {},
+      addEventListener(name, callback) { this.listeners[name] = callback; },
       replaceChildren(...options) { this.options = options; }
     }]));
   const requests = [];
-  const context = vm.createContext({ document: { getElementById: id => elements.get(id), addEventListener() {} },
+  const restarts = [];
+  const runner = { busy: false, render() {}, async restartTargets(ids) {
+    restarts.push(Array.from(ids));
+    return ids.map(() => ({ status: 'fulfilled', value: 'Nodes restarted and localized' }));
+  } };
+  const listeners = {};
+  const drones = Object.fromEntries(['drone1', 'drone2'].map(id => [id, { connected: connected.includes(id) }]));
+  const context = vm.createContext({ drones, testRunner: runner, document: { getElementById: id => elements.get(id),
+    addEventListener: (name, callback) => { listeners[name] = callback; } },
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     AbortController, setTimeout, clearTimeout, window: { confirm },
     fetch: async (url, options) => {
       requests.push({ url, ...options });
-      return { ok: true, json: async () => respond(options) };
+      return { ok: true, json: async () => JSON.parse(JSON.stringify(await respond(options))) };
     }
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
+  vm.runInContext('routineRunner = testRunner', context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/branches.js'), 'utf8'), context);
-  return { picker: vm.runInContext('new DroneBranches()', context), elements, requests };
+  return { picker: vm.runInContext('new DroneBranches()', context), elements, requests, drones, listeners, restarts, runner };
 }
 
 test('branch picker shows both revisions and switches both to a shared branch', async () => {
+  let confirmed = false, prompt;
   const snapshot = { drone1: { branch: 'dual-hover', revision: '111', branches: ['dual-hover', 'new', 'only-one'] },
     drone2: { branch: 'dual-hover', revision: '222', branches: ['dual-hover', 'new'] } };
-  const app = branchPicker(options => options.method === 'POST' ? { phase: 'switch', drones: {
+  const app = branchPicker(options => options.method === 'POST' ? { phase: 'build', drones: {
     drone1: { branch: 'new', revision: '333' }, drone2: { branch: 'new', revision: '333' }
-  } } : { drones: snapshot });
-  await app.picker.load();
+  } } : { drones: snapshot }, message => { prompt = message; return confirmed; });
+  app.picker.panel.open = true;
+  await app.picker.panel.listeners.toggle();
   assert.equal(app.elements.get('drone1-branch').textContent, 'dual-hover · 111');
   assert.equal(app.elements.get('drone2-branch').textContent, 'dual-hover · 222');
   assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'dual-hover', 'new']);
   app.picker.select.value = 'new';
   app.picker.render();
-  const change = app.picker.switchBoth();
+  await app.picker.switchSelected();
+  assert.equal(app.requests.length, 1, 'cancel must not update or restart anything');
+  assert.deepEqual(app.restarts, []);
+  assert.match(prompt, /Switch and restart Drone 1 and Drone 2 to new/);
+  assert.match(prompt, /props off.*disarmed.*floor.*facing map \+Y/);
+  confirmed = true;
+  const change = app.picker.switchSelected();
   assert.equal(app.picker.apply.disabled, true);
-  await app.picker.switchBoth();
+  assert.equal(app.runner.busy, true, 'routine controls stay locked during update/build');
+  await app.picker.switchSelected();
   await change;
   assert.equal(app.requests.length, 2, 'one status request and one mutation for both drones');
-  assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'new' });
+  assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'new', drones: ['drone1', 'drone2'] });
   assert.equal(app.requests[1].headers['X-Routine-Request'], '1');
   assert.equal(app.elements.get('drone2-branch').textContent, 'new · 333');
-  assert.match(app.picker.message.textContent, /Restart.*rebuild/);
+  assert.match(app.picker.message.textContent, /updated and restarted/);
+  assert.deepEqual(app.restarts, [['drone1', 'drone2']]);
+  assert.equal(app.runner.busy, false);
+});
+
+test('branch picker switches and clears only the single connected drone', async () => {
+  for (const id of ['drone1', 'drone2']) {
+    let response = { drones: { [id]: { branch: 'old', revision: '111', branches: ['old', 'only-here'] } } };
+    let prompt = '';
+    const app = branchPicker(() => response, message => { prompt = message; return true; }, [id]);
+    await app.picker.load();
+    assert.equal(app.requests[0].url, '/api/branches?drone=' + id);
+    assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'old', 'only-here']);
+    assert.equal(app.picker.select.value, 'old');
+    const other = id === 'drone1' ? 'drone2' : 'drone1';
+    assert.equal(app.elements.get(other + '-branch').textContent, 'Not connected');
+    app.picker.select.value = 'only-here';
+    response = { phase: 'build', drones: { [id]: { branch: 'only-here', revision: '222' } } };
+    await app.picker.switchSelected();
+    assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'only-here', drones: [id] });
+    assert.match(app.picker.message.textContent, new RegExp('Drone ' + id.slice(-1) + ' updated'));
+    assert.deepEqual(app.restarts, [[id]]);
+    response = { drones: { [id]: { branch: 'only-here', revision: '222', branches: ['only-here'], dirty: true } } };
+    await app.picker.load();
+    response = { phase: 'clear', drones: { [id]: { dirty: false } } };
+    await app.picker.clearSelected();
+    assert.match(prompt, new RegExp('Clear local changes on Drone ' + id.slice(-1) + '\\?'));
+    assert.doesNotMatch(prompt, new RegExp('Drone ' + other.slice(-1)));
+    assert.deepEqual(JSON.parse(app.requests[3].body), { action: 'clear', drones: [id] });
+    assert.equal(app.picker.apply.disabled, false);
+    assert.deepEqual(app.restarts, [[id]], 'clearing local changes does not restart');
+  }
+});
+
+test('branch targets refresh automatically as drones connect and disconnect', async () => {
+  let response = { drones: { drone1: { branch: 'old', revision: '111', branches: ['old'] } } };
+  const app = branchPicker(() => response, () => true, []);
+  await app.picker.load();
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.picker.apply.disabled, true);
+  assert.equal(app.picker.clear.disabled, true);
+  assert.match(app.picker.message.textContent, /Connect a drone/);
+  app.drones.drone1.connected = true;
+  await app.listeners['drone-connections-changed']();
+  assert.equal(app.requests[0].url, '/api/branches?drone=drone1');
+  assert.equal(app.picker.apply.disabled, false);
+  response.drones.drone2 = { branch: 'old', revision: '111', branches: ['old'] };
+  app.drones.drone2.connected = true;
+  const loading = app.listeners['drone-connections-changed']();
+  assert.equal(app.picker.apply.disabled, true);
+  await app.picker.switchSelected();
+  assert.ok(app.requests.every(request => request.method !== 'POST'), 'wait for fresh branches before switching');
+  await loading;
+  assert.equal(app.requests[1].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.picker.apply.disabled, false);
+  app.drones.drone1.connected = false;
+  await app.picker.switchSelected();
+  assert.equal(app.requests.length, 2, 'recheck targets at the click before sending');
+  response = { drones: { drone2: { branch: 'old', revision: '111', branches: ['old'] } } };
+  await app.listeners['drone-connections-changed']();
+  assert.equal(app.picker.apply.disabled, false);
+  assert.equal(app.requests[2].url, '/api/branches?drone=drone2');
+  assert.equal(app.elements.get('drone1-branch').textContent, 'Not connected');
+  app.drones.drone2.connected = false;
+  await app.listeners['drone-connections-changed']();
+  assert.equal(app.requests.length, 3, 'disconnecting the last drone needs no status request');
+  assert.equal(app.picker.apply.disabled, true);
+  assert.equal(app.picker.clear.disabled, true);
+  assert.deepEqual(app.picker.select.options.map(option => option.value), ['']);
+});
+
+test('connection changes during a branch load discard the stale response and reload once', async () => {
+  let finishLoad;
+  const app = branchPicker(() => app.requests.length === 1 ? new Promise(resolve => { finishLoad = resolve; })
+    : { drones: { drone2: { branch: 'current', revision: '222', branches: ['current'] } } }, () => true, ['drone1']);
+  const loading = app.picker.load();
+  app.drones.drone1.connected = false;
+  await app.listeners['drone-connections-changed']();
+  app.drones.drone2.connected = true;
+  await app.listeners['drone-connections-changed']();
+  assert.equal(app.requests.length, 1, 'connection changes queue one reload');
+  finishLoad({ drones: { drone1: { branch: 'stale', revision: '111', branches: ['stale'] } } });
+  await loading;
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.requests[1].url, '/api/branches?drone=drone2');
+  assert.equal(app.elements.get('drone1-branch').textContent, 'Not connected');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'current · 222');
+  assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'current']);
+  assert.equal(app.picker.apply.disabled, false);
+});
+
+test('connection refresh waits for a switch without changing its confirmed targets', async () => {
+  let finishSwitch;
+  const app = branchPicker(options => options.method === 'POST'
+    ? new Promise(resolve => { finishSwitch = resolve; })
+    : { drones: Object.fromEntries(Object.entries(app.drones).filter(([, drone]) => drone.connected)
+      .map(([id]) => [id, { branch: 'new', revision: '222', branches: ['new'] }])) }, () => true, ['drone1']);
+  await app.picker.load();
+  const switching = app.picker.switchSelected();
+  app.drones.drone2.connected = true;
+  await app.listeners['drone-connections-changed']();
+  assert.equal(app.requests.length, 2, 'do not reload during a switch');
+  assert.deepEqual(JSON.parse(app.requests[1].body).drones, ['drone1']);
+  finishSwitch({ phase: 'build', drones: { drone1: { branch: 'new', revision: '222' } } });
+  await switching;
+  assert.deepEqual(app.restarts, [['drone1']]);
+  assert.equal(app.requests[2].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'new · 222');
+  assert.equal(app.picker.message.textContent, 'Drone 1 updated and restarted.');
+  assert.equal(app.picker.apply.disabled, false);
 });
 
 test('branch picker blocks local changes and reports offline or partially switched drones', async () => {
@@ -58,17 +187,50 @@ test('branch picker blocks local changes and reports offline or partially switch
   app.picker.render();
   assert.equal(app.picker.apply.disabled, true);
   assert.match(app.picker.message.textContent, /Save or stash/);
-  await app.picker.switchBoth();
+  await app.picker.switchSelected();
   assert.equal(app.requests.length, 1);
   response.drones.drone1.dirty = false;
   await app.picker.load();
   response = { phase: 'switch', drones: { drone1: { branch: 'new', revision: '222' }, drone2: { error: 'offline' } } };
-  await app.picker.switchBoth();
+  await app.picker.switchSelected();
   assert.equal(app.elements.get('drone1-branch').textContent, 'new · 222');
   assert.equal(app.elements.get('drone2-branch').textContent, 'offline');
-  assert.match(app.picker.message.textContent, /incomplete.*Refresh/);
+  assert.match(app.picker.message.textContent, /incomplete.*Reopen Branches/);
   assert.equal(app.picker.apply.disabled, true);
   assert.equal(app.picker.clear.disabled, true);
+  assert.deepEqual(app.restarts, [], 'partial switches must not restart either drone');
+});
+
+test('build failures prevent restart and restart failures remain visible', async () => {
+  const snapshot = { drones: { drone1: { branch: 'old', revision: '111', branches: ['new'] } } };
+  let response = snapshot;
+  const app = branchPicker(() => response, () => true, ['drone1']);
+  await app.picker.load();
+  app.picker.select.value = 'new';
+  app.runner.busy = true;
+  await app.picker.switchSelected();
+  assert.equal(app.requests.length, 1, 'do not update during another routine action');
+  app.runner.busy = false;
+  response = { phase: 'build', drones: { drone1: { branch: 'new', revision: '222', error: 'compile failed' } } };
+  await app.picker.switchSelected();
+  assert.deepEqual(app.restarts, []);
+  assert.equal(app.elements.get('drone1-branch').textContent, 'compile failed');
+  assert.equal(app.runner.busy, false);
+  response = snapshot;
+  await app.picker.load();
+  app.picker.select.value = 'new';
+  response = { phase: 'build', drones: { drone1: { branch: 'new', revision: '222' } } };
+  app.runner.restartTargets = async ids => {
+    assert.deepEqual(Array.from(ids), ['drone1']);
+    app.drones.drone1.connected = false;
+    await app.listeners['drone-connections-changed']();
+    return [{ status: 'rejected', reason: new Error('localization unavailable') }];
+  };
+  await app.picker.switchSelected();
+  assert.equal(app.elements.get('drone1-branch').textContent, 'localization unavailable');
+  assert.match(app.picker.message.textContent, /Restart incomplete/);
+  assert.equal(app.runner.busy, false);
+  assert.equal(app.picker.busy, false);
 });
 
 test('clearing local changes requires confirmation and enables switching only after success', async () => {
@@ -81,34 +243,38 @@ test('clearing local changes requires confirmation and enables switching only af
   const app = branchPicker(() => response, message => { prompt = message; return confirmed; });
   await app.picker.load();
   assert.equal(app.picker.clear.disabled, false);
-  await app.picker.clearBoth();
+  await app.picker.clearSelected();
   assert.match(prompt, /Drone 1 and Drone 2/);
   assert.match(prompt, /permanently.*uncommitted.*untracked/);
   assert.equal(app.requests.length, 1, 'cancel must not send a mutation');
   confirmed = true;
   response = { phase: 'prepare', drones: { drone1: {}, drone2: { error: 'Drone must report DISARMED' } } };
-  await app.picker.clearBoth();
+  await app.picker.clearSelected();
   assert.match(app.picker.message.textContent, /No files changed/);
-  assert.equal(app.picker.clear.disabled, true, 'refresh required after a failed safety check');
+  assert.equal(app.picker.clear.disabled, true, 'reload required after a failed safety check');
   response = { drones: {
     drone1: { branch: 'old', revision: '111', branches: ['old', 'new'], dirty: true },
     drone2: { branch: 'old', revision: '222', branches: ['old', 'new'], dirty: true }
   } };
-  await app.picker.load();
+  app.picker.panel.open = false;
+  await app.picker.panel.listeners.toggle();
+  assert.equal(app.requests.length, 2, 'closing the popover does not reload branches');
+  app.picker.panel.open = true;
+  await app.picker.panel.listeners.toggle();
   response = { phase: 'clear', drones: {
     drone1: { branch: 'old', revision: '111', dirty: false },
     drone2: { branch: 'old', revision: '222', dirty: false }
   } };
-  const clearing = app.picker.clearBoth();
+  const clearing = app.picker.clearSelected();
   assert.equal(app.picker.clear.disabled, true);
-  await app.picker.clearBoth();
+  await app.picker.clearSelected();
   await clearing;
   assert.equal(app.requests.length, 4, 'a second click must not duplicate the clear request');
-  assert.deepEqual(JSON.parse(app.requests[3].body), { action: 'clear' });
+  assert.deepEqual(JSON.parse(app.requests[3].body), { action: 'clear', drones: ['drone1', 'drone2'] });
   assert.equal(app.elements.get('drone1-branch').textContent, 'old · 111');
   assert.equal(app.picker.apply.disabled, false);
   assert.equal(app.picker.clear.disabled, true);
-  assert.equal(app.picker.message.textContent, 'Local changes cleared on both drones.');
+  assert.equal(app.picker.message.textContent, 'Local changes cleared on Drone 1 and Drone 2.');
 });
 
 // Test command routing without opening network sockets or contacting hardware.
@@ -240,7 +406,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     clearInterval(id) { timers.delete(id); },
     setTimeout(callback, delay) { callback.delay = delay; retries.push(callback); },
     clearTimeout() {},
-    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }
+    CustomEvent: class { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } }
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/anchor-calibration.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/main.js'), 'utf8'), context);
@@ -937,6 +1103,11 @@ test('restart confirms the combined operation and blocks busy drones', async () 
   runner.terminals[0].running = false;
   await runner.restart();
   assert.deepEqual(restarts, ['drone1', 'drone2']);
+  restarts = [];
+  runner.terminals[0].running = true;
+  await runner.restartTargets(['drone2']);
+  assert.deepEqual(restarts, ['drone2'], 'branch restart must only affect its captured targets');
+  assert.throws(() => runner.restartTargets(['drone1']), /Restart could not start/);
 });
 
 test('a stalled restart response releases the runner without retrying the command', async () => {

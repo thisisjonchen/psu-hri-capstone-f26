@@ -1,5 +1,13 @@
 'use strict';
 
+let routineRunner = null;
+
+function confirmRestart(names, action = 'Restart') {
+  // Fusion locks map +Y when its node starts, so confirm placement first.
+  return window.confirm(action + ' ' + names + '?\n\nLeave powered for a few minutes first. ' +
+    'Keep props off and drones disarmed, still on the floor and facing map +Y until complete.');
+}
+
 // Each terminal attaches to its drone's `pidrone` screen session through the laptop
 // server. Connect opens it in start mode: the nodes start in the terminal, so their
 // startup output is visible. Disconnect detaches; routines keep running on the drone.
@@ -272,11 +280,18 @@ class RoutineRunner {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
     if (this.busy || !targets.length || !targets.every(terminal => terminal.nodes && !terminal.running)) return;
-    // Fusion locks map +Y when its node starts, so confirm placement first.
-    if (!window.confirm('Restart ' + names + '?\n\nLeave powered for a few minutes first. ' +
-        'Keep props off and drones disarmed, still on the floor and facing map +Y until complete.')) return;
+    if (!confirmRestart(names)) return;
+    return this.restartTargets(targets.map(terminal => terminal.id));
+  }
+
+  restartTargets(ids) {
+    const targets = ids.map(id => this.terminals.find(terminal => terminal.id === id));
+    if (this.busy || !targets.length || targets.some(terminal =>
+      !terminal?.enabled || !terminal.nodes || terminal.running)) {
+      throw new Error('Restart could not start. Check connections and stop running routines, then use Restart.');
+    }
     return this.run('Restarting', targets, terminal => terminal.restart());
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => { new RoutineRunner(); });
+document.addEventListener('DOMContentLoaded', () => { routineRunner = new RoutineRunner(); });

@@ -42,6 +42,22 @@ import server
 
 
 class ResponseTest(unittest.TestCase):
+    def test_branch_status_only_queries_explicit_targets(self):
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.allowed = lambda: True
+        handler.respond = mock.Mock()
+        with mock.patch.object(drones, 'branch_command', return_value={'branches': ['main']}) as command:
+            handler.path = '/api/branches?drone=drone2'
+            handler.do_GET()
+            command.assert_called_once_with('drone2', 'status', None, None)
+            handler.respond.assert_called_once_with(200, {'drones': {'drone2': {'branches': ['main']}}})
+            command.reset_mock()
+            for query in ('', '?drone=drone3', '?drone=drone1&drone=drone1'):
+                handler.path = '/api/branches' + query
+                handler.do_GET()
+                self.assertEqual(handler.respond.call_args.args[0], 400)
+            command.assert_not_called()
+
     def test_branch_mutations_require_explicit_action_and_request_header(self):
         handler = DashboardHandler.__new__(DashboardHandler)
         handler.allowed = lambda: True
@@ -50,19 +66,20 @@ class ResponseTest(unittest.TestCase):
         handler.send_error = mock.Mock()
         handler.headers = Message()
         handler.headers['Content-Type'] = 'application/json'
-        with mock.patch.object(drones, 'branch_results', return_value={
-                drone: {'dirty': False} for drone in drones.DRONES}) as calls:
+        with mock.patch.object(drones, 'branch_results', return_value={'drone2': {'dirty': False}}) as calls:
             handler.do_POST()
             handler.send_error.assert_called_once_with(403)
             handler.headers['X-Routine-Request'] = '1'
-            for body in ({'branch': 'main'}, {'action': 'unknown'}, {'action': 'clear'}):
+            for body in ({'branch': 'main'}, {'action': 'unknown', 'drones': ['drone2']},
+                         {'action': 'clear'}, {'action': 'clear', 'drones': ['drone2']}):
                 payload = json.dumps(body).encode()
                 handler.rfile = io.BytesIO(payload)
                 handler.headers['Content-Length'] = str(len(payload))
                 handler.do_POST()
-                if body.get('action') == 'clear':
+                if body.get('action') == 'clear' and 'drones' in body:
                     self.assertEqual(handler.respond.call_args.args[0], 200)
-                    self.assertEqual(calls.call_args_list, [mock.call('prepare-clear', None), mock.call('clear')])
+                    self.assertEqual(calls.call_args_list, [mock.call('prepare-clear', ['drone2'], None),
+                                                           mock.call('clear', ['drone2'])])
                 else:
                     self.assertEqual(handler.respond.call_args.args[0], 400)
                     calls.assert_not_called()
