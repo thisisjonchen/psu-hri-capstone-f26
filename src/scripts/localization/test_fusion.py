@@ -594,6 +594,24 @@ class FusionNodeTest(unittest.TestCase):
         self.assertAlmostEqual(controller.altitude.target, .35)
         self.assertLess(command[3], controller.altitude.hover_throttle)
 
+    def test_altitude_target_during_takeoff_moves_the_ramp_end(self):
+        controller = self.controller()
+        current = state()
+        current.header.stamp = Stamp(self.ros_now)
+        current.pose_with_covariance.pose.orientation.w = 1
+        current.pose_with_covariance.pose.position.z = .05
+        controller.current_state_callback(current)
+        controller.current_mode = 'ARMED'
+        controller.current_mode_callback(NS(mode='FLYING'))
+        controller.desired_pose_callback(NS(position=NS(x=0, y=0, z=.25)))  # 0.25 -> 0.5 m
+        self.ros_now += 1
+        controller.step()
+        self.assertAlmostEqual(controller.altitude.target, .15, msg='climb at the 0.10 m/s ramp')
+        controller.desired_pose_callback(NS(position=NS(x=0, y=0, z=-.45)))  # below the ramp
+        controller.step()
+        self.assertAlmostEqual(controller.altitude.target, .05)
+        self.assertIsNone(controller.altitude.takeoff)
+
     def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
         controller = self.controller()
         command = twist()

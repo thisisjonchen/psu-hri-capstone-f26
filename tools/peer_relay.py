@@ -11,7 +11,7 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
-from localization.distance_guard import fresh, finite, uncertainty, STATE_TIMEOUT
+from localization.state_checks import fresh, finite, uncertainty, STATE_TIMEOUT
 
 
 TOPICS = {
@@ -24,6 +24,11 @@ TOPICS = {
 }
 PEER_TOPIC = '/pidrone/coordination/peer'
 PREVIEW_TOPIC = '/pidrone/coordination/peer_preview'
+# Handshake messages pass to the other drone unchanged; the drones validate them.
+FORWARD = {
+    '/pidrone/coordination/plan': ('/pidrone/coordination/peer_plan', 'pidrone_pkg/Plan'),
+    '/pidrone/coordination/plan_status': ('/pidrone/coordination/peer_plan_status', 'pidrone_pkg/PlanStatus'),
+}
 
 
 def stamp(header):
@@ -33,6 +38,7 @@ def stamp(header):
 class Client:
     def __init__(self, socket):
         self.socket, self.latest, self.error = socket, {}, None
+        self.peer = None
 
     async def start(self):
         for key, (topic, kind) in TOPICS.items():
@@ -40,6 +46,9 @@ class Client:
                              'queue_length': 1, 'throttle_rate': 100})
         for topic in (PEER_TOPIC, PREVIEW_TOPIC):
             await self.send({'op': 'advertise', 'topic': topic, 'type': 'pidrone_pkg/PeerState'})
+        for topic, (peer_topic, kind) in FORWARD.items():
+            await self.send({'op': 'subscribe', 'topic': topic, 'type': kind, 'queue_length': 1})
+            await self.send({'op': 'advertise', 'topic': peer_topic, 'type': kind})
         self.receiver = asyncio.create_task(self.receive())
 
     async def send(self, message):
@@ -50,8 +59,18 @@ class Client:
         try:
             async for packet in self.socket:
                 message = json.loads(packet)
-                if message.get('op') == 'publish' and message.get('topic') in keys:
+                if message.get('op') != 'publish':
+                    continue
+                if message.get('topic') in keys:
                     self.latest[keys[message['topic']]] = (message['msg'], time.monotonic())
+                elif message.get('topic') in FORWARD and self.peer is not None:
+                    # Drop a stalled delivery; the sender re-publishes its state at 10 Hz.
+                    try:
+                        await asyncio.wait_for(self.peer.send({
+                            'op': 'publish', 'topic': FORWARD[message['topic']][0],
+                            'msg': message['msg']}), timeout=.1)
+                    except asyncio.TimeoutError:
+                        pass
         except Exception as error:
             self.error = str(error)
         finally:
@@ -150,6 +169,7 @@ async def relay(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:90
                         url, proxy=None, open_timeout=3, close_timeout=.3, ping_interval=1, ping_timeout=5))))
                     await asyncio.wait_for(clients[-1].start(), timeout=1)
                     stack.callback(clients[-1].receiver.cancel)
+                clients[0].peer, clients[1].peer = clients[1], clients[0]
                 deadline = time.monotonic()
                 while not stop.is_set():
                     try:

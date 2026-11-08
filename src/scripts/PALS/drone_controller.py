@@ -22,6 +22,10 @@ class Drone(object):
 
     # Control Variables
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
+    ARM_SECONDS = 1.0 # Motors idle this long after arming before flying
+    # Send a timed takeoff's height this long after FLYING, after the PID's mode reset;
+    # the ramp is still below takeoff_height then, so the climb is unchanged.
+    TAKEOFF_RETARGET_SECONDS = 0.5
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
     YAW_GAIN = 2.0 # RC microseconds of yaw stick per degree of heading error
@@ -31,6 +35,7 @@ class Drone(object):
     def __init__(self):
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
+        self.takeoff_rate = float(dict(rospy.get_param('/pidrone/altitude/controller', {})).get('takeoff_rate', 0.10))
         self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.30))
         self.xy_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
         if any(math.isnan(v) or math.isinf(v) or v <= 0
@@ -222,8 +227,8 @@ class Drone(object):
             time.sleep(0.02)
         raise RuntimeError('No synchronized start within {:.0f} s; not taking off'.format(timeout))
 
-    def _set_mode(self, name):
-        deadline = time.time() + 5.0
+    def _set_mode(self, name, timeout=5.0):
+        deadline = time.time() + timeout
         while time.time() < deadline:
             self.mode_pub.publish(Mode(name))
             if self.mode == name:
@@ -286,6 +291,54 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
+    def _check_ground_start(self):
+        """Arming checks: still where ready() measured the ground, battery OK."""
+        if self.ground_height is None or self.mode != 'DISARMED':
+            raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
+        self._check_sensors()
+        self._check_battery()
+        if abs(self.height - self.ground_height) > 0.02:
+            raise RuntimeError('Drone is no longer at the measured ground height')
+        if self.voltage < self.MIN_START_V:
+            raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
+                self.voltage))
+
+    def takeoff_at(self, height, start, end, check):
+        """Timed takeoff for paired plans: arm at start, fly at start + ARM_SECONDS
+        holding X/Y, ramp to height at takeoff_rate, and be settled within 5 cm for
+        the last ALTITUDE_SETTLE_SECONDS before end. check() is called every cycle."""
+        self._check_ground_start()
+        self._hold_pose()            # EKF room estimate ready and fresh
+        self._hold_pose(local=True)  # EKF local estimate ready and fresh
+        fly_at = start + self.ARM_SECONDS
+        self._set_mode('ARMED', timeout=fly_at - time.time())
+        self.target_height = self.takeoff_height
+        self.twist_pub.publish(Twist())
+        while time.time() < fly_at:
+            check()
+            self._check_sensors()
+            self._check_battery()
+            rospy.sleep(min(0.05, fly_at - time.time()))
+        self.lock_xy()
+        self._set_mode('FLYING')
+        retarget_at = fly_at + self.TAKEOFF_RETARGET_SECONDS
+        settled_since = None
+        while True:
+            check()
+            self._check_flight('takeoff')
+            self.twist_pub.publish(self._xy_hold_command())
+            now = time.time()
+            if retarget_at is not None and now >= retarget_at:
+                self._set_altitude(height)
+                retarget_at = None
+            settled_since = self._settled_since(height, 0.05, settled_since, now)
+            if now >= end:
+                break
+            rospy.sleep(min(0.1, end - now))
+        if settled_since is None or end - settled_since < self.ALTITUDE_SETTLE_SECONDS:
+            raise RuntimeError('Takeoff was not settled within 5 cm of {:.2f} m by the plan end'.format(height))
+        rospy.loginfo('Timed takeoff settled at %.2f m', self.height)
+
     def takeoff(self, hold_xy=False, continue_after=None):
         """Take off; optionally continue after a timed climb instead of settling."""
         if continue_after is not None and (math.isnan(continue_after) or
@@ -294,16 +347,10 @@ class Drone(object):
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self.wait_for_start(hold_xy=hold_xy)
-        self._check_sensors()
-        self._check_battery()
-        if abs(self.height - self.ground_height) > 0.02:
-            raise RuntimeError('Drone is no longer at the measured ground height')
-        if self.voltage < self.MIN_START_V:
-            raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
-                self.voltage))
+        self._check_ground_start()
         self._set_mode('ARMED')
         self.target_height = self.takeoff_height
-        rospy.sleep(1.0)
+        rospy.sleep(self.ARM_SECONDS)
         self._check_sensors()
         self._check_battery()
         self.twist_pub.publish(self._xy_hold_command())

@@ -26,7 +26,7 @@ from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
 from localization import monotonic
-from localization.distance_guard import fresh, STATE_TIMEOUT
+from localization.state_checks import fresh, STATE_TIMEOUT
 from localization.imu_clock import ImuClock
 import os
 

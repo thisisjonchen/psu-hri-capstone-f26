@@ -403,6 +403,50 @@ class RoutineControlTest(unittest.TestCase):
                     self.assertEqual(drone.height, .25)
                     self.assertGreaterEqual(observed.count(.25), 11)
 
+    def test_timed_takeoff_flies_after_arming_and_must_settle_by_the_plan_end(self):
+        drone = self.drone
+        self.globals['Mode'] = lambda name: NS(mode=name)
+        for final, error in ((.5, None), (.4, 'not settled')):
+            with self.subTest(final=final):
+                drone.mode, drone.height, drone.ground_height, drone.voltage = 'DISARMED', .05, .05, 16.
+                drone.xy_anchor, drone.target_height = None, .25
+                drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
+                start, events = self.fusion.now, {}
+
+                def mode(msg):
+                    events.setdefault(msg.mode, self.fusion.now)
+                    drone._mode_received(msg)
+
+                def tick(seconds):
+                    self.fusion.now += seconds
+                    self.fusion.ros_now += seconds
+                    drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
+                    for pose, receive in ((drone.fused_pose, drone._fused_received),
+                                          (drone.local_pose, drone._local_received)):
+                        pose = copy.deepcopy(pose)
+                        pose.header.stamp = Stamp(self.fusion.ros_now)
+                        receive(pose)
+                    if drone.mode == 'FLYING':
+                        drone.height = final if self.fusion.now > start + 4 else .2
+
+                drone.mode_pub.publish = mode
+                drone.pose_pub.publish = lambda msg: events.setdefault('height', (self.fusion.now, msg.position.z))
+                self.ros.sleep = tick
+                check = mock.Mock()
+                if error:
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        drone.takeoff_at(.5, start, start + 8.5, check)
+                    continue
+                drone.takeoff_at(.5, start, start + 8.5, check)
+                self.assertEqual(events['ARMED'], start)
+                self.assertAlmostEqual(events['FLYING'], start + 1)
+                when, relative = events['height']
+                self.assertGreaterEqual(when, start + 1.5, 'height sent after the PID mode reset')
+                self.assertAlmostEqual(relative, .25)
+                self.assertAlmostEqual(self.fusion.now, start + 8.5)
+                self.assertEqual(drone.xy_anchor, (1, 2))
+                self.assertTrue(check.called)
+
     def test_prototype_moves_after_timed_takeoff_and_lands_on_completion_or_failure(self):
         module = ModuleType('drone_controller')
         module.Drone = mock.Mock()

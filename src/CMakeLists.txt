@@ -58,6 +58,8 @@ add_message_files(
   TagMap.msg
   AnchorLayout.msg
   PeerState.msg
+  Plan.msg
+  PlanStatus.msg
   FlightReadiness.msg
   MspImu.msg
   IntegratedImu.msg
