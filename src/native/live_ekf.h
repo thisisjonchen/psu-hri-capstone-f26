@@ -2,6 +2,7 @@
 #include "ekf.h"
 #include <opencv2/core.hpp>
 #include <array>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <limits>
@@ -63,8 +64,17 @@ Output body_output(const Filter&, const Vec& angular_rate);
 bool vertical_output(const Filter& estimate, const Filter* previous,
                      const std::vector<Imu>& intervals, std::array<double,2>& output);
 
+struct RangeTrace {
+    std::uint64_t sequence = 0;
+    double stamp = 0., innovation = std::numeric_limits<double>::quiet_NaN();
+    double height_before = 0., height_after = 0., velocity_before = 0., velocity_after = 0.;
+    double bias_up_before = 0., bias_up_after = 0.;
+    bool accepted = false, ground_reset = false;
+};
+
 struct Snapshot {
     Filter filter;
+    RangeTrace range_trace;
     std::int64_t origin_ns = 0;
     bool initialized = false, reference_valid = true;
     // Aid ages are measured from the fusion horizon, now minus delay.
@@ -118,6 +128,7 @@ private:
     struct AngularInterval { double start, end; Vec rate; };
     Profile profile_;
     Filter filter_;
+    RangeTrace range_trace_;
     std::shared_ptr<Camera> camera_;
     std::deque<Imu> imu_;
     std::deque<AngularInterval> angular_;

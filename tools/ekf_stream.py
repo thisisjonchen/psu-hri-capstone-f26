@@ -20,6 +20,7 @@ TOPICS = (
     '/raspicam_node/image/compressed',
     '/raspicam_node/camera_info',
     '/pidrone/state', '/pidrone/ekf/odometry', '/pidrone/localization/odometry',
+    '/pidrone/ekf/vertical_trace',
     '/pidrone/localization/uwb',
 )
 TELEMETRY_TOPICS = tuple(topic for topic in TOPICS if not topic.startswith('/raspicam_node/'))
@@ -67,7 +68,8 @@ def stream_ros(seconds, images=True):
     # Reserve stdout for the recording.
     output, sys.stdout = sys.stdout, sys.stderr
     topics = TOPICS if images else TELEMETRY_TOPICS
-    rospy.init_node('ekf_capture' if images else 'telemetry_capture', anonymous=True, log_level=rospy.WARN)
+    rospy.init_node('ekf_capture' if images else 'telemetry_capture', anonymous=True,
+                   argv=[sys.argv[0], '__log:=/dev/null'], disable_rosout=True, log_level=rospy.WARN)
     root = rospkg.RosPack().get_path('pidrone_pkg')
     with open(os.path.join(root, 'params', 'multiwii.yaml')) as calibration:
         calibration_yaml = calibration.read()

@@ -8,8 +8,10 @@
 #include <std_msgs/Bool.h>
 #include <pidrone_pkg/Mode.h>
 #include <pidrone_pkg/IntegratedImu.h>
+#include <pidrone_pkg/EkfVerticalTrace.h>
 #include <pidrone_pkg/State.h>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -66,6 +68,7 @@ public:
         state_pub_=node_.advertise<pidrone_pkg::State>("pidrone/ekf/state",1);
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
         ready_pub_=node_.advertise<std_msgs::Bool>("pidrone/ekf/local_ready",1);
+        trace_pub_=node_.advertise<pidrone_pkg::EkfVerticalTrace>("pidrone/ekf/vertical_trace",10);
         const auto transport=ros::TransportHints().tcpNoDelay();
         imu_sub_=node_.subscribe("pidrone/imu_integrated",100,&Node::imu,this,transport);
         range_sub_=node_.subscribe("pidrone/range",10,&Node::range,this,transport);
@@ -84,7 +87,7 @@ private:
     ros::NodeHandle node_,private_;
     pals::Profile profile_;
     pals::LiveEKF filter_;
-    ros::Publisher state_pub_,odom_pub_,ready_pub_;
+    ros::Publisher state_pub_,odom_pub_,ready_pub_,trace_pub_;
     ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_,uwb_sub_;
     ros::WallTimer timer_;
     std::string body_frame_,frame_;
@@ -99,6 +102,8 @@ private:
     struct TimedImu { std::int64_t stamp; pals::Imu sample; pals::Vec rate; };
     std::deque<TimedImu> history_;
     std::int64_t last_imu_=0,last_published_=0;
+    std::int64_t last_trace_stamp_=0;
+    std::uint64_t last_trace_range_=0;
     std::uint32_t last_sequence_=0,last_sample_us_=0;
     pals::Filter last_output_;
     std::array<double,2> vertical_output_ = {};
@@ -232,6 +237,31 @@ private:
         state_pub_.publish(state); odom_pub_.publish(odom);
         last_output_=estimate; vertical_output_=vertical; last_published_=stamp;
         std::string reason; publish_ready(s.ready(after,estimate,reason),reason);
+        publish_trace(s,estimate,vertical,stamp);
+    }
+    void publish_trace(const pals::Snapshot& s,const pals::Filter& projected,
+                       const std::array<double,2>& output,std::int64_t stamp) noexcept {
+        // Telemetry failure must not enter the estimator's fault/disarm path.
+        try {
+            if (!trace_pub_.getNumSubscribers() || (s.range_trace.sequence==last_trace_range_
+                && stamp-last_trace_stamp_<100000000LL)) return;
+            pidrone_pkg::EkfVerticalTrace msg;
+            msg.header.stamp.fromNSec(stamp); msg.header.frame_id=frame_;
+            msg.fusion_stamp.fromNSec(s.origin_ns+std::llround(s.filter.stamp*1.e9));
+            const auto& r=s.range_trace;
+            if (r.sequence) msg.range_stamp.fromNSec(s.origin_ns+std::llround(r.stamp*1.e9));
+            msg.range_sequence=r.sequence; msg.range_accepted=r.accepted;
+            msg.range_ground_reset=r.ground_reset; msg.range_innovation=r.innovation;
+            msg.range_height_before=r.height_before; msg.range_height_after=r.height_after;
+            msg.range_velocity_before=r.velocity_before; msg.range_velocity_after=r.velocity_after;
+            msg.range_bias_up_before=r.bias_up_before; msg.range_bias_up_after=r.bias_up_after;
+            msg.fusion_height=s.filter.state[2]; msg.fusion_velocity=s.filter.state[5];
+            msg.accel_bias_up=(pals::rotation(s.filter.quaternion())*s.filter.acceleration_bias())[2];
+            msg.projected_height=projected.state[2]; msg.projected_velocity=projected.state[5];
+            msg.output_height=output[0]; msg.output_velocity=output[1];
+            trace_pub_.publish(msg);
+            last_trace_stamp_=stamp; last_trace_range_=r.sequence;
+        } catch (...) {}
     }
     void work() {
         while (true) {

@@ -411,7 +411,22 @@ void LiveEKF::drain(double through) {
         if (sample.stamp==stamp) imu_.pop_front();
         while (!measurements_.empty() && measurements_.begin()->first.first==stamp) {
             Measurement m=measurements_.begin()->second; measurements_.erase(measurements_.begin());
+            if (m.sensor=="range") {
+                ++range_trace_.sequence;
+                range_trace_.stamp=m.stamp;
+                range_trace_.innovation=std::numeric_limits<double>::quiet_NaN();
+                range_trace_.ground_reset=false;
+                range_trace_.height_before=filter_.state[2];
+                range_trace_.velocity_before=filter_.state[5];
+                range_trace_.bias_up_before=(rotation(filter_.quaternion())*filter_.acceleration_bias())[2];
+            }
             const bool accepted=correct(m);
+            if (m.sensor=="range") {
+                range_trace_.accepted=accepted;
+                range_trace_.height_after=filter_.state[2];
+                range_trace_.velocity_after=filter_.state[5];
+                range_trace_.bias_up_after=(rotation(filter_.quaternion())*filter_.acceleration_bias())[2];
+            }
             check_reference(stamp);
             if (accepted && (m.sensor=="range" || m.sensor=="camera" || m.sensor=="zero_velocity")) {
                 last_aid_[m.sensor]=stamp;
@@ -456,6 +471,7 @@ bool LiveEKF::correct(const Measurement& m) {
         // Range can correct a height prediction that has crossed below the floor.
         if (direction[2]>=-.1) return false;
         const double predicted=-center[2]/direction[2];
+        range_trace_.innovation=m.value-predicted;
         h.at<double>(0,2)=-1./direction[2];
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
         for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
@@ -467,6 +483,7 @@ bool LiveEKF::correct(const Measurement& m) {
         if (!std::isfinite(height) || height<=0.) return false;
         const Vec height_jacobian(a(2,0)+m.value*b(2,0),a(2,1)+m.value*b(2,1),a(2,2)+m.value*b(2,2));
         filter_.reset_height(height,height_jacobian,.02*.02*direction[2]*direction[2]);
+        range_trace_.ground_reset=true;
         return true;
     }
     if (m.sensor=="zero_velocity") {
@@ -551,6 +568,7 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 }
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
+    s.range_trace=range_trace_;
     s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
