@@ -6,7 +6,7 @@ import threading
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from calibration.anchor_calibration import (SERVICE, MODE, PAN, DATA_MODE, LOCATION,
-                                             INFO, POSITION, CLUSTER, decode_info,
+                                             INFO, POSITION, CLUSTER, MIN_RANGE_QUALITY, decode_info,
                                              decode_location, encode_position)
 
 
@@ -159,11 +159,12 @@ class PansBLE:
                     if not payload:
                         continue
                     _, ranges = decode_location(payload)
-                    if all(board['id'] in ranges for board in boards if board != initiator):
+                    if all(board['id'] in ranges and ranges[board['id']][1] >= MIN_RANGE_QUALITY
+                           for board in boards if board != initiator):
                         rows[initiator['id']] = ranges
                         break
                 if initiator['id'] not in rows:
-                    raise ValueError('No complete initiator ranges; check anchor line of sight')
+                    raise ValueError('No complete good-quality initiator ranges; check anchor line of sight')
             finally:
                 await self.cleanup(lambda: client.stop_notify(LOCATION),
                                    lambda: client.write_gatt_char(DATA_MODE, previous, response=True))
@@ -196,10 +197,12 @@ class PansBLE:
                 client = await connections.enter_async_context(self.connect(board, guard))
                 await self.verify(client, board)
                 clients.append(client)
+            guard()
+            # One durable checkpoint covers every write in this save.
+            on_write()
             for index, (board, client) in enumerate(zip(positions, clients), 1):
                 self.progress('Saving %s (%d/4)…' % (board['id'], index))
                 guard()
-                on_write()
                 await client.write_gatt_char(POSITION, encode_position(board), response=True)
                 guard()
                 saved, _ = decode_location(await self.read_location(client, b'\x00', guard))

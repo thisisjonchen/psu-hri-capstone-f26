@@ -273,6 +273,11 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             finally:
                 active.remove(board['id'])
         ble.connect = connect
+        low_quality = dict(ROWS['0001'], **{'0002': (1, 49)})
+        def notify(uuid, callback):
+            for row in ({}, {'0002': ROWS['0001']['0002']}, low_quality, ROWS['0001']):
+                callback(None, payload(row))
+        clients['0001'].start_notify.side_effect = notify
         boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 0, None])]
         rows = await ble._measure(boards, lambda: None)
         self.assertEqual(rows, ROWS)
@@ -287,13 +292,19 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         await ble._save(positions, on_write, lambda: None)
         self.assertEqual(connections, [board['id'] for board in positions])
         self.assertFalse(active)
-        self.assertEqual(on_write.call_count, 4)
+        on_write.assert_called_once()
         for board in positions:
             clients[board['id']].write_gatt_char.assert_any_await(POSITION, encode_position(board), response=True)
         saved['0001']['x'] = 10
         with self.assertRaisesRegex(ValueError, 'failed verification'):
             await ble._save(positions, on_write, lambda: None)
         self.assertFalse(active)
+        clients['0001'].start_notify.side_effect = lambda uuid, callback: callback(None, payload(low_quality))
+        ble.timeout = 0.01
+        with self.assertRaisesRegex(ValueError, 'No complete good-quality initiator ranges'):
+            await ble._measure(BOARDS, lambda: None)
+        self.assertFalse(active)
+        self.assertEqual(set(modes.values()), {b'\x02'})
         clients['0001'].start_notify.side_effect = ValueError('cancelled')
         with self.assertRaisesRegex(ValueError, 'cancelled'):
             await ble._measure(BOARDS, lambda: None)

@@ -13,6 +13,7 @@ LOCATION = '003bbdf2-c634-4b3d-ab56-7ec889b89a37'
 INFO = '1e63b1eb-d4ed-444e-af54-c1e965192501'
 POSITION = 'f0f26c9b-2c8c-49ac-ab60-fe03def1b40c'
 CLUSTER = '17b1613e-98f2-4436-bcde-23af17a10c72'
+MIN_RANGE_QUALITY = 50
 
 
 def decode_info(info, mode, pan):
@@ -94,7 +95,7 @@ def adjust_layout(positions, edits):
     return adjusted
 
 
-def solve_layout(anchors, rows, min_quality=50, max_rms=0.10, max_error=0.20):
+def solve_layout(anchors, rows, min_quality=MIN_RANGE_QUALITY, max_rms=0.10, max_error=0.20):
     """Fit six ranges in the shared Z=0 plane; A0 is origin, A1 sets +X."""
     if len(anchors) != 4 or len(set(a['id'] for a in anchors)) != 4:
         raise ValueError('Select four distinct anchors')
