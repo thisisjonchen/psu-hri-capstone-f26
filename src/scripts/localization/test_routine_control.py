@@ -1,5 +1,7 @@
 """Routine hold integration with the real fusion/PID code and mocked ROS transport."""
 import copy
+import contextlib
+import io
 import math
 import os
 import runpy
@@ -426,6 +428,51 @@ class RoutineControlTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'movement failed'):
                 main()
             drone.land.assert_called_once_with(hold_xy=True)
+
+    def test_hover_height_precedes_timed_hold_and_preserves_landing_on_failure(self):
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'hover_routine.py')
+        for height, failed in [(None, False), (.5, False), (.5, True)]:
+            with self.subTest(height=height, failed=failed):
+                drone = mock.Mock(mode='FLYING', takeoff_height=.3)
+                drone.finish = type(self.drone).finish.__get__(drone)
+                if failed:
+                    drone.move_to_altitude.side_effect = RuntimeError('altitude did not settle')
+                args = [script, '--fly', '--seconds', '10']
+                if height is not None:
+                    args += ['--height', str(height)]
+                self.ros.init_node = mock.Mock()
+                with mock.patch.dict(sys.modules, {'drone_controller': NS(Drone=lambda: drone)}), \
+                        mock.patch.object(sys, 'argv', args):
+                    main = runpy.run_path(script)['main']
+                    if failed:
+                        with self.assertRaisesRegex(RuntimeError, 'altitude did not settle'):
+                            main()
+                        drone.hover.assert_not_called()
+                    else:
+                        main()
+                        drone.hover.assert_called_once_with(10.)
+                expected = [mock.call.ready(), mock.call.takeoff(hold_xy=True)]
+                if height is not None:
+                    expected.append(mock.call.move_to_altitude(height))
+                if not failed:
+                    expected.append(mock.call.hover(10.))
+                expected.append(mock.call.land(hold_xy=True))
+                self.assertEqual(drone.mock_calls, expected)
+
+    def test_invalid_hover_height_is_rejected_before_initializing_flight(self):
+        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'hover_routine.py')
+        drone = mock.Mock()
+        self.ros.init_node = mock.Mock()
+        for height in ('0', '-.1', 'nan', 'inf'):
+            with self.subTest(height=height), \
+                    mock.patch.dict(sys.modules, {'drone_controller': NS(Drone=drone)}), \
+                    mock.patch.object(sys, 'argv', [script, '--fly', '--height', height]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    runpy.run_path(script)['main']()
+                self.assertEqual(error.exception.code, 2)
+        self.ros.init_node.assert_not_called()
+        drone.assert_not_called()
 
     def test_ready_uses_current_ground_height_and_rejects_legacy_publisher(self):
         self.drone.mode = 'DISARMED'
