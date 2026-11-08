@@ -107,6 +107,23 @@ class AltitudeControllerTest(unittest.TestCase):
             command = self.step(c, height=.05, now=10 + i/60.0)
         self.assertLess(command, 1510 + 50, 'throttle ran away to %.1f us' % command)
 
+    def test_launch_throttle_ramp_is_independent_of_target_height(self):
+        for target in (.10, .25, .75):
+            with self.subTest(target=target):
+                c = AltitudeController(hover_throttle=1540., rate_i=0.)
+                c.start_takeoff(.05, 10.)
+                commands = []
+                for i in range(151):
+                    elapsed = i / RATE
+                    height = min(target, .05 + .1 * elapsed)
+                    climb = .1 if height < target else 0.
+                    commands.append(c.step(target, height, climb, 1., 10. + elapsed))
+                self.assertAlmostEqual(commands[0], 1490.)
+                self.assertAlmostEqual(commands[120], 1540.)
+                self.assertAlmostEqual(commands[-1], 1540.)
+                self.assertLess(largest_step(commands), 1., 'launch throttle jumped')
+                self.assertAlmostEqual(c.target, min(target, .30))
+
     def test_no_integration_into_throttle_saturation(self):
         c = AltitudeController(throttle_range=(1200., 1520.), rate_i_limit=5.)
         for i in range(600):

@@ -5,9 +5,8 @@ height error -> P (+ takeoff climb-rate feed-forward) -> climb-rate target (limi
 -> vertical acceleration -> thrust relative to hover -> angle boost
 -> throttle through the thrust curve (ArduPilot MOT_THST_EXPO).
 
-Takeoff keeps the earlier hover behavior that flew well: the target climbs at
-takeoff_rate, the feed-forward starts at takeoff_throttle and blends into
-hover_throttle by the end of the climb, and the integral is active throughout.
+The takeoff target climbs at takeoff_rate. Base throttle reaches hover_throttle
+over two seconds independently of the requested height; the integral stays active.
 
 Throttle is the Betaflight RC value (1000-2000 us); thrust is normalized 0-1.
 """
@@ -19,6 +18,7 @@ GRAVITY = 9.80665
 
 
 class AltitudeController(object):
+    TAKEOFF_THROTTLE_RAMP_SECONDS = 2.0
     LAND_RATE = 0.15
     LAND_FINAL_RATE = 0.10
     LAND_SLOW_HEIGHT = 0.15
@@ -88,14 +88,14 @@ class AltitudeController(object):
         feed_forward = 0.0
         if self.takeoff is not None:
             started, start = self.takeoff
-            self.target = min(desired_height, start + self.takeoff_rate * (now - started))
-            progress = 1.0 if desired_height <= start else (self.target - start) / (desired_height - start)
-            # Blend the takeoff feed-forward into hover so the climb ends without a step.
-            hover = self.takeoff_throttle + (self.hover_throttle - self.takeoff_throttle) * max(0.0, progress)
-            if self.target >= desired_height:
-                self.takeoff = None
-            else:
+            elapsed = max(0.0, now - started)
+            self.target = min(desired_height, start + self.takeoff_rate * elapsed)
+            progress = min(1.0, elapsed / self.TAKEOFF_THROTTLE_RAMP_SECONDS)
+            hover = self.takeoff_throttle + (self.hover_throttle - self.takeoff_throttle) * progress
+            if self.target < desired_height:
                 feed_forward = self.takeoff_rate  # The ramp's own climb rate, as PX4 does.
+            elif progress >= 1.0:
+                self.takeoff = None
         rate_target = max(-self.descent_limit, min(self.climb_limit,
                                                     feed_forward + self.height_p * (self.target - height)))
         if self.landing_ground is not None:

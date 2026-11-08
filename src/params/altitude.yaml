@@ -6,7 +6,7 @@
 
 # Throttle (us) that holds a hover.
 hover_throttle: 1540.0
-# Feed-forward at the start of takeoff, blended into hover_throttle by the end of the climb.
+# Feed-forward at takeoff, blended into hover_throttle over two seconds.
 takeoff_throttle: 1490.0
 throttle_range: [1200.0, 1700.0]
 # Climb-rate target per meter of height error (1/s).
