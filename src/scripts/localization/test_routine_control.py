@@ -433,6 +433,43 @@ class RoutineControlTest(unittest.TestCase):
                     self.assertEqual(drone.height, target)
                     self.assertGreaterEqual(observed.count(target), 11)
 
+    def test_takeoff_allows_climb_and_settling_but_still_times_out(self):
+        drone = self.drone
+        drone.wait_for_start = mock.Mock()
+        self.globals['Mode'] = lambda name: NS(mode=name)
+        drone.mode_pub.publish = drone._mode_received
+        for target, rate, reaches_at, timeout in ((.75, .10, 10.2, 12.),
+                                                 (.75, .10, None, 12.),
+                                                 (.25, .10, None, 10.),
+                                                 (.75, .05, None, 19.)):
+            with self.subTest(target=target, rate=rate, reaches_at=reaches_at):
+                self.fusion.params['/pidrone/altitude/controller'] = {'takeoff_rate': rate}
+                drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
+                drone.voltage = 16.
+                drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
+                flying_seconds = [0.]
+
+                def tick(seconds):
+                    self.fusion.now += seconds
+                    drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
+                    if drone.mode == 'FLYING':
+                        flying_seconds[0] += seconds
+                        if reaches_at is not None and flying_seconds[0] >= reaches_at:
+                            drone.height = target
+
+                self.ros.sleep = tick
+                if reaches_at is None:
+                    message = 'did not settle within {:.1f} seconds'.format(timeout)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        drone.takeoff(height=target)
+                    self.assertGreaterEqual(flying_seconds[0], timeout - 1e-6)
+                    self.assertLess(flying_seconds[0], timeout + .11)
+                else:
+                    drone.takeoff(height=target)
+                    self.assertGreaterEqual(flying_seconds[0], reaches_at + 1.)
+                    self.assertLess(flying_seconds[0], timeout)
+                self.assertEqual(drone.mode, 'FLYING', 'the routine owns landing after timeout')
+
     def test_requested_takeoff_height_survives_mode_resets_without_canceling_ramp(self):
         for delivery in ('DISARMED', 'ARMED', 'FLYING'):
             with self.subTest(delivery=delivery):

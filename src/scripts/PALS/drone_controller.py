@@ -306,6 +306,10 @@ class Drone(object):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
+        settings = rospy.get_param('/pidrone/altitude/controller', {})
+        takeoff_rate = float(settings.get('takeoff_rate', 0.10))
+        if math.isnan(takeoff_rate) or math.isinf(takeoff_rate) or takeoff_rate <= 0:
+            raise ValueError('Takeoff rate must be finite and positive')
         self.wait_for_start(hold_xy=hold_xy)
         self._check_sensors()
         self._check_battery()
@@ -314,6 +318,8 @@ class Drone(object):
         if self.voltage < self.MIN_START_V:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
+        timeout = (10.0 if continue_after is not None else
+                   max(10.0, max(0.0, height - self.height) / takeoff_rate + 5.0))
         self.takeoff_pub.publish(Float32(data=height))
         rospy.loginfo('Taking off to %.2f m', height)
         self._set_mode('ARMED')
@@ -326,7 +332,7 @@ class Drone(object):
             self.lock_xy()
         self._set_mode('FLYING')
         started = time.time()
-        deadline = started + 10.0
+        deadline = started + timeout
         settled_since = None
         while time.time() < deadline:
             self._check_flight('takeoff')
@@ -349,7 +355,7 @@ class Drone(object):
             rospy.sleep(0.1)
         if continue_after is not None:
             raise RuntimeError('Timed takeoff exceeded 10 seconds')
-        raise RuntimeError('Takeoff altitude did not settle within 10 seconds')
+        raise RuntimeError('Takeoff altitude did not settle within {:.1f} seconds'.format(timeout))
 
     def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,
              room_target=None, check=None):
