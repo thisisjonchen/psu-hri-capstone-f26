@@ -12,7 +12,7 @@ throttle_range: [1200.0, 1700.0]
 height_p: 0.8
 # Acceleration per m/s of climb-rate error (1/s), and its integral (1/s^2).
 rate_p: 1.43
-rate_i: 0.71
+rate_i: 0.55
 # Integral limit (m/s^2); 0.71 is about +/-25 us of throttle.
 rate_i_limit: 0.71
 # Climb and descent speed limits (m/s), like ArduPilot PILOT_SPEED_UP/DN.

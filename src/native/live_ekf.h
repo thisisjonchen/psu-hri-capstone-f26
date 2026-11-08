@@ -33,6 +33,8 @@ struct Imu {
     void means(Vec& force, Vec& rate) const;
     std::array<double,9> packet() const;
 };
+struct RangeSample { double stamp, distance, minimum, maximum; };
+bool valid_range(double distance, double minimum, double maximum);
 Imu calibrated_imu(double duration, const Quaternion&, const Vec&, const Profile&);
 
 struct Filter {
@@ -48,6 +50,8 @@ struct Filter {
                     const Vec& acceleration_bias, const Vec& gyro_bias);
     bool predict(const Imu&, double end);
     bool project(const std::vector<Imu>&);
+    bool project(const std::vector<Imu>&, const std::vector<RangeSample>&, const Profile&);
+    bool correct_range(double distance, const Profile&, double* innovation = nullptr);
     bool correct(const cv::Mat& innovation, const cv::Mat& observation, const cv::Mat& noise, double gate,
                  bool xy_only = false);
     void reset_height(double height, const Vec& attitude_jacobian, double variance);

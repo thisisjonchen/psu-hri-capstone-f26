@@ -101,6 +101,8 @@ private:
     // Only the ROS callback thread owns the current-time IMU history and output.
     struct TimedImu { std::int64_t stamp; pals::Imu sample; pals::Vec rate; };
     std::deque<TimedImu> history_;
+    std::deque<sensor_msgs::Range::ConstPtr> ranges_;
+    std::int64_t last_range_stamp_=0;
     std::int64_t last_imu_=0,last_published_=0;
     std::int64_t last_trace_stamp_=0;
     std::uint64_t last_trace_range_=0;
@@ -131,7 +133,15 @@ private:
         if (full) fail("Input queue overflow; restart the EKF node");
         else available_.notify_one();
     }
-    void range(const sensor_msgs::Range::ConstPtr& msg) { Event e; e.kind=Event::RANGE; e.range=msg; enqueue(e); }
+    void range(const sensor_msgs::Range::ConstPtr& msg) {
+        const auto stamp=msg->header.stamp.toNSec();
+        if (stamp>0 && stamp>static_cast<std::uint64_t>(last_range_stamp_)
+            && stamp<=ros::Time::now().toNSec() && pals::valid_range(msg->range,msg->min_range,msg->max_range)) {
+            ranges_.push_back(msg); last_range_stamp_=stamp;
+            while (ranges_.size()>64) ranges_.pop_front();
+        }
+        Event e; e.kind=Event::RANGE; e.range=msg; enqueue(e);
+    }
     void image(const sensor_msgs::CompressedImage::ConstPtr& msg) { Event e; e.kind=Event::IMAGE; e.image=msg; enqueue(e); }
     void camera(const sensor_msgs::CameraInfo::ConstPtr& msg) { Event e; e.kind=Event::CAMERA; e.camera=msg; enqueue(e); }
     void mode(const pidrone_pkg::Mode::ConstPtr& msg) { Event e; e.kind=Event::MODE; e.mode=msg; enqueue(e); }
@@ -201,7 +211,16 @@ private:
             }
         }
         pals::Filter estimate=s.filter;
-        if (!estimate.project(intervals)) {
+        std::vector<pals::RangeSample> ranges;
+        const auto fused=s.origin_ns+std::llround(s.filter.stamp*1.e9);
+        while (!ranges_.empty() && ranges_.front()->header.stamp.toNSec()<=static_cast<std::uint64_t>(fused))
+            ranges_.pop_front();
+        for (const auto& range:ranges_) {
+            const auto ns=static_cast<std::int64_t>(range->header.stamp.toNSec());
+            if (ns<=stamp) ranges.push_back({(ns-s.origin_ns)/1.e9,range->range,range->min_range,range->max_range});
+        }
+        // Rebuild from the delayed snapshot each time; projected corrections never feed it back.
+        if (!estimate.project(intervals,ranges,profile_)) {
             fail("Invalid output IMU interval or projection");
             publish_ready(false,"Invalid output IMU interval or projection"); return;
         }

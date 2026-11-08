@@ -129,6 +129,46 @@ bool Filter::project(const std::vector<Imu>& samples) {
     state=s; covariance=p; stamp=intervals[intervals.size()-8];
     return true;
 }
+bool valid_range(double distance,double minimum,double maximum) {
+    return std::isfinite(distance) && std::isfinite(minimum) && std::isfinite(maximum)
+        && 0.<=minimum && minimum<maximum && distance>=minimum && distance<=maximum;
+}
+bool Filter::correct_range(double distance,const Profile& profile,double* innovation) {
+    const Rotation r=rotation(quaternion());
+    const Vec center=position()+r*profile.range_offset,direction=r*profile.range_beam;
+    if (!std::isfinite(distance) || direction[2]>=-.1) return false;
+    const double predicted=-center[2]/direction[2];
+    if (innovation) *innovation=distance-predicted;
+    cv::Mat h=cv::Mat::zeros(1,15,CV_64F);
+    h.at<double>(0,2)=-1./direction[2];
+    const Rotation a=r*skew(profile.range_offset),b=r*skew(profile.range_beam);
+    for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
+    return correct((cv::Mat_<double>(1,1)<<distance-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63);
+}
+bool Filter::project(const std::vector<Imu>& samples,const std::vector<RangeSample>& ranges,
+                     const Profile& profile) {
+    if (samples.empty()) return true;
+    Filter projected=*this;
+    std::size_t next=0;
+    double last_range=stamp;
+    std::vector<Imu> batch;
+    for (const auto& range:ranges) {
+        if (!std::isfinite(range.stamp) || range.stamp<=last_range || range.stamp>samples.back().stamp
+            || !valid_range(range.distance,range.minimum,range.maximum)) continue;
+        last_range=range.stamp;
+        batch.clear();
+        while (next<samples.size() && samples[next].stamp<=range.stamp) batch.push_back(samples[next++]);
+        if (!projected.project(batch)) return false;
+        if (range.stamp>projected.stamp && (next==samples.size()
+            || !projected.predict(samples[next],range.stamp))) return false;
+        // A gated range is skipped; only invalid IMU prediction fails projection.
+        projected.correct_range(range.distance,profile);
+    }
+    batch.assign(samples.begin()+next,samples.end());
+    if (!projected.project(batch)) return false;
+    *this=projected;
+    return true;
+}
 bool vertical_output(const Filter& estimate, const Filter* previous,
                      const std::vector<Imu>& intervals, std::array<double,2>& output) {
     if (!std::isfinite(estimate.stamp) || !std::isfinite(estimate.state[2])
@@ -266,8 +306,7 @@ void LiveEKF::camera(int width,int height,const std::vector<double>& k,const std
     last_aid_.erase("camera");
 }
 void LiveEKF::range(std::int64_t stamp,double distance,double minimum,double maximum) {
-    if (stamp<=0 || !std::isfinite(distance) || !std::isfinite(minimum) || !std::isfinite(maximum)
-        || !(0.<=minimum && minimum<maximum && distance>=minimum && distance<=maximum)) {
+    if (stamp<=0 || !valid_range(distance,minimum,maximum)) {
         range_.stamp=0; clear_rest(); return;
     }
     if (stamp<=range_.stamp) return;
@@ -466,16 +505,12 @@ bool LiveEKF::correct(const Measurement& m) {
     }
     cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
+        if (filter_.correct_range(m.value,profile_,&range_trace_.innovation)) return true;
         const Rotation r=rotation(filter_.quaternion());
         const Vec center=filter_.position()+r*profile_.range_offset,direction=r*profile_.range_beam;
         // Range can correct a height prediction that has crossed below the floor.
         if (direction[2]>=-.1) return false;
-        const double predicted=-center[2]/direction[2];
-        range_trace_.innovation=m.value-predicted;
-        h.at<double>(0,2)=-1./direction[2];
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
-        for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
-        if (filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63)) return true;
         // Recover rejected floor range only if rest still holds when delayed fusion reaches it.
         if (!m.ground_rest || mode_!="DISARMED" || !was_stationary_ || !rest_since_
             || m.stamp<(rest_since_-origin_ns_)/1.e9+.5) return false;
