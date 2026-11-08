@@ -65,7 +65,19 @@ class Drone(object):
                          self._local_received, queue_size=1)
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
         self.heartbeat = rospy.Timer(
-            rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
+            rospy.Duration(0.5), self._heartbeat)
+        rospy.on_shutdown(self.heartbeat.shutdown)
+
+    def _heartbeat(self, event):
+        if rospy.is_shutdown():
+            return
+        try:
+            self.heartbeat_pub.publish(Empty())
+        except rospy.ROSException:
+            # Shutdown can close the publisher after the check above. Do not
+            # obscure the original routine error with a timer-thread traceback.
+            if not rospy.is_shutdown():
+                raise
 
     def _start_received(self, msg):
         self.start_at = time.time()

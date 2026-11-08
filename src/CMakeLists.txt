@@ -172,6 +172,7 @@ catkin_install_python(PROGRAMS
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
   scripts/tof_node.py
+  scripts/rosbridge_websocket.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 install(DIRECTORY launch params

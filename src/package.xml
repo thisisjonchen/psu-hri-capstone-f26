@@ -52,6 +52,8 @@
   <run_depend>roscpp</run_depend>
   <run_depend>rospy</run_depend>
   <run_depend>rosnode</run_depend>
+  <run_depend>rosbridge_server</run_depend>
+  <run_depend>rosapi</run_depend>
   <run_depend>std_msgs</run_depend>
   <run_depend>sensor_msgs</run_depend>
   <run_depend>vl53l1x</run_depend>

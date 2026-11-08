@@ -69,7 +69,7 @@ pidrone_screen_node() {
             source "$HOME/catkin_ws/install/setup.bash" || return
             command=(roslaunch --wait "$package_dir/launch/tof.launch")
             ;;
-        bridge) command=(roslaunch --wait rosbridge_server rosbridge_websocket.launch) ;;
+        bridge) command=(roslaunch --wait "$package_dir/launch/rosbridge.launch") ;;
         video) command=(rosrun web_video_server web_video_server) ;;
         tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
         tagmap) command=(roslaunch --wait "$package_dir/launch/apriltag_mapping.launch") ;;

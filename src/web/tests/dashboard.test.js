@@ -525,7 +525,7 @@ test('shared commands reach both bridges and individual commands only their targ
   }
 });
 
-test('synchronized start waits for both drones and uses available room positions', () => {
+test('synchronized start waits for both routines and fresh preflight grants', () => {
   const app = dashboard();
   const toggle = app.elements.get('separation-guard');
   toggle.checked = true;
@@ -548,6 +548,19 @@ test('synchronized start waits for both drones and uses available room positions
   assert.deepEqual(starts(), [0, 0]); // Wait for both HTTP launches to succeed too.
   for (const drone of [a, b]) readyRoom(app, drone, 1.6);
   app.confirmSyncStart();
+  assert.deepEqual(starts(), [0, 0], 'routine readiness alone cannot release either drone');
+  const report = { ...stamp(1.6), mode: 'DISARMED', paired: true, ready: true, reason: 'ready' };
+  app.receive(a, '/pidrone/coordination/preflight', {
+    ...report, ...stamp(0), ready: false, reason: 'flight_setup_unavailable'
+  });
+  app.receive(b, '/pidrone/coordination/preflight', report);
+  assert.deepEqual(starts(), [0, 0], 'one blocked drone must hold both routines');
+  assert.match(app.elements.get('commandFeedback').textContent, /drone1: Preflight blocked.*flight setup unavailable/);
+  app.receive(a, '/pidrone/coordination/preflight', { ...report, ...stamp(1) });
+  assert.deepEqual(starts(), [0, 0], 'a stale source timestamp cannot grant a start');
+  app.receive(a, '/pidrone/coordination/preflight', { ...report, paired: false });
+  assert.deepEqual(starts(), [0, 0], 'a grant for a different flight setup cannot release the run');
+  app.receive(a, '/pidrone/coordination/preflight', report);
   assert.deepEqual(starts(), [1, 1]);
   for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, true);
   app.receive(a, '/pidrone/routine/ready', {});

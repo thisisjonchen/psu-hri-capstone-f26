@@ -613,6 +613,7 @@ class DroneSession {
     this.modeReceivedAt = null;
     this.coordinationReceivedAt = null;
     this.preflightReceivedAt = null;
+    this.preflightReady = false;
     this.routineReadyAt = null;
     this.root = document.getElementById(id);
     this.ros = null;
@@ -764,6 +765,7 @@ class DroneSession {
     this.field('coordination').textContent = 'Unavailable';
     this.preflightReceivedAt = null;
     this.field('flightMode').title = 'Preflight unavailable';
+    this.preflightReady = false;
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedPosition'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
@@ -924,6 +926,7 @@ class DroneSession {
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       if (this.field('flightMode').textContent !== message.mode) {
         this.preflightReceivedAt = null;
+        this.preflightReady = false;
         this.field('flightMode').title = 'Preflight unavailable';
       }
       this.field('flightMode').textContent = message.mode;
@@ -946,6 +949,7 @@ class DroneSession {
         time > 0 && time <= now && now - time <= 500;
       // Repeated reports must not make old sensor data look fresh.
       this.preflightReceivedAt = message.ready === true && current ? time : now;
+      this.preflightReady = message.ready === true && current;
       const status = this.field('flightMode');
       if (message.mode === 'FLYING') {
         status.title = 'In flight';
@@ -957,6 +961,7 @@ class DroneSession {
         status.title = 'Preflight unavailable';
       }
       this.refreshCoordination();
+      releaseSyncStart();
     });
 
     subscribe('/pidrone/routine/ready', 'std_msgs/Empty', () => {
@@ -1142,12 +1147,19 @@ function confirmSyncStart() {
 function releaseSyncStart() {
   if (!syncStart || !syncStart.dispatched) return;
   if (Date.now() > syncStart.expires) { awaitSyncStart(null); return; }
+  publishCoordinationSelection();
   const group = syncStart.ids.map(id => drones[id]);
   if (!group.every(drone => drone.connected && drone.routineReadyAt !== null &&
       Date.now() - drone.routineReadyAt >= 0 && Date.now() - drone.routineReadyAt <= 500 &&
       drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
       Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
-  publishCoordinationSelection();
+  const blocked = group.filter(drone => !drone.preflightReady || drone.preflightReceivedAt === null ||
+    Date.now() - drone.preflightReceivedAt < 0 || Date.now() - drone.preflightReceivedAt > 500);
+  if (blocked.length) {
+    feedback('Waiting for ' + blocked.map(drone => drone.id + ': ' +
+      (drone.preflightReady ? 'Preflight unavailable' : drone.field('flightMode').title)).join('; '));
+    return;
+  }
   syncStart = null;
   group.forEach(drone => drone.publish('routineStart', {}));
   feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
@@ -1203,6 +1215,7 @@ function publishCoordinationSelection() {
   }
   if (previous !== coordinationPaired) connected.forEach(drone => {
     drone.preflightReceivedAt = null;
+    drone.preflightReady = false;
     drone.field('flightMode').title = 'Preflight unavailable';
   });
   connected.forEach(drone => {

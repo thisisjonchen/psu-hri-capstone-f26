@@ -327,6 +327,32 @@ class RoutineControlTest(unittest.TestCase):
             disarm.assert_not_called()
             drone.heartbeat.shutdown.assert_not_called()
 
+    def test_heartbeat_stops_on_ros_shutdown_without_hiding_live_publish_failures(self):
+        drone = self.drone
+        self.ros.ROSException = type('ROSException', (Exception,), {})
+        self.ros.on_shutdown.assert_any_call(drone.heartbeat.shutdown)
+        callback = self.ros.Timer.call_args.args[1]
+        with mock.patch.object(drone.heartbeat_pub, 'publish') as publish:
+            callback(None)
+            publish.assert_called_once()
+            publish.reset_mock()
+            self.ros.is_shutdown = lambda: True
+            callback(None)
+            publish.assert_not_called()
+            self.ros.is_shutdown = lambda: False
+
+            def close_during_publish(message):
+                self.ros.is_shutdown = lambda: True
+                raise self.ros.ROSException('publish() to a closed topic')
+
+            publish.side_effect = close_during_publish
+            callback(None)  # Shutdown raced the check; suppress only that error.
+            self.ros.is_shutdown = lambda: False
+            publish.side_effect = self.ros.ROSException('live transport failure')
+            with self.assertRaisesRegex(self.ros.ROSException, 'live transport failure'):
+                callback(None)
+        drone.heartbeat.shutdown.assert_not_called()
+
     def advance_until(self, release_at=None):
         started = self.fusion.now
         self.drone.voltage = 16.
