@@ -613,8 +613,11 @@ test('startup retries retain their deadline and cannot restart after timeout or 
 test('terminal lifecycle handles startup failure, detachment and restart reconnection', async () => {
   const app = dashboard();
   const output = [];
+  let statusPolls = 0;
   const context = vm.createContext({
     document: { addEventListener() {} }, drones: app.drones,
+    fetch() { statusPolls++; throw new Error('unexpected status poll'); },
+    Date: class extends Date { static now() { return 1000; } },
     location: { hostname: 'localhost', port: '8000' },
     WebSocket: class {
       static OPEN = 1; readyState = 1;
@@ -681,15 +684,26 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   pane.attach();
   const oldTerminal = pane.socket, oldRos = drone.ros;
   let finishRestart;
-  pane.post = () => new Promise(resolve => { finishRestart = resolve; });
-  const restart = pane.nodeAction('restart');
+  pane.post = (path, body) => {
+    assert.equal(path, '/api/nodes');
+    assert.equal(body.action, 'restart');
+    return new Promise(resolve => { finishRestart = resolve; });
+  };
+  const restart = pane.restart();
+  await assert.rejects(pane.restart(), /already in progress/);
+  await Terminal.prototype.poll.call(pane);
+  assert.equal(statusPolls, 0, 'status polling pauses during restart');
   assert.equal(drone.connected, false);
   assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-label]').textContent, 'Restarting…');
   oldTerminal.onclose();
   oldRos.open();
   assert.equal(drone.connected, false, 'old callbacks cannot restore the interrupted connection');
+  app.advanceTime(100000);
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.notEqual(drone.waitUntil, 0, 'allow time for gyro checking and localization beyond the old 90-second limit');
   finishRestart({ output: 'Nodes restarted' });
   await restart;
+  assert.equal(pane.restarting, false);
   assert.notEqual(drone.ros, oldRos);
   assert.notEqual(pane.socket, oldTerminal);
   drone.ros.open();
@@ -699,16 +713,74 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.equal(pane.ready, true);
   assert.equal(drone.publishers.mode.messages.length, 0, 'reconnecting sends no flight command');
 
-  const cancelled = pane.nodeAction('restart');
+  const cancelled = pane.restart();
   drone.disconnect();
   finishRestart({ output: 'Nodes restarted' });
   await cancelled;
   assert.equal(drone.ros, null, 'cancelling prevents a late restart response from reconnecting');
 
   pane.post = async () => { throw new Error('Restart failed'); };
-  await assert.rejects(pane.nodeAction('restart'), /Restart failed/);
+  await assert.rejects(pane.restart(), /Restart failed/);
   assert.equal(drone.waitUntil, 0);
+  assert.equal(pane.restarting, false);
   assert.equal(app.elements.get('drone1-connectionStatus').title, 'Nodes failed to restart');
+});
+
+test('restart confirms the combined operation and blocks busy drones', async () => {
+  let confirmed = false, prompt, restarts = [];
+  const context = vm.createContext({ document: { addEventListener() {} },
+    window: { confirm(message) { prompt = message; return confirmed; } } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
+  const Runner = vm.runInContext('RoutineRunner', context);
+  const runner = Object.create(Runner.prototype);
+  Object.assign(runner, {
+    terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: true, nodes: true, running: false,
+      restart() { restarts.push(id); } })),
+    run(label, targets, action) { return Promise.all(targets.map(action)); }
+  });
+  await runner.restart();
+  assert.deepEqual(restarts, []);
+  assert.match(prompt, /^Restart drone1 and drone2\?/);
+  assert.match(prompt, /powered for a few minutes/);
+  assert.match(prompt, /props off/);
+  assert.match(prompt, /disarmed.*floor.*facing map \+Y/);
+  confirmed = true;
+  runner.terminals[0].running = true;
+  await runner.restart();
+  assert.deepEqual(restarts, []);
+  runner.terminals[0].running = false;
+  await runner.restart();
+  assert.deepEqual(restarts, ['drone1', 'drone2']);
+});
+
+test('a stalled restart response releases the runner without retrying the command', async () => {
+  const app = dashboard();
+  let expire, requests = 0, cleared = false;
+  const context = vm.createContext({ document: { addEventListener() {} }, drones: app.drones,
+    AbortController, setTimeout(callback) { expire = callback; return 1; },
+    clearTimeout() { cleared = true; },
+    fetch(path, options) {
+      requests++;
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort',
+        () => reject(new Error('aborted'))));
+    }
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
+  const Terminal = vm.runInContext('RoutineTerminal', context);
+  const Runner = vm.runInContext('RoutineRunner', context);
+  const pane = Object.assign(Object.create(Terminal.prototype), { id: 'drone1', report() {} });
+  const runner = Object.assign(Object.create(Runner.prototype), { render() {} });
+  const request = runner.run('Restarting', [pane], terminal => terminal.restart());
+  assert.equal(runner.busy, true);
+  expire();
+  const results = await request;
+  assert.equal(results[0].status, 'rejected');
+  assert.match(results[0].reason.message, /may still be restarting.*Reconnect/);
+  assert.equal(requests, 1);
+  assert.equal(cleared, true);
+  assert.equal(runner.busy, false);
+  assert.equal(pane.restarting, false);
+  assert.equal(app.drones.drone1.waitUntil, 0);
 });
 
 test('a dropped partner stops movement until a fresh key press', () => {
@@ -999,6 +1071,7 @@ test('verified calibration displays the room before a complete tag report and us
   app.receive(drone, '/pidrone/localization/anchors', changed);
   assert.equal(map.room.xMax, 3);
   assert.equal(map.layoutUsable, false);
+  assert.match(app.elements.get('room-status').textContent, /saved calibration/);
   app.anchorCalibration.update({ ...state, layout: { ...layout, revision: 'resaved-layout',
     positions: changed.positions.map((p, i) => ({ ...p, id: changed.anchor_ids[i] })) } });
   assert.equal(map.room.xMax, 4);

@@ -51,11 +51,32 @@ class Client:
             async for packet in self.socket:
                 message = json.loads(packet)
                 if message.get('op') == 'publish' and message.get('topic') in keys:
-                    self.latest[keys[message['topic']]] = (message['msg'], time.monotonic())
+                    self.update(keys[message['topic']], message['msg'])
         except Exception as error:
             self.error = str(error)
         finally:
             self.error = self.error or 'rosbridge disconnected'
+
+    def update(self, key, message):
+        if key == 'anchors' and key in self.latest:
+            previous = self.latest[key][0]
+            try:
+                ids, positions = message['anchor_ids'], message['positions']
+                known = dict(zip(previous['anchor_ids'], previous['positions']))
+                if (len(previous['anchor_ids']) == len(previous['positions']) == len(known) == 4
+                        and len(ids) == len(positions) == len(set(ids)) < 4
+                        and message['header']['frame_id'] == previous['header']['frame_id']
+                        and fresh(stamp(message['header']), time.time())
+                        and all(name in known and all(float(p[axis]) == float(known[name][axis])
+                                                     for axis in ('x', 'y', 'z'))
+                                for name, p in zip(ids, positions))):
+                    # Keep the complete observation's sensor AND receipt timestamps.
+                    # Partial reports cannot extend its existing 0.5 s lifetime.
+                    return
+            except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+                pass
+        # Changed/invalid reports replace the old layout, requiring a new complete one.
+        self.latest[key] = (message, time.monotonic())
 
     def snapshot(self):
         if self.error:

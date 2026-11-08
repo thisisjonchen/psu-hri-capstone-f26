@@ -60,6 +60,8 @@ struct Output {
     std::array<double, 36> pose_covariance, twist_covariance;
 };
 Output body_output(const Filter&, const Vec& angular_rate);
+bool vertical_output(const Filter& estimate, const Filter* previous,
+                     const std::vector<Imu>& intervals, std::array<double,2>& output);
 
 struct Snapshot {
     Filter filter;

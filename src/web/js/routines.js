@@ -16,6 +16,7 @@ class RoutineTerminal {
     this.nodes = false;
     this.running = false;
     this.polling = false;
+    this.restarting = false;
     this.lastPollAt = 0;
   }
 
@@ -96,7 +97,7 @@ class RoutineTerminal {
   }
 
   async poll() {
-    if (!this.enabled || this.polling) return;
+    if (!this.enabled || this.polling || this.restarting) return;
     if (this.running && Date.now() - this.lastPollAt < 10000) return;
     this.lastPollAt = Date.now();
     this.polling = true;
@@ -104,13 +105,13 @@ class RoutineTerminal {
     try {
       const response = await fetch('/api/routine?drone=' + this.id + (this.scripts && this.nodes ? '&running=1' : ''));
       const body = await response.json();
-      if (!this.enabled || this.socket !== socket) return;
+      if (!this.enabled || this.socket !== socket || this.restarting) return;
       if (!response.ok) throw new Error(body.error || response.statusText);
       if (body.scripts) this.scripts = body.scripts;
       if (body.nodes !== undefined) this.nodes = body.nodes;
       this.running = body.running;
     } catch (_) {
-      if (!this.enabled || this.socket !== socket) return;
+      if (!this.enabled || this.socket !== socket || this.restarting) return;
       this.scripts = null;
     } finally {
       this.polling = false;
@@ -133,41 +134,52 @@ class RoutineTerminal {
     if (this.term) this.term.write('\r\n[' + message + ']\r\n');
   }
 
-  async post(path, body) {
-    const response = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Routine-Request': '1' },
-      body: JSON.stringify(Object.assign({ drone: this.id }, body))
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || response.statusText);
-    return result;
+  async post(path, body, timeout = 0) {
+    const controller = timeout ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
+    try {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Routine-Request': '1' },
+        body: JSON.stringify(Object.assign({ drone: this.id }, body)),
+        signal: controller?.signal
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || response.statusText);
+      return result;
+    } catch (error) {
+      if (controller?.signal.aborted) throw new Error('Restart response timed out; the drone may still be restarting. Reconnect to inspect it before retrying.');
+      throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   }
 
-  async nodeAction(action) {
+  async restart() {
+    if (this.restarting) throw new Error('Restart is already in progress');
+    this.restarting = true;
     // Restarting ends the screen session and rosbridge, so reattach both afterwards.
     const telemetry = drones[this.id];
-    const restart = action === 'restart';
-    let deadline;
-    if (restart) {
-      const socket = this.socket;
-      this.socket = null;
-      if (socket) socket.close();
-      telemetry.disconnect('Restarting…');
-      deadline = telemetry.waitUntil = Date.now() + 90000;
-    }
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) socket.close();
+    telemetry.disconnect('Restarting…');
+    // Allow for the FC reboot, gyro check, full node startup and localization.
+    const deadline = telemetry.waitUntil = Date.now() + 255000;
     let result;
     try {
-      result = await this.post('/api/nodes', { action });
+      result = await this.post('/api/nodes', { action: 'restart' }, 240000);
     } catch (error) {
-      if (restart && telemetry.waitUntil === deadline) telemetry.failConnection('Nodes failed to restart');
+      if (telemetry.waitUntil === deadline) telemetry.failConnection('Nodes failed to restart');
       throw error;
+    } finally {
+      this.restarting = false;
     }
     this.nodes = true;
     this.scripts = null;
-    if (this.enabled && (!restart || telemetry.waitUntil === deadline)) {
+    if (this.enabled && telemetry.waitUntil === deadline) {
       if (!this.socket) this.attach();
-      if (restart) telemetry.connect(true);
+      telemetry.connect(true);
     }
     return result.output;
   }
@@ -186,11 +198,9 @@ class RoutineRunner {
     this.args = document.getElementById('routine-args');
     this.button = document.getElementById('routine-execute');
     this.restartButton = document.getElementById('nodes-restart');
-    this.alignButton = document.getElementById('nodes-align');
     this.terminals = ['drone1', 'drone2'].map(id => new RoutineTerminal(id, () => this.render()));
     this.button.addEventListener('click', () => this.execute());
-    this.restartButton.addEventListener('click', () => this.nodeAction('restart'));
-    this.alignButton.addEventListener('click', () => this.nodeAction('align'));
+    this.restartButton.addEventListener('click', () => this.restart());
     this.select.addEventListener('change', () => this.render());
     this.target.addEventListener('change', () => this.render());
     // The Connect and Disconnect buttons (main.js) also open and close the terminals.
@@ -230,7 +240,7 @@ class RoutineRunner {
     const loaded = this.active.length > 0 && this.active.every(terminal => terminal.scripts);
     this.button.disabled = this.busy || !this.select.value || !this.targets.length || waiting.length > 0;
     this.target.disabled = this.busy;
-    this.restartButton.disabled = this.alignButton.disabled = this.busy || !loaded ||
+    this.restartButton.disabled = this.busy || !loaded ||
       !this.active.every(terminal => terminal.nodes && !terminal.running);
   }
 
@@ -258,17 +268,14 @@ class RoutineRunner {
     else awaitSyncStart(null);
   }
 
-  nodeAction(action) {
+  restart() {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
     if (this.busy || !targets.length || !targets.every(terminal => terminal.nodes && !terminal.running)) return;
-    const prompts = { restart: 'Restart all nodes on ', align: 'Recalibrate gyro and relocalize ' };
-    const labels = { restart: 'Restarting nodes', align: 'Rebooting FC, checking gyro and relocalizing' };
-    const warmup = action === 'align' ? '\n\nLeave powered for a few minutes first. Props must be removed. Keep each drone untouched on the floor throughout the gyro calibration and relocalization. Only FC communication and localization restart; settings are unchanged.' : '';
     // Fusion locks map +Y when its node starts, so confirm placement first.
-    if (!window.confirm(prompts[action] + names + '?\n\nEach drone must be disarmed, stationary and ' +
-        'facing map +Y: its heading is aligned now.' + warmup)) return;
-    return this.run(labels[action], targets, terminal => terminal.nodeAction(action));
+    if (!window.confirm('Restart ' + names + '?\n\nLeave powered for a few minutes first. ' +
+        'Keep props off and drones disarmed, still on the floor and facing map +Y until complete.')) return;
+    return this.run('Restarting', targets, terminal => terminal.restart());
   }
 }
 

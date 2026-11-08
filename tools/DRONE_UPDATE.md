@@ -7,7 +7,7 @@ configuration dump or copy drone2's complete Betaflight configuration.
 
 | Component | What to apply |
 | --- | --- |
-| PALS repository | Current ROS messages, C++ EKF, FC/PID code, launch files, shared parameters and warm Relocalize helper |
+| PALS repository | Current ROS messages, C++ EKF, FC/PID code, launch files, shared parameters and warm restart helper |
 | Betaflight | Bundled `imu100001`: integrated IMU telemetry and 2 ms USB flush; installer saves 250 Hz serial service |
 | ToF driver | [`driver-errors.patch`](tof/driver-errors.patch): reject failed reads and interrupt-recovery results |
 | Laptop dashboard | Current web files and root `requirements.txt`, including `psutil` |
@@ -59,9 +59,9 @@ configuration dump or copy drone2's complete Betaflight configuration.
 5. Update the laptop environment with `python3 -m pip install -r requirements.txt`
    and restart the dashboard. Start drone1's nodes from a fresh ROS session so
    old parameter overrides cannot survive. Leave it powered for a few minutes,
-   then use **Relocalize** with props removed, stationary on the floor facing +Y.
-   This reboots the warm FC, prints the stationary gyro mean and restarts
-   localization. The gyro mean is reported, not automatically pass/fail gated.
+   then use **Restart** with props removed, stationary on the floor facing +Y.
+   This reboots the warm FC, restarts all nodes, and checks gyro readings while the
+   EKF initializes. The gyro mean is reported, not automatically pass/fail gated.
 
 6. Check readiness, IMU continuity, ToF response and camera tracking props-off
    before a user-operated hover. Drone1 has not yet been flight-validated with

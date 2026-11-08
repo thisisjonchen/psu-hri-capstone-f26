@@ -215,7 +215,8 @@ class FleetMap {
     }
     let status;
     if (bad) {
-      status = bad[1].error || 'Anchor layouts disagree between drones';
+      status = bad[1].error || (candidate === this.calibratedRoom
+        ? 'Live anchors disagree with the saved calibration' : 'Anchor layouts disagree between drones');
       status += '. Map updates and target editing are paused.';
     } else if (candidate) {
       status = '';

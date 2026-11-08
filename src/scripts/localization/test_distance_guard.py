@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import runpy
 import unittest
+from unittest import mock
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -431,6 +432,67 @@ class PeerRelayTest(unittest.TestCase):
             self.module['peer_messages']([first, second], 100.1, 10.1)
         with self.assertRaisesRegex(ValueError, 'missing/stale'):
             self.module['peer_messages']([first, self.snapshot()], 100.1, 10.51)
+
+    def test_partial_reports_preserve_peer_telemetry_but_do_not_extend_layout_expiry(self):
+        client = self.module['Client'](None)
+        client.latest = self.snapshot()
+        expected = self.module['peer_messages']([client.snapshot(), self.snapshot()], 100.1, 10.1)
+        for count, elapsed, secs, nsecs in ((3, .1, 100, 0), (3, .1, 99, 990000000),
+                                           (3, .1, 100, 100000000), (2, .2, 100, 200000000),
+                                           (0, .3, 100, 300000000)):
+            partial = copy.deepcopy(self.snapshot()['anchors'][0])
+            partial['anchor_ids'] = partial['anchor_ids'][:count]
+            partial['positions'] = partial['positions'][:count]
+            partial['header']['stamp'] = dict(secs=secs, nsecs=nsecs)
+            with mock.patch.object(self.module['time'], 'time', return_value=100 + elapsed), \
+                    mock.patch.object(self.module['time'], 'monotonic', return_value=10 + elapsed):
+                client.update('anchors', partial)
+            self.assertEqual(self.module['peer_messages'](
+                [client.snapshot(), self.snapshot()], 100 + elapsed, 10 + elapsed), expected)
+
+        # Other telemetry keeps arriving; neither clock may be refreshed by partial anchors.
+        snapshot = copy.deepcopy(client.snapshot())
+        for key, (message, _) in list(snapshot.items()):
+            if key != 'anchors':
+                message = copy.deepcopy(message)
+                if 'header' in message:
+                    message['header']['stamp'] = dict(secs=100, nsecs=300000000)
+                snapshot[key] = (message, 10.3)
+        with self.assertRaisesRegex(ValueError, 'missing/stale anchors'):
+            self.module['read_state'](snapshot, 100.49, 10.51)
+        with self.assertRaisesRegex(ValueError, 'timestamp'):
+            self.module['read_state'](snapshot, 100.51, 10.49)
+
+    def test_conflicting_partial_reports_require_a_new_complete_layout(self):
+        partial = copy.deepcopy(self.snapshot()['anchors'][0])
+        partial['anchor_ids'].pop()
+        partial['positions'].pop()
+        partial['header']['stamp']['nsecs'] = 100000000
+        changes = [
+            ('coordinates', lambda report: report['positions'][0].update(x=.1)),
+            ('unknown ID', lambda report: report['anchor_ids'].__setitem__(0, '5')),
+            ('duplicate ID', lambda report: report['anchor_ids'].__setitem__(0, '2')),
+            ('missing position', lambda report: report['positions'].pop()),
+            ('frame', lambda report: report['header'].update(frame_id='other')),
+            ('future timestamp', lambda report: report['header']['stamp'].update(secs=101)),
+        ]
+        for name, change in changes:
+            with self.subTest(name=name):
+                client = self.module['Client'](None)
+                client.latest = self.snapshot()
+                report = copy.deepcopy(partial)
+                change(report)
+                with mock.patch.object(self.module['time'], 'time', return_value=100.2), \
+                        mock.patch.object(self.module['time'], 'monotonic', return_value=10.2):
+                    client.update('anchors', report)
+                    with self.assertRaises(ValueError):
+                        self.module['peer_messages']([client.snapshot(), self.snapshot()], 100.2, 10.2)
+                    # A subsequent matching subset must not resurrect the invalidated layout.
+                    client.update('anchors', partial)
+                    with self.assertRaisesRegex(ValueError, 'four distinct'):
+                        self.module['peer_messages']([client.snapshot(), self.snapshot()], 100.2, 10.2)
+                    client.update('anchors', self.snapshot()['anchors'][0])
+                self.module['peer_messages']([client.snapshot(), self.snapshot()], 100.2, 10.2)
 
 
 if __name__ == '__main__':

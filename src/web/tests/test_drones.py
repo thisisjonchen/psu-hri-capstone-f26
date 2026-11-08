@@ -4,12 +4,14 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import drones
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
 import pals
+import warm_reboot_fc
 
 
 class ExecuteTest(unittest.TestCase):
@@ -43,15 +45,105 @@ class ExecuteTest(unittest.TestCase):
                                     ('drone1', 'basic_routine.py', '--fly')]:
             with self.assertRaises(ValueError):
                 drones.execute(drone, script, args)
-        for drone, action in [('drone1', 'start'), ('drone1', 'stop; reboot'), ('drone3', 'restart')]:
+        for drone, action in [('drone1', 'start'), ('drone1', 'align'),
+                              ('drone1', 'stop; reboot'), ('drone3', 'restart')]:
             with self.assertRaises(ValueError):
                 drones.node_action(drone, action)
         self.running = 0
         with self.assertRaisesRegex(RuntimeError, 'already running'):
             drones.execute('drone1', 'hover_routine.py', '--fly')
         with self.assertRaisesRegex(RuntimeError, 'routine is running'):
-            drones.node_action('drone1', 'align')
+            drones.node_action('drone1', 'restart')
         self.assertFalse(any('stuff' in command or 'pals-start' in command for command in self.commands))
+
+    def test_restart_reports_combined_launcher_result_and_failure(self):
+        for code, result in [(0, 'Nodes restarted and localized. Gyro mean: 0.001 deg/s.'),
+                             (1, 'Warm reboot incomplete: Incomplete MSP reply.')]:
+            with self.subTest(code=code), mock.patch.object(
+                    drones, 'run', side_effect=[(1, ''), (code, 'shell banner\n' + result + '\n')]) as run:
+                if code:
+                    with self.assertRaisesRegex(RuntimeError, 'Warm reboot incomplete'):
+                        drones.node_action('drone1', 'restart')
+                else:
+                    self.assertEqual(drones.node_action('drone1', 'restart'), result)
+                self.assertEqual(run.call_args, mock.call(
+                    'drone1', drones.START + ' restart 2>&1', timeout=240))
+
+
+class RestartTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('bash'), 'requires bash')
+    def test_failed_restart_stages_do_not_launch_replacement_nodes(self):
+        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
+        # All hardware commands are shell functions; the helper is never executed.
+        stubs = r'''
+flock() { [[ "$failure" != lock ]]; }
+docker() {
+    printf '%s\n' "$*" >> "$calls"
+    case "$*" in
+        *screen\ -ls*) echo '123.pidrone (Detached)' ;;
+        */pidrone/mode*) echo "mode: $mode" ;;
+        *-X\ quit*) [[ "$failure" != quit ]] ;;
+        *'[r]osmaster'*) echo 'mock old serial process still running'; return 1 ;;
+        *) echo "unexpected Docker call: $*"; return 1 ;;
+    esac
+}
+sudo() {
+    [[ "$*" == *' reboot' ]] || return 2
+    [[ "$failure" != reboot ]] || { echo 'mock warm reboot failed'; return 1; }
+}
+mode=$2
+calls=$3
+failure=$4
+source "$1" restart
+'''
+        for mode, failure, message in [
+                ('ARMED', '', 'it must be DISARMED'), ('FLYING', '', 'it must be DISARMED'),
+                ('', '', 'it must be DISARMED'), ('DISARMED', 'reboot', 'mock warm reboot failed'),
+                ('DISARMED', 'quit', 'Could not stop the screen session'),
+                ('DISARMED', 'process', 'mock old serial process still running'),
+                ('DISARMED', 'lock', 'restart was not queued')]:
+            with self.subTest(mode=mode, failure=failure), TemporaryDirectory() as directory:
+                calls = Path(directory) / 'commands'
+                calls.touch()
+                result = subprocess.run([shutil.which('bash'), '-c', stubs,
+                                         str(launcher), str(launcher), mode, str(calls), failure],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn('unexpected Docker call', result.stdout)
+                commands = calls.read_text()
+                if failure not in ('quit', 'process'):
+                    self.assertNotIn('-X quit', commands)
+                self.assertNotIn('start pidrone_pkg', commands)
+                self.assertIn(message, result.stdout + result.stderr)
+                if mode != 'DISARMED':
+                    self.assertNotIn('mock warm reboot', result.stdout)
+
+    def test_gyro_check_requires_fresh_disarmed_telemetry_through_end_of_window(self):
+        for fault in (None, 'imu', 'mode', 'armed'):
+            with self.subTest(fault=fault):
+                now, subscribers = [0.0], {}
+
+                def sleep(seconds):
+                    now[0] += seconds
+                    if fault != 'imu' or now[0] < 8.5:
+                        subscribers['/pidrone/imu_integrated'](SimpleNamespace(
+                            valid=True, integration_time_us=100000, delta_rotation=[0, 0, 0, 1]))
+                    if fault != 'mode' or now[0] < 8.5:
+                        subscribers['/pidrone/mode'](SimpleNamespace(
+                            mode='ARMED' if fault == 'armed' and now[0] > 2 else 'DISARMED'))
+
+                modules = {
+                    'time': SimpleNamespace(monotonic=lambda: now[0], sleep=sleep),
+                    'rospy': SimpleNamespace(init_node=lambda *a, **kw: None, is_shutdown=lambda: False,
+                        Subscriber=lambda topic, cls, callback, **kw: subscribers.update({topic: callback})),
+                    'pidrone_pkg.msg': SimpleNamespace(IntegratedImu=object, Mode=object)}
+                with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report:
+                    if fault:
+                        with self.assertRaisesRegex(RuntimeError, 'incomplete/stale'):
+                            exec(warm_reboot_fc.GYRO_CHECK, {})
+                    else:
+                        exec(warm_reboot_fc.GYRO_CHECK, {})
+                        self.assertIn('0.000 / 0.000 / 0.000', report.call_args.args[0])
 
 
 class ConnectTest(unittest.TestCase):

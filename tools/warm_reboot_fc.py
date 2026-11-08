@@ -7,8 +7,6 @@ import subprocess
 import sys
 import time
 
-import serial
-
 from flash_fc import check_disarmed, msp, port_unused, require, run, stop_fc, wait_for
 
 
@@ -19,18 +17,24 @@ import math
 import time
 import rospy
 from pidrone_pkg.msg import IntegratedImu, Mode
+try:
+    from time import monotonic
+except ImportError:
+    from monotonic import monotonic
 rospy.init_node('warm_reboot_gyro_check', anonymous=True)
 samples = []
 modes = []
 started = []
+received = []
 def receive(message):
     if not message.valid or message.integration_time_us <= 0:
         return
-    if not started:
-        started.append(time.time())
-        return
     q = list(message.delta_rotation)
     if not all(not math.isnan(x) and not math.isinf(x) for x in q):
+        return
+    received[:] = [monotonic()]
+    if not started:
+        started.append(received[0])
         return
     if q[3] < 0:
         q = [-x for x in q]
@@ -38,15 +42,17 @@ def receive(message):
     scale = (2*math.atan2(norm, q[3])/norm if norm > 1.e-12 else 2.) * 180/math.pi
     samples.append((message.integration_time_us*1.e-6, [x*scale for x in q[:3]]))
 rospy.Subscriber('/pidrone/imu_integrated', IntegratedImu, receive, queue_size=100)
-rospy.Subscriber('/pidrone/mode', Mode, lambda m: modes.append(m.mode))
-deadline = time.time() + 20
-while time.time() < deadline and not rospy.is_shutdown():
-    if started and time.time() - started[0] >= 10:
+rospy.Subscriber('/pidrone/mode', Mode, lambda m: modes.append((m.mode, monotonic())))
+deadline = monotonic() + 20
+while monotonic() < deadline and not rospy.is_shutdown():
+    if started and monotonic() - started[0] >= 10:
         break
     time.sleep(.1)
 seconds = sum(dt for dt, rotation in samples)
-if seconds < 8 or not modes or any(mode != 'DISARMED' for mode in modes):
-    raise RuntimeError('Could not verify stationary gyro: incomplete IMU data or not disarmed.')
+now = monotonic()
+if (seconds < 8 or not received or now - received[0] > .5 or not modes
+        or now - modes[-1][1] > .5 or any(mode != 'DISARMED' for mode, stamp in modes)):
+    raise RuntimeError('Could not verify stationary gyro: incomplete/stale IMU or mode data, or not disarmed.')
 mean = [sum(rotation[axis] for dt, rotation in samples)/seconds for axis in range(3)]
 print('Gyro mean (roll/pitch/yaw): %.3f / %.3f / %.3f deg/s; check that each is near zero.' % tuple(mean))
 '''
@@ -62,7 +68,9 @@ def calibration_complete(connection):
 
 
 def warm_reboot():
-    require(os.geteuid() == 0, 'Run through pals-start.sh warm-reboot.')
+    import serial
+
+    require(os.geteuid() == 0, 'Run through pals-start.sh restart.')
     home = Path('/home/duckie')
     pins = home / 'catkin_ws/pals.ports'
     values = dict(line.split('=', 1) for line in pins.read_text().splitlines() if '=' in line)
@@ -94,19 +102,25 @@ def warm_reboot():
     lines = [line for line in environment.read_text().splitlines() if not line.startswith('PALS_FC_PORT=')]
     lines.append('PALS_FC_PORT=' + str(port.resolve()))
     environment.write_text('\n'.join(lines) + '\n')
-    result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'FC', '-X', 'stuff',
-                  '^Ubash /home/duckie/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh fc^M'])
-    require(result.returncode == 0, 'Could not restart FC communication: ' + result.stdout)
-    result = subprocess.run(['docker', 'exec', '-i', 'pidrone_pkg', 'bash', '-ic', 'python -'],
+    # The launcher starts FC communication once, with the rest of the nodes.
+
+
+def check_gyro():
+    result = subprocess.run(['docker', 'exec', '-i', 'pidrone_pkg', 'bash', '-ic', 'timeout 25 python -'],
                             input=GYRO_CHECK, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            universal_newlines=True, timeout=25)
+                            universal_newlines=True, timeout=30)
     require(result.returncode == 0, 'FC restarted, but gyro verification failed: ' + result.stdout)
     print(result.stdout.strip().splitlines()[-1])
 
 
 if __name__ == '__main__':
     try:
-        warm_reboot()
+        require(len(sys.argv) == 2 and sys.argv[1] in ('reboot', 'check'),
+                'Usage: warm_reboot_fc.py reboot|check (called by pals-start.sh).')
+        if sys.argv[1] == 'reboot':
+            warm_reboot()
+        else:
+            check_gyro()
     except Exception as error:
         print('Warm reboot incomplete: %s Keep the drone disarmed; check the FC and SE terminals before restarting.' % error)
         sys.exit(1)

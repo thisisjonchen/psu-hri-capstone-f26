@@ -129,6 +129,21 @@ bool Filter::project(const std::vector<Imu>& samples) {
     state=s; covariance=p; stamp=intervals[intervals.size()-8];
     return true;
 }
+bool vertical_output(const Filter& estimate, const Filter* previous,
+                     const std::vector<Imu>& intervals, std::array<double,2>& output) {
+    if (!std::isfinite(estimate.stamp) || !std::isfinite(estimate.state[2])
+        || !std::isfinite(estimate.state[5])) return false;
+    // Output may pause while range is unavailable even though fusion keeps running.
+    // After a gap, resume from the fresh EKF instead of projecting an expired output.
+    if (!previous || estimate.stamp-previous->stamp>.5) {
+        output={{estimate.state[2],estimate.state[5]}};
+        return true;
+    }
+    Filter predicted=*previous;
+    return predicted.project(intervals) && !pals_ekf_vertical_output(output.data(),
+        estimate.state[2],estimate.state[5],predicted.state[5]-previous->state[5],
+        estimate.stamp-previous->stamp);
+}
 bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate, bool xy_only) {
     if (!cv::checkRange(innovation) || !cv::checkRange(h) || !cv::checkRange(r)) return false;
     auto s=state; auto p=covariance;
@@ -197,12 +212,12 @@ bool Snapshot::range_ready(double now) const {
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
     if (!fault.empty()) reason=fault;
-    else if (!initialized) reason="Hold still on the floor, facing +Y, for eight seconds with UWB streaming";
-    else if (!reference_valid) reason="Local reference lost; restart on the floor before flight";
-    else if (!range_ready(now)) reason="Waiting for accepted range";
-    else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh EKF output";
-    else if (current-delay-horizontal_aid>.5 && current>takeoff_deadline) reason="Coasting; waiting for accepted camera flow";
-    else if (!estimate.navigation_variance_valid()) reason="Position or velocity uncertainty is too large";
+    else if (!initialized) reason="Initializing: disarmed, still on floor, facing +Y; 8 s with UWB + ToF";
+    else if (!reference_valid) reason="Reference lost: restart SE on the floor before flight";
+    else if (!range_ready(now)) reason="Waiting: fresh ToF height";
+    else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting: fresh state estimate";
+    else if (current-delay-horizontal_aid>.5 && current>takeoff_deadline) reason="Waiting: camera tracking or confirmed rest on floor";
+    else if (!estimate.navigation_variance_valid()) reason="Waiting: position or velocity uncertainty too high";
     else { reason="Ready"; return true; }
     return false;
 }

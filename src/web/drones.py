@@ -177,12 +177,11 @@ def node_action(drone, action):
     Returns the script's last output line, which summarizes the result.
     """
     host(drone)
-    if action not in ('restart', 'align'):
+    if action != 'restart':
         raise ValueError('Unknown node action: %r' % (action,))
     if routine_running(drone):
         raise RuntimeError('a routine is running; stop it first')
-    command = 'warm-reboot' if action == 'align' else action
-    code, output = run(drone, START + ' ' + command + ' 2>&1', timeout=150 if action == 'align' else 90)
+    code, output = run(drone, START + ' restart 2>&1', timeout=240)
     # Interactive container shells print banners first; the script ends with its result.
     lines = output.strip().splitlines() or ['no output']
     if code:

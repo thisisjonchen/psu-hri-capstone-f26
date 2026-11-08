@@ -103,6 +103,7 @@ private:
     pals::Filter last_output_;
     std::array<double,2> vertical_output_ = {};
     bool ready_sent_=false,last_ready_=false;
+    std::string last_ready_reason_;
     ros::WallTime ready_at_;
 
     pals::Snapshot snapshot() {
@@ -164,11 +165,14 @@ private:
     }
     void publish_ready(bool value,const std::string& reason) {
         const ros::WallTime now=ros::WallTime::now();
+        if (reason!=last_ready_reason_) {
+            ROS_INFO("EKF: %s",reason.c_str());
+            last_ready_reason_=reason;
+        }
         if (!ready_sent_ || value!=last_ready_ || (now-ready_at_).toSec()>=.05) {
             std_msgs::Bool msg; msg.data=value; ready_pub_.publish(msg);
             ready_sent_=true; last_ready_=value; ready_at_=now;
         }
-        if (!value) ROS_INFO_THROTTLE(5,"EKF: %s",reason.c_str());
     }
     void watchdog(const ros::WallTimerEvent&) {
         const auto s=snapshot(); std::string reason;
@@ -197,15 +201,9 @@ private:
             publish_ready(false,"Invalid output IMU interval or projection"); return;
         }
         auto vertical=vertical_output_;
-        if (!last_published_) vertical={{estimate.state[2],estimate.state[5]}};
-        else {
-            pals::Filter predicted=last_output_;
-            if (!predicted.project(intervals) || pals_ekf_vertical_output(vertical.data(),
-                estimate.state[2],estimate.state[5],predicted.state[5]-last_output_.state[5],
-                estimate.stamp-last_output_.stamp)) {
-                fail("Invalid vertical output prediction");
-                publish_ready(false,"Invalid vertical output prediction"); return;
-            }
+        if (!pals::vertical_output(estimate,last_published_ ? &last_output_ : nullptr,intervals,vertical)) {
+            fail("Invalid vertical output prediction");
+            publish_ready(false,"Invalid vertical output prediction"); return;
         }
         pals::Output output=pals::body_output(estimate,history_.back().rate);
         const double height_error=vertical[0]-estimate.state[2];
