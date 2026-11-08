@@ -58,7 +58,7 @@ can lag behind the code; verify the actual launch configuration and data path.
 - The EKF is the sole runtime motion estimator: MSP IMU predicts position, velocity,
   attitude and biases; camera-image tracking and ToF correct it. Ground-rest aiding
   requires quiet IMU data and fresh floor range. The EKF runs in room coordinates:
-  it initializes from 4 s of UWB at rest, and UWB (delayed about 0.3 s) then corrects
+  it initializes from 20 UWB fixes at rest, however long they take, and UWB (delayed about 0.3 s) then corrects
   horizontal position only, never velocity, attitude or biases. UWB dropouts after
   startup coast on IMU, camera and ToF. The fusion node rate-limits XY corrections to
   the controller and validates the anchor layout; it runs no second motion filter.

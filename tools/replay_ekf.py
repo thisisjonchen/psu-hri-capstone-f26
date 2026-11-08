@@ -9,7 +9,7 @@ Optional stationary_intervals_s lists verified periods at rest as [start, end)
 seconds since the first IMU stamp, for zero velocity and gyro-bias updates.
 Disarmed hand-carried motion is not stationary.
 With /pidrone/localization/uwb recorded, the EKF starts in the room frame facing +Y at the mean
-UWB fix over the first 4 s of the first stationary interval, then fuses each fix (uwb.csv),
+UWB position over the first 20 fixes of the first stationary interval, then fuses each fix (uwb.csv),
 shifted earlier by uwb_delay_s; --no-uwb keeps that start but ignores later fixes.
 """
 import argparse
@@ -208,7 +208,7 @@ class Replay:
 
 
 def uwb_start(folder, profile):
-    """Mean UWB XY over the first 4 s of the first stationary interval, or None without UWB."""
+    """Mean of the first 20 UWB fixes in the first stationary interval, or None without UWB."""
     decoder, metadata, origin, fixes = CaptureDecoder(), {}, None, []
     for record in read_ekf_events(folder, metadata):
         imu_topic = '/pidrone/imu_integrated' if metadata.get('integrated_imu') else '/pidrone/imu_msp'
@@ -223,9 +223,9 @@ def uwb_start(folder, profile):
     if not intervals:
         raise ValueError('UWB replay needs stationary_intervals_s to average the starting position')
     start = intervals[0][0]
-    window = [(x, y) for t, x, y in fixes if start <= t < min(start+4., intervals[0][1])]
-    if len(window) < 30:
-        raise ValueError('Need at least 30 UWB fixes in the first 4 s at rest; found %d' % len(window))
+    window = [(x, y) for t, x, y in fixes if start <= t < intervals[0][1]][:20]
+    if len(window) < 20:
+        raise ValueError('Need 20 UWB fixes in the first stationary interval; found %d' % len(window))
     return np.mean(window, axis=0)
 
 

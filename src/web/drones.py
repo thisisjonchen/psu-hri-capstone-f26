@@ -182,7 +182,8 @@ def node_action(drone, action):
     if routine_running(drone):
         raise RuntimeError('a routine is running; stop it first')
     command = 'warm-reboot' if action == 'align' else action
-    code, output = run(drone, START + ' ' + command + ' 2>&1', timeout=150 if action == 'align' else 90)
+    # Both actions end by waiting up to about four minutes for the EKF to initialize.
+    code, output = run(drone, START + ' ' + command + ' 2>&1', timeout=330)
     # Interactive container shells print banners first; the script ends with its result.
     lines = output.strip().splitlines() or ['no output']
     if code:

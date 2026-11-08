@@ -10,6 +10,9 @@
 #include <pidrone_pkg/IntegratedImu.h>
 #include <pidrone_pkg/State.h>
 #include <atomic>
+#include <algorithm>
+#include <cstdio>
+#include <map>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -62,6 +65,10 @@ public:
     Node():private_("~"),profile_(profile(private_)),filter_(profile_) {
         private_.param<std::string>("body_frame",body_frame_,"pidrone_body");
         private_.param<std::string>("frame_id",frame_,"map");
+        // Startup scripts wait for this report (boot/pals-start.sh, scripts/screen_node.sh).
+        private_.deleteParam("initialized");
+        // Startup progress for the routine window (scripts/screen_node.sh, boot/pals-start.sh).
+        startup_log_=std::fopen("/tmp/ekf_startup.log","w");
         cv::setNumThreads(1);
         state_pub_=node_.advertise<pidrone_pkg::State>("pidrone/ekf/state",1);
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
@@ -79,6 +86,7 @@ public:
     ~Node() {
         { std::lock_guard<std::mutex> lock(queue_mutex_); stopping_=true; }
         available_.notify_one(); worker_.join();
+        if (startup_log_) std::fclose(startup_log_);
     }
 private:
     ros::NodeHandle node_,private_;
@@ -92,7 +100,13 @@ private:
     std::mutex queue_mutex_,snapshot_mutex_;
     std::condition_variable available_;
     std::deque<Event> queue_;
-    bool stopping_=false;
+    bool stopping_=false,announced_=false;
+    // Worker-thread fusion counts per sensor (accepted, attempted), summarized each second.
+    std::map<std::string,std::pair<int,int>> counts_;
+    double last_uwb_innovation_=std::numeric_limits<double>::quiet_NaN();
+    ros::WallTime summary_at_;
+    std::FILE* startup_log_=nullptr;
+    int startup_progress_=-1,reported_recoveries_=0;
     std::atomic<bool> failed_{false};
     pals::Snapshot snapshot_;
     // Only the ROS callback thread owns the current-time IMU history and output.
@@ -173,6 +187,11 @@ private:
     void watchdog(const ros::WallTimerEvent&) {
         const auto s=snapshot(); std::string reason;
         if (s.uwb_rejections>=20) ROS_WARN_THROTTLE(5.,"EKF: %d consecutive UWB fixes rejected",s.uwb_rejections);
+        if (s.uwb_recoveries>reported_recoveries_) {
+            ROS_WARN("EKF: position pulled back to UWB after consecutive rejected fixes (%d this session)",
+                     s.uwb_recoveries);
+            reported_recoveries_=s.uwb_recoveries;
+        }
         const bool ready=s.ready(ros::Time::now().toSec(),last_published_ ? last_output_ : s.filter,reason);
         publish_ready(!failed_ && ready,reason);
     }
@@ -235,6 +254,27 @@ private:
         last_output_=estimate; vertical_output_=vertical; last_published_=stamp;
         std::string reason; publish_ready(s.ready(after,estimate,reason),reason);
     }
+    // A per-sensor accepted/attempted summary each second at INFO.
+    void log_updates() {
+        for (const auto& u:filter_.take_updates()) {
+            auto& count=counts_[u.sensor];
+            ++count.second;
+            if (!u.accepted) continue;
+            ++count.first;
+            if (u.sensor=="uwb") last_uwb_innovation_=u.innovation;
+        }
+        const ros::WallTime now=ros::WallTime::now();
+        if (counts_.empty() || (now-summary_at_).toSec()<1.) return;
+        std::string summary;
+        for (const auto& c:counts_) {
+            char item[96];
+            std::snprintf(item,sizeof item,"%s%s %d/%d",summary.empty() ? "" : " | ",c.first.c_str(),c.second.first,c.second.second);
+            summary+=item;
+            if (c.first=="uwb") { std::snprintf(item,sizeof item," (last %.3f m)",last_uwb_innovation_); summary+=item; }
+        }
+        ROS_INFO("EKF 1 s: %s",summary.c_str());
+        counts_.clear(); summary_at_=now;
+    }
     void work() {
         while (true) {
             Event e;
@@ -259,8 +299,26 @@ private:
                     filter_.uwb(m.header.stamp.toNSec(),m.pose.pose.position.x,m.pose.pose.position.y,
                                 std::max(m.pose.covariance[0],m.pose.covariance[7]));
                 } else filter_.mode(e.mode->mode,e.received);
+                log_updates();
                 const auto completed=filter_.snapshot();
                 if (!completed.fault.empty()) { fail(completed.fault); continue; }
+                // Startup progress for the routine window; a reset to 0 means the rest was interrupted.
+                const int progress=std::min(completed.uwb_startup,pals::startup_fixes);
+                if (!completed.initialized && startup_log_ && progress!=startup_progress_) {
+                    startup_progress_=progress;
+                    std::fprintf(startup_log_,"EKF startup: UWB fixes at rest %d/%d\n",progress,pals::startup_fixes);
+                    std::fflush(startup_log_);
+                }
+                if (completed.initialized && !announced_) {
+                    const auto& x=completed.filter.state;
+                    char report[128];
+                    std::snprintf(report,sizeof report,"EKF initialized after %d/%d UWB fixes, facing map +Y at (%.3f, %.3f) m, height %.3f m",
+                                  pals::startup_fixes,pals::startup_fixes,x[0],x[1],x[2]);
+                    ROS_INFO("%s",report);
+                    private_.setParam("initialized",std::string(report));
+                    announced_=true;
+                    if (startup_log_) { std::fclose(startup_log_); startup_log_=nullptr; }
+                }
                 // Never hold this lock during tracking, fusion, or projection.
                 std::lock_guard<std::mutex> lock(snapshot_mutex_);
                 if (!failed_) snapshot_=completed;

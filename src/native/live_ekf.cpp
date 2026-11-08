@@ -10,6 +10,8 @@
 namespace pals {
 namespace {
 const Vec gravity(0., 0., -9.8);
+// Consecutive rejected UWB fixes (about two seconds) before the estimate is pulled back to UWB.
+const int uwb_recovery_rejections = 20;
 std::array<double, 225> density() {
     std::array<double, 225> result = {};
     const double noise[] = {0., .3*.3, .015*.015, .02*.02, .001*.001};
@@ -133,6 +135,7 @@ bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat&
     if (!cv::checkRange(innovation) || !cv::checkRange(h) || !cv::checkRange(r)) return false;
     auto s=state; auto p=covariance;
     cv::Mat total(r.rows,r.cols,CV_64F); double nis=0.;
+    last_innovation=cv::norm(innovation);
     if (pals_ekf_correct(s.data(),p.data(),innovation.ptr<double>(),h.ptr<double>(),r.ptr<double>(),
                          innovation.rows,gate,xy_only,total.ptr<double>(),&nis)) return false;
     state=s; covariance=p;
@@ -153,6 +156,18 @@ void Filter::reset_height(double height,const Vec& attitude_jacobian,double vari
     require(std::isfinite(height) && height>0. && std::isfinite(variance) && variance>0.
             && cv::checkRange(converted),"Invalid ground height reset");
     state[2]=height;
+    std::copy(converted.ptr<double>(),converted.ptr<double>()+225,covariance.begin());
+}
+void Filter::inflate_horizontal(double variance) {
+    cv::Mat p=public_covariance();
+    p.at<double>(0,0)+=variance; p.at<double>(1,1)+=variance;
+    const Rotation r=rotation(quaternion());
+    cv::Mat transform=cv::Mat::eye(15,15,CV_64F);
+    block(transform,0,6,skew(position())*r);
+    block(transform,3,6,skew(velocity())*r); block(transform,6,6,r);
+    cv::Mat converted=transform*p*transform.t();
+    require(std::isfinite(variance) && variance>0. && cv::checkRange(converted),
+            "Invalid horizontal position inflation");
     std::copy(converted.ptr<double>(),converted.ptr<double>()+225,covariance.begin());
 }
 cv::Mat Filter::public_covariance() const {
@@ -197,7 +212,7 @@ bool Snapshot::range_ready(double now) const {
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
     if (!fault.empty()) reason=fault;
-    else if (!initialized) reason="Hold still on the floor, facing +Y, for eight seconds with UWB streaming";
+    else if (!initialized) reason="Hold still on the floor, facing +Y, until "+std::to_string(startup_fixes)+" UWB fixes arrive";
     else if (!reference_valid) reason="Local reference lost; restart on the floor before flight";
     else if (!range_ready(now)) reason="Waiting for accepted range";
     else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting for fresh EKF output";
@@ -290,7 +305,6 @@ void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
         // Average fixes from the current rest period for the starting room position.
         if (!rest_since_ || stamp<rest_since_) return;
         uwb_initial_.push_back({stamp,x,y,variance});
-        while (stamp-uwb_initial_.front().stamp>5000000000LL) uwb_initial_.pop_front();
         return;
     }
     if (!fault_.empty()) return;
@@ -342,13 +356,14 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
     if (!origin_ns_) {
         if (!rest_since_) return;
         initial_.push_back({force,rate,range_.value,ns});
-        if ((ns-initial_.front().stamp)/1.e9<8.) return;
+        // Four seconds of rest set tilt and gyro bias; stationary-gyro updates refine the bias afterwards.
+        if ((ns-initial_.front().stamp)/1.e9<4.) return;
         double tag_x=0.,tag_y=0.,tag_variance=0.; int fixes=0;
-        for (const auto& f:uwb_initial_) if (f.stamp<=ns && ns-f.stamp<=4000000000LL) {
+        for (const auto& f:uwb_initial_) if (f.stamp<=ns) {
             tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
         }
-        // Keep waiting for UWB over the newest eight seconds of rest.
-        if (fixes<30) { initial_.erase(initial_.begin()); return; }
+        // Keep resting, however long it takes, until enough UWB fixes arrive.
+        if (fixes<startup_fixes) { initial_.erase(initial_.begin()); return; }
         tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }
@@ -393,10 +408,12 @@ void LiveEKF::drain(double through) {
         const double stamp=std::min(sample.stamp,aid);
         if (stamp>through) break;
         if (stamp>filter_.stamp && !filter_.predict(sample,stamp)) { fault_="Invalid IMU prediction"; break; }
-        if (sample.stamp==stamp) imu_.pop_front();
+        if (sample.stamp==stamp) { imu_.pop_front(); updates_.push_back({"imu",0.,true}); }
         while (!measurements_.empty() && measurements_.begin()->first.first==stamp) {
             Measurement m=measurements_.begin()->second; measurements_.erase(measurements_.begin());
+            filter_.last_innovation=std::numeric_limits<double>::quiet_NaN();
             const bool accepted=correct(m);
+            updates_.push_back({m.sensor,filter_.last_innovation,accepted});
             check_reference(stamp);
             if (accepted && (m.sensor=="range" || m.sensor=="camera" || m.sensor=="zero_velocity")) {
                 last_aid_[m.sensor]=stamp;
@@ -429,8 +446,18 @@ bool LiveEKF::correct(const Measurement& m) {
         cv::Mat h=cv::Mat::zeros(2,15,CV_64F);
         h.at<double>(0,0)=h.at<double>(1,1)=1.;
         for (int i=0;i<2;++i) for (int j=0;j<3;++j) h.at<double>(i,6+j)=-a(i,j);
-        const bool accepted=filter_.correct((cv::Mat_<double>(2,1)<<m.xy[0]-tag[0],m.xy[1]-tag[1]),
-                                            h,cv::Mat::eye(2,2,CV_64F)*m.value,9.21,true);
+        const cv::Mat innovation=(cv::Mat_<double>(2,1)<<m.xy[0]-tag[0],m.xy[1]-tag[1]);
+        const cv::Mat noise=cv::Mat::eye(2,2,CV_64F)*m.value;
+        bool accepted=filter_.correct(innovation,h,noise,9.21,true);
+        if (!accepted && uwb_rejections_+1>=uwb_recovery_rejections) {
+            // Camera-aided odometry has drifted outside the gate and would never readmit
+            // UWB. Widen horizontal uncertainty by the disagreement so this fix pulls the
+            // estimate back; the fusion node slews its published position to the new one.
+            const double gap=cv::norm(innovation);
+            filter_.inflate_horizontal(gap*gap);
+            accepted=filter_.correct(innovation,h,noise,9.21,true);
+            if (accepted) ++uwb_recoveries_;
+        }
         uwb_rejections_=accepted ? 0 : uwb_rejections_+1;
         return accepted;
     }
@@ -537,6 +564,8 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
     s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
+    s.uwb_recoveries=uwb_recoveries_;
+    s.uwb_startup=static_cast<int>(uwb_initial_.size());
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));
