@@ -9,7 +9,7 @@ hover_throttle: 1550.0
 takeoff_throttle: 1490.0
 throttle_range: [1200.0, 1700.0]
 # Climb-rate target per meter of height error (1/s).
-height_p: 0.6
+height_p: 0.8
 # Acceleration per m/s of climb-rate error (1/s), and its integral (1/s^2).
 rate_p: 1.43
 rate_i: 0.71
