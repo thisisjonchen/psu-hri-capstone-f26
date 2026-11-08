@@ -53,8 +53,8 @@ class AprilTagMappingTests(unittest.TestCase):
         self.now = 100.0
         self.maps, self.payload_points = [], []
         ros = ModuleType('rospy')
-        # These expectations are worked out for a 60 degree mounting; set it explicitly.
-        params = {'~camera_pitch_down_deg': 60.0, '~payload_plane_z': .25}
+        # Exercise the mapper's default 45 degree camera mounting.
+        params = {'~payload_plane_z': .25}
         ros.get_param = lambda name, default: params.get(name, default)
         ros.Time = NS(now=lambda: Stamp(self.now))
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
@@ -111,7 +111,7 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual((result.header.frame_id, result.header.stamp.to_sec(), result.generation),
                          ('map', 99.9, 1))
         np.testing.assert_allclose((result.point.x, result.point.y, result.point.z),
-                                   (1 + .15/math.sqrt(3), 2 + .75/math.sqrt(3), .25), atol=1e-7)
+                                   (1 + .075*math.sqrt(2), 2.75, .25), atol=1e-7)
         self.node.payload_callback(detection)
         self.assertEqual(len(self.payload_points), 1)
 
@@ -142,7 +142,7 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual(result.sample_counts, [3])
         point = result.positions[0]
         np.testing.assert_allclose((point.x, point.y, point.z),
-                                   (1, 2 + 1/math.sqrt(3), 0), atol=1e-7)
+                                   (1, 3, 0), atol=1e-7)
         # Losing readiness pauses sampling without erasing measured landmarks.
         self.node.ready_callback(NS(data=False))
         self.now += .1
@@ -188,9 +188,9 @@ class AprilTagMappingTests(unittest.TestCase):
         result = self.maps[-1]
         self.assertEqual(result.tag_ids, [0])
         point = result.positions[0]
-        down = math.sqrt(3)/2 + y/2
+        down = (1 + y) / math.sqrt(2)
         np.testing.assert_allclose((point.x, point.y, point.z),
-                                   (1 + x/down, 2 + (.5-y*math.sqrt(3)/2)/down, 0), atol=1e-7)
+                                   (1 + x/down, 2 + (1-y)/(1+y), 0), atol=1e-7)
 
         # A malformed calibration update pauses observations without losing the map.
         self.node.camera_callback(NS(width=240, height=320, K=k, D=d + [0],
