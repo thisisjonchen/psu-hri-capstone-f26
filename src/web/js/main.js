@@ -819,9 +819,9 @@ class DroneSession {
     return true;
   }
 
-  retry(ros) {
+  retry(ros, delay = 2000) {
     if (this.expireConnection()) return true;
-    if (ros.isConnected || !(Date.now() < this.waitUntil)) return false;
+    if (ros?.isConnected || !(Date.now() < this.waitUntil)) return false;
     const until = this.waitUntil;
     this.disconnect('Waiting for nodes…');
     this.waitUntil = until;
@@ -829,7 +829,7 @@ class DroneSession {
       if (this.waitUntil !== until) return;
       this.retryTimer = null;
       this.connect();
-    }, 2000);
+    }, delay);
     return true;
   }
 

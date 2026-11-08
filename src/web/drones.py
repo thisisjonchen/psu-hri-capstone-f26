@@ -277,7 +277,8 @@ def open_terminal(drone, cols, rows, start=False, active=lambda: True):
         channel = client.get_transport().open_session(timeout=5)
         channel.settimeout(10)
         channel.get_pty(term='xterm-256color', width=cols, height=rows)
-        attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)
+        attach = 'exec docker exec -it %s bash -c %s' % (CONTAINER, shlex.quote(
+            'ulimit -Sn 1024 && exec screen -x %s -p routine' % SESSION))
         if start:
             command = ('git -C ' + PACKAGE + ' pull --ff-only && ' + START +
                        r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach)

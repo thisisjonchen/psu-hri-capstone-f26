@@ -238,7 +238,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     Date: class extends Date { static now() { return now; } },
     setInterval(callback, delay) { const id = ++nextTimer; (delay === 1000 ? timers : maintenanceTimers).set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
-    setTimeout(callback) { retries.push(callback); },
+    setTimeout(callback, delay) { callback.delay = delay; retries.push(callback); },
     clearTimeout() {},
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }
   });
@@ -822,6 +822,7 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   pane.started(true);
   assert.equal(app.drones.drone1.ros, null);
   assert.equal(app.drones.drone1.waitUntil, deadline);
+  assert.equal(app.retries.at(-1).delay, 0, 'ready bridge should reconnect without the backoff');
   stalled.open();
   assert.equal(app.drones.drone1.connected, false);
   app.retries.pop()();
@@ -830,6 +831,14 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.equal(app.drones.drone1.connected, true);
   pane.started(true);
   assert.equal(app.drones.drone1.ros, replacement, 'startup must preserve an open bridge');
+  app.drones.drone1.disconnect();
+  app.connectDrone('drone1');
+  app.drones.drone1.retry(app.drones.drone1.ros);
+  assert.equal(app.drones.drone1.ros, null);
+  pane.started(true);
+  assert.equal(app.retries.at(-1).delay, 0, 'readiness should also replace an already queued retry');
+  app.retries.pop()();
+  assert.ok(app.drones.drone1.ros);
   app.drones.drone1.disconnect();
   app.connectDrone('drone1');
   pane.socket.onclose();

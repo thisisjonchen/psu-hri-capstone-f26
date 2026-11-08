@@ -176,7 +176,9 @@ else
     fi
     resolve_ports || exit 1
     # Interactive bash loads the container's ROS environment and enters pidrone_pkg.
-    docker exec -d "$container" bash -ic "screen -dmS $session -c pi.screenrc" ||
+    # screen scans the descriptor range when creating windows. Docker's million-
+    # descriptor default delays every window; children inherit this soft limit.
+    docker exec -d "$container" bash -ic "ulimit -Sn 1024 && exec screen -dmS $session -c pi.screenrc" ||
         { echo "Could not launch the screen session." >&2; exit 1; }
     for _ in $(seq 20); do
         session_running && break

@@ -88,7 +88,7 @@ class RoutineTerminal {
     if (!ok) drone.failConnection('Nodes failed to start');
     // Startup confirms rosbridge is listening. Replace a socket that may still
     // be waiting on an attempt made before the bridge was available.
-    else if (this.enabled && drone.waitUntil && drone.ros && !drone.connected) drone.retry(drone.ros);
+    else if (this.enabled && drone.waitUntil && !drone.connected) drone.retry(drone.ros, 0);
     this.changed();
   }
 
