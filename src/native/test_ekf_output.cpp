@@ -1,6 +1,7 @@
 #include "live_ekf.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 pals::Filter resting(double stamp, double height=.05) {
@@ -70,6 +71,28 @@ TEST(EkfOutput, RecoveryDoesNotMakeStaleRangeOrOutputReady) {
     s.filter.state[2]=std::numeric_limits<double>::quiet_NaN();
     std::array<double,2> vertical={{0.,0.}};
     EXPECT_FALSE(pals::vertical_output(s.filter,nullptr,{},vertical));
+}
+
+TEST(EkfOutput, TrackingDiagnosticsCompareTheSameTimeWithoutBridgingOutputGaps) {
+    auto fusion=resting(1.05,.31);
+    fusion.state[5]=-.03;
+    const std::deque<pals::VerticalOutputSample> history={
+        {1.,.30,-.1},{1.1,.32,.1},{1.4,.8,.4}};
+    std::array<double,2> error;
+    ASSERT_TRUE(pals::vertical_tracking_error(fusion,history,error));
+    EXPECT_NEAR(0.,error[0],1.e-12);
+    EXPECT_NEAR(-.03,error[1],1.e-12);
+    fusion.stamp=1.1;
+    ASSERT_TRUE(pals::vertical_tracking_error(fusion,history,error));
+    EXPECT_NEAR(-.01,error[0],1.e-12);
+    EXPECT_NEAR(-.13,error[1],1.e-12);
+    for (double stamp:{.9,1.2,1.5}) {
+        fusion.stamp=stamp;
+        EXPECT_FALSE(pals::vertical_tracking_error(fusion,history,error));
+        EXPECT_TRUE(std::isnan(error[0]));
+        EXPECT_TRUE(std::isnan(error[1]));
+    }
+    EXPECT_FALSE(pals::vertical_tracking_error(fusion,{},error));
 }
 
 TEST(EkfOutput, RangeDiagnosticsRetainAttemptTimeAndReportAcceptedAndRejectedUpdates) {

@@ -1,7 +1,15 @@
 # Header: latest projected IMU time, map frame; positive height/velocity is up.
 std_msgs/Header header
-# Delayed EKF horizon. EKF values below are projected to header.stamp.
+# Delayed EKF horizon and its height/velocity before IMU projection.
 time fusion_stamp
+float64 height_fusion
+float64 velocity_fusion
+# Delayed EKF minus previously published output at fusion_stamp.
+# Invalid (NaN) until output history covers that time, or across an output gap.
+bool output_tracking_valid
+float64 height_tracking_error
+float64 velocity_tracking_error
+# Projected EKF and smoothed controller output at header.stamp.
 float64 height_ekf
 float64 height_output
 float64 velocity_ekf

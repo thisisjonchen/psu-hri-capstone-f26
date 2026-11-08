@@ -63,6 +63,10 @@ Output body_output(const Filter&, const Vec& angular_rate);
 bool vertical_output(const Filter& estimate, const Filter* previous,
                      const std::vector<Imu>& intervals, std::array<double,2>& output);
 
+struct VerticalOutputSample { double stamp, height, velocity; };
+bool vertical_tracking_error(const Filter& fusion, const std::deque<VerticalOutputSample>& history,
+                             std::array<double,2>& error);
+
 struct RangeCorrection {
     std::uint64_t sequence = 0;
     double stamp = 0., innovation = std::numeric_limits<double>::quiet_NaN();

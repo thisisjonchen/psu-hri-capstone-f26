@@ -144,6 +144,27 @@ bool vertical_output(const Filter& estimate, const Filter* previous,
         estimate.state[2],estimate.state[5],predicted.state[5]-previous->state[5],
         estimate.stamp-previous->stamp);
 }
+bool vertical_tracking_error(const Filter& fusion, const std::deque<VerticalOutputSample>& history,
+                             std::array<double,2>& error) {
+    error.fill(std::numeric_limits<double>::quiet_NaN());
+    if (history.empty() || !std::isfinite(fusion.stamp)
+        || fusion.stamp<history.front().stamp || fusion.stamp>history.back().stamp) return false;
+    auto right=std::lower_bound(history.begin(),history.end(),fusion.stamp,
+        [](const VerticalOutputSample& sample,double stamp) { return sample.stamp<stamp; });
+    double height=right->height, velocity=right->velocity;
+    if (right->stamp!=fusion.stamp) {
+        const auto& left=*(right-1);
+        const double gap=right->stamp-left.stamp;
+        if (!(gap>0. && gap<=.15)) return false;
+        const double fraction=(fusion.stamp-left.stamp)/gap;
+        height=left.height+fraction*(height-left.height);
+        velocity=left.velocity+fraction*(velocity-left.velocity);
+    }
+    const double dh=fusion.state[2]-height, dv=fusion.state[5]-velocity;
+    if (!std::isfinite(dh) || !std::isfinite(dv)) return false;
+    error={{dh,dv}};
+    return true;
+}
 bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate, bool xy_only) {
     if (!cv::checkRange(innovation) || !cv::checkRange(h) || !cv::checkRange(r)) return false;
     auto s=state; auto p=covariance;

@@ -105,6 +105,7 @@ private:
     std::uint32_t last_sequence_=0,last_sample_us_=0;
     pals::Filter last_output_;
     std::array<double,2> vertical_output_ = {};
+    std::deque<pals::VerticalOutputSample> vertical_history_;
     bool ready_sent_=false,last_ready_=false;
     std::string last_ready_reason_;
     ros::WallTime ready_at_;
@@ -242,9 +243,16 @@ private:
     void publish_vertical(const pals::Snapshot& s,const pals::Filter& estimate,
                           const std::array<double,2>& vertical,const std_msgs::Header& header) {
         if (!vertical_pub_.getNumSubscribers()) return;
+        vertical_history_.push_back({estimate.stamp,vertical[0],vertical[1]});
+        while (vertical_history_.size()>1 && estimate.stamp-vertical_history_[1].stamp>1.)
+            vertical_history_.pop_front();
+        std::array<double,2> tracking;
         pidrone_pkg::EkfVertical msg;
         msg.header=header;
         msg.fusion_stamp.fromNSec(s.origin_ns+std::llround(s.filter.stamp*1.e9));
+        msg.height_fusion=s.filter.position()[2]; msg.velocity_fusion=s.filter.velocity()[2];
+        msg.output_tracking_valid=pals::vertical_tracking_error(s.filter,vertical_history_,tracking);
+        msg.height_tracking_error=tracking[0]; msg.velocity_tracking_error=tracking[1];
         msg.height_ekf=estimate.position()[2]; msg.height_output=vertical[0];
         msg.velocity_ekf=estimate.velocity()[2]; msg.velocity_output=vertical[1];
         msg.accel_bias_body_z=estimate.acceleration_bias()[2];
