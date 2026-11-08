@@ -202,7 +202,6 @@ class RoutineTerminal {
 class RoutineRunner {
   constructor() {
     this.select = document.getElementById('routine-script');
-    this.target = document.getElementById('routine-target');
     this.args = document.getElementById('routine-args');
     this.button = document.getElementById('routine-execute');
     this.restartButton = document.getElementById('nodes-restart');
@@ -210,7 +209,6 @@ class RoutineRunner {
     this.button.addEventListener('click', () => this.execute());
     this.restartButton.addEventListener('click', () => this.restart());
     this.select.addEventListener('change', () => this.render());
-    this.target.addEventListener('change', () => this.render());
     // The Connect and Disconnect buttons (main.js) also open and close the terminals.
     const terminal = id => this.terminals.find(candidate => candidate.id === id);
     document.addEventListener('drone-connect', event => terminal(event.detail).connectDrone());
@@ -229,13 +227,10 @@ class RoutineRunner {
     return this.terminals.filter(terminal => terminal.enabled);
   }
 
-  get targets() {
-    return this.active.filter(terminal => this.target.value === 'all' || terminal.id === this.target.value);
-  }
-
   render() {
-    const lists = this.targets.filter(terminal => terminal.scripts).map(terminal => terminal.scripts);
-    // Offer only scripts available on every selected drone.
+    const targets = this.active;
+    const lists = targets.filter(terminal => terminal.scripts).map(terminal => terminal.scripts);
+    // Offer only scripts available on every active drone.
     const scripts = lists.length ? lists[0].filter(name => lists.every(list => list.includes(name))) : [];
     const selected = this.select.value;
     if (scripts.join() !== Array.from(this.select.options, option => option.value).filter(Boolean).join()) {
@@ -244,12 +239,10 @@ class RoutineRunner {
       this.select.replaceChildren(...options);
       this.select.value = scripts.includes(selected) ? selected : '';
     }
-    const waiting = this.targets.filter(terminal => !terminal.ready).map(terminal => terminal.id);
-    const loaded = this.active.length > 0 && this.active.every(terminal => terminal.scripts);
-    this.button.disabled = this.busy || !this.select.value || !this.targets.length || waiting.length > 0;
-    this.target.disabled = this.busy;
+    const loaded = targets.length > 0 && targets.every(terminal => terminal.scripts);
+    this.button.disabled = this.busy || !this.select.value || !targets.length || !targets.every(terminal => terminal.ready);
     this.restartButton.disabled = this.busy || !loaded ||
-      !this.active.every(terminal => terminal.nodes && !terminal.running);
+      !targets.every(terminal => terminal.nodes && !terminal.running);
   }
 
   async run(label, targets, action) {
@@ -268,7 +261,7 @@ class RoutineRunner {
   async execute() {
     const script = this.select.value;
     const args = this.args.value.trim();
-    const targets = this.targets;
+    const targets = this.active;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
     awaitSyncStart(targets.map(terminal => terminal.id));
     const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));

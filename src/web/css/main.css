@@ -81,6 +81,14 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .battery-status { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .battery-status svg { width: 20px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 .battery-status .status-value { font-size: 12px; }
+.guard-status { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; color: var(--muted); border-radius: 4px; }
+.guard-status svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.guard-status[data-state="active"] { color: var(--success); }
+.guard-status[data-state="warning"] { color: var(--warning); }
+.guard-status[data-state="unavailable"] .guard-outline { stroke-dasharray: 2 3; }
+.guard-status .guard-active, .guard-status .guard-disabled, .guard-status .guard-warning { display: none; }
+.guard-status[data-state="active"] .guard-active, .guard-status[data-state="disabled"] .guard-disabled, .guard-status[data-state="warning"] .guard-warning { display: inline; }
+.guard-status:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
 .connection-status:disabled { cursor: default; opacity: 1; }
 .connection-action { display: none; }
 .connection-status:not(:disabled):is(:hover, :focus-visible) { color: #a12c35; background: #fcebee; }
@@ -95,11 +103,15 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .status-value { font-size: var(--type-value); font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .status-value.alert-danger { color: var(--error); background: transparent; }
 .status-value.alert-success { color: var(--success); background: transparent; }
-.coordination-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--line); padding-top: var(--space-2); font-size: var(--type-label); }
-.coordination-status [data-field="coordination"] { min-width: 0; overflow-wrap: anywhere; }
-.guard-toggle { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--type-label); cursor: pointer; }
-.guard-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--blue); }
-.guard-toggle:has(input:disabled) { color: var(--muted); cursor: default; }
+.guard-toggle { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; cursor: pointer; }
+.guard-toggle input { appearance: none; position: relative; flex: none; width: 28px; height: 16px; margin: 0; border: 1px solid #b9c5d4; border-radius: 999px; background: #b9c5d4; cursor: inherit; }
+.guard-toggle input::before { content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface); }
+.guard-toggle input:checked { border-color: var(--blue); background: var(--blue); }
+.guard-toggle input:checked::before { transform: translateX(12px); }
+.guard-toggle:has(input:checked) { color: var(--blue); border-color: #9fb5cf; background: #e8eef5; }
+.guard-toggle input:focus-visible { outline: none; }
+.guard-toggle:has(input:focus-visible) { outline: 3px solid #0072b266; outline-offset: 2px; }
+.guard-toggle:has(input:disabled) { color: var(--muted); border-color: #dce3ed; background: var(--surface); opacity: .65; cursor: default; }
 .metric-label { color: var(--muted); font-size: var(--type-label); font-weight: 600; }
 .speed-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .speed-readings span, .speed-readings strong { display: block; }
@@ -221,7 +233,7 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
   .fleet-grid { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; scrollbar-width: thin; }
   .drone-dashboard { flex: 1 1 0; min-height: 0; overflow: auto; }
   .connection-entry { min-height: 64px; flex: 1; }
-  .status-grid { flex: 1; align-items: stretch; grid-template-rows: minmax(min-content, 1fr) minmax(min-content, 1fr) minmax(min-content, 1fr) auto; }
+  .status-grid { flex: 1; align-items: stretch; grid-template-rows: repeat(3, minmax(min-content, 1fr)); }
   .status-grid > .status-card { display: flex; flex-direction: column; justify-content: center; }
   .drone-heading { margin-bottom: 6px; gap: 6px; }
   .status-card { border-radius: 6px; padding: 8px; box-shadow: none; background: #f7f9fc; }

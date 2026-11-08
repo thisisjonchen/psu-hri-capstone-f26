@@ -685,6 +685,18 @@ class DroneSession {
         (this.fusionReadyAt !== null && Date.now() - this.fusionReadyAt > 500)) this.clearFusion();
   }
 
+  setCoordination(value) {
+    const labels = { clear: 'Active · clear', inactive: 'Standby', solo: 'Solo flight',
+      disabled: 'Disabled on drone', tracking_spacing: 'Maintaining spacing', limited: 'Limiting motion',
+      unavailable: 'Unavailable' };
+    const status = this.field('coordination');
+    status.dataset.state = ['disabled', 'unavailable'].includes(value) ? value
+      : ['clear', 'tracking_spacing'].includes(value) ? 'active'
+      : ['inactive', 'solo'].includes(value) ? 'standby' : 'warning';
+    status.title = 'Separation guard: ' + (labels[value] || value.replace(/_/g, ' '));
+    status.setAttribute('aria-label', status.title);
+  }
+
   refreshCoordination() {
     if (this.preflightReceivedAt !== null &&
         (Date.now() < this.preflightReceivedAt || Date.now() - this.preflightReceivedAt > 500)) {
@@ -694,7 +706,7 @@ class DroneSession {
     if (this.coordinationReceivedAt !== null &&
         (Date.now() - this.coordinationReceivedAt < 0 || Date.now() - this.coordinationReceivedAt > 500)) {
       this.coordinationReceivedAt = null;
-      this.field('coordination').textContent = 'Unavailable';
+      this.setCoordination('unavailable');
     }
   }
 
@@ -735,6 +747,7 @@ class DroneSession {
     button.setAttribute('aria-label', button.textContent + ' Drone ' + this.id.slice(-1));
     this.field('telemetry').hidden = !connected;
     this.field('batteryStatus').hidden = !connected;
+    this.field('coordination').hidden = !connected;
     status.disabled = !active;
     status.querySelector('[data-connection-action]').textContent = connected ? 'Disconnect' : 'Cancel';
     if (connected && document.activeElement === button) status.focus();
@@ -762,7 +775,7 @@ class DroneSession {
     this.fusionGeneration = null;
     this.clearFusion();
     this.coordinationReceivedAt = null;
-    this.field('coordination').textContent = 'Unavailable';
+    this.setCoordination('unavailable');
     this.preflightReceivedAt = null;
     this.field('flightMode').title = 'Preflight unavailable';
     this.preflightReady = false;
@@ -935,10 +948,8 @@ class DroneSession {
     });
     subscribe('/pidrone/coordination/status', 'std_msgs/String', message => {
       if (typeof message.data !== 'string' || !message.data.trim()) return;
-      const labels = { clear: 'Active · clear', inactive: 'Standby', solo: 'Solo flight',
-        disabled: 'Disabled on drone', tracking_spacing: 'Maintaining spacing', limited: 'Limiting motion' };
       this.coordinationReceivedAt = Date.now();
-      this.field('coordination').textContent = labels[message.data] || message.data.replace(/_/g, ' ');
+      this.setCoordination(message.data);
     });
     subscribe('/pidrone/coordination/preflight', 'pidrone_pkg/FlightReadiness', message => {
       if (typeof message.reason !== 'string' || message.mode !== this.field('flightMode').textContent) return;
@@ -1243,8 +1254,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     separationGuardEnabled = guardToggle.checked;
     publishCoordinationSelection();
-    feedback(separationGuardEnabled ? 'Separation guard enabled for automatic pairing.' :
-      'Separation guard disabled for both drones. Check each drone’s status below.');
   });
   const fullscreenButton = document.getElementById('fullscreen-toggle');
   fullscreenButton.hidden = !document.fullscreenEnabled;

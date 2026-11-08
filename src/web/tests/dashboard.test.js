@@ -565,25 +565,39 @@ test('flight-state tooltip shows preflight refusal and expires grants at the sou
   assert.equal(a.field('flightMode').title, 'Preflight unavailable');
 });
 
-test('separation status comes from each onboard guard and expires on silence or disconnect', () => {
+test('separation icons show each onboard status and expire on silence or disconnect', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  const status = drone => drone.field('coordination').textContent;
-  assert.equal(status(a), 'Unavailable');
+  const status = drone => {
+    const icon = drone.field('coordination');
+    assert.equal(icon.getAttribute('aria-label'), icon.title);
+    return icon.title;
+  };
+  assert.equal(status(a), 'Separation guard: Unavailable');
+  assert.equal(a.field('coordination').hidden, false);
   app.receive(a, '/pidrone/coordination/status', { data: 'clear' });
   app.receive(b, '/pidrone/coordination/status', { data: 'disabled' });
-  assert.equal(status(a), 'Active · clear');
-  assert.equal(status(b), 'Disabled on drone');
+  assert.equal(status(a), 'Separation guard: Active · clear');
+  assert.equal(a.field('coordination').dataset.state, 'active');
+  assert.equal(status(b), 'Separation guard: Disabled on drone');
+  assert.equal(b.field('coordination').dataset.state, 'disabled');
   app.receive(a, '/pidrone/coordination/status', { data: 'uncertainty_too_large' });
-  assert.equal(status(a), 'uncertainty too large');
+  assert.equal(status(a), 'Separation guard: uncertainty too large');
+  assert.equal(a.field('coordination').dataset.state, 'warning');
   app.advanceTime(501);
   app.maintenanceTimers.forEach(callback => callback());
-  for (const drone of [a, b]) assert.equal(status(drone), 'Unavailable');
+  for (const drone of [a, b]) {
+    assert.equal(status(drone), 'Separation guard: Unavailable');
+    assert.equal(drone.field('coordination').dataset.state, 'unavailable');
+  }
   app.receive(a, '/pidrone/coordination/status', { data: 'clear' });
   app.receive(b, '/pidrone/coordination/status', { data: 'solo' });
   a.disconnect();
-  assert.equal(status(a), 'Unavailable');
-  assert.equal(status(b), 'Solo flight');
+  assert.equal(status(a), 'Separation guard: Unavailable');
+  assert.equal(a.field('coordination').hidden, true);
+  assert.equal(status(b), 'Separation guard: Solo flight');
+  assert.equal(b.field('coordination').dataset.state, 'standby');
+  assert.equal(b.field('coordination').hidden, false);
 });
 
 test('room targets require live fused localization and explicit send, stay isolated, and stop on conflict', () => {
@@ -1770,28 +1784,28 @@ test('mapped AprilTags follow changed positions across drones and clear on gener
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });
 
-test('routine execution synchronizes start for one or two drones', async () => {
+test('routine execution automatically targets active drones and waits for readiness', async () => {
   let released, sends = [];
   const context = vm.createContext({ document: { addEventListener() {} },
     awaitSyncStart(ids) { released = ids; }, confirmSyncStart() {} });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Runner = vm.runInContext('RoutineRunner', context);
-  for (const [ids, target, expected] of [
-    [['drone2'], 'all', ['drone2']],
-    [['drone1', 'drone2'], 'all', ['drone1', 'drone2']],
-    [['drone1', 'drone2'], 'drone1', ['drone1']],
-    [['drone2'], 'drone1', []]
-  ]) {
+  for (const ids of [[], ['drone1'], ['drone2'], ['drone1', 'drone2']]) {
     released = null;
     const runner = Object.create(Runner.prototype);
-    Object.assign(runner, { target: { value: target }, select: { value: 'prototype-1-forward.py' },
+    Object.assign(runner, { select: { value: 'prototype-1-forward.py' },
       args: { value: '--fly --distance .3' },
       terminals: ['drone1', 'drone2'].map(id => ({ id, enabled: ids.includes(id), ready: true,
         execute(script, args) { sends.push({ id, script, args }); } })),
       async run(label, targets, action) { return Promise.allSettled(targets.map(action)); } });
     await runner.execute();
-    assert.deepEqual(released ? Array.from(released) : [], expected);
-    assert.deepEqual(sends, expected.map(id => ({ id, script: 'prototype-1-forward.py', args: '--fly --distance .3' })));
+    assert.deepEqual(released ? Array.from(released) : [], ids);
+    assert.deepEqual(sends, ids.map(id => ({ id, script: 'prototype-1-forward.py', args: '--fly --distance .3' })));
     sends = [];
+    released = null;
+    if (ids.length) runner.terminals.find(terminal => terminal.id === ids[0]).ready = false;
+    await runner.execute();
+    assert.deepEqual(sends, [], 'wait for every active drone before executing');
+    assert.equal(released, null);
   }
 });
