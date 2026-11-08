@@ -9,6 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import drones
+import drone_git
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
 import pals
 import warm_reboot_fc
@@ -70,7 +71,210 @@ class ExecuteTest(unittest.TestCase):
                     'drone1', drones.START + ' restart 2>&1', timeout=240))
 
 
+@unittest.skipUnless(shutil.which('git'), 'requires git')
+class BranchTest(unittest.TestCase):
+    def setUp(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.repo = self.root / 'drone'
+        self.repo.mkdir()
+        self.cwd = self.repo
+        self.mode = 'DISARMED'
+
+        def command(*args):
+            if args[0] == 'git':
+                return subprocess.run(args, cwd=self.cwd, capture_output=True, text=True, timeout=10)
+            if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'pgrep'):
+                return subprocess.CompletedProcess(args, 1, '', '')
+            if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'bash'):
+                return subprocess.CompletedProcess(args, 0, 'mode: "' + self.mode + '"\n', '')
+            self.fail('Unexpected hardware command: ' + repr(args))
+
+        patch = mock.patch.object(drone_git, 'command', side_effect=command)
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch('drone_git.open', lambda *args: open(self.root / 'lock', 'a'), create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        drone_git.git('init', '--bare', str(self.root / 'origin'))
+        drone_git.git('init')
+        drone_git.git('config', 'user.email', 'test@example.invalid')
+        drone_git.git('config', 'user.name', 'Test')
+        drone_git.git('config', 'commit.gpgsign', 'false')
+        drone_git.git('checkout', '-b', 'dual-hover')
+        (self.repo / 'node.py').write_text('old code\n')
+        drone_git.git('add', 'node.py')
+        drone_git.git('commit', '-m', 'baseline')
+        drone_git.git('remote', 'add', 'origin', str(self.root / 'origin'))
+        drone_git.git('push', '-u', 'origin', 'dual-hover')
+        drone_git.git('checkout', '-b', 'coordination-stability')
+        (self.repo / 'node.py').write_text('new code\n')
+        drone_git.git('commit', '-am', 'update')
+        drone_git.git('push', 'origin', 'coordination-stability')
+        drone_git.git('checkout', 'dual-hover')
+        drone_git.git('branch', '-D', 'coordination-stability')
+
+    def test_switch_tracks_remote_branch_and_connects_future_pulls_to_it(self):
+        self.assertEqual(drone_git.status()['branches'], ['coordination-stability', 'dual-hover'])
+        prepared = drone_git.change('prepare', 'coordination-stability')
+        self.assertEqual(drone_git.state()['branch'], 'dual-hover', 'preparation must not switch')
+        result = drone_git.change('switch', 'coordination-stability', prepared['target'])
+        self.assertEqual(result['branch'], 'coordination-stability')
+        self.assertEqual(drone_git.git('rev-parse', '--abbrev-ref', '@{upstream}'), 'origin/coordination-stability')
+        self.assertEqual((self.repo / 'node.py').read_text(), 'new code\n')
+
+    def test_dirty_armed_and_diverged_repositories_keep_their_work_and_branch(self):
+        (self.repo / 'node.py').write_text('local work\n')
+        with self.assertRaisesRegex(RuntimeError, 'save or stash'):
+            drone_git.change('prepare', 'coordination-stability')
+        self.assertEqual((self.repo / 'node.py').read_text(), 'local work\n')
+        (self.repo / 'node.py').write_text('old code\n')
+        for mode in ('ARMED', 'FLYING', ''):
+            self.mode = mode
+            with self.assertRaisesRegex(RuntimeError, 'must report DISARMED'):
+                drone_git.change('prepare', 'coordination-stability')
+        self.mode = 'DISARMED'
+        drone_git.git('checkout', '-b', 'coordination-stability', 'origin/coordination-stability')
+        (self.repo / 'node.py').write_text('unpublished work\n')
+        drone_git.git('commit', '-am', 'local only')
+        drone_git.git('checkout', 'dual-hover')
+        with self.assertRaisesRegex(RuntimeError, 'commits not on origin'):
+            drone_git.change('prepare', 'coordination-stability')
+        self.assertEqual(drone_git.state()['branch'], 'dual-hover')
+
+    def test_clear_covers_entire_repo_preserves_commits_and_ignored_files_and_rechecks_mode(self):
+        (self.repo / 'committed.txt').write_text('local commit\n')
+        drone_git.git('add', 'committed.txt')
+        drone_git.git('commit', '-m', 'unpublished commit')
+        revision = drone_git.git('rev-parse', 'HEAD')
+        (self.repo / '.git/info/exclude').write_text('keep.log\n')
+        (self.repo / 'keep.log').write_text('saved log\n')
+        (self.repo / 'node.py').write_text('staged changes\n')
+        drone_git.git('add', 'node.py')
+        (self.repo / 'node.py').write_text('unstaged changes\n')
+        (self.repo / 'scratch.txt').write_text('untracked root file\n')
+        package = self.repo / 'src'
+        package.mkdir()
+        (package / 'scratch.txt').write_text('untracked package file\n')
+        self.cwd = package  # SSH enters the ROS package, below the Git root.
+        self.assertTrue(drone_git.change('prepare-clear')['dirty'])
+        self.assertEqual((self.repo / 'node.py').read_text(), 'unstaged changes\n')
+        for mode in ('ARMED', 'FLYING', ''):
+            self.mode = mode
+            for action in ('prepare-clear', 'clear'):
+                with self.assertRaisesRegex(RuntimeError, 'must report DISARMED'):
+                    drone_git.change(action)
+            self.assertTrue((self.repo / 'scratch.txt').exists())
+            self.assertEqual((self.repo / 'node.py').read_text(), 'unstaged changes\n')
+        self.mode = 'DISARMED'
+        # Keep the package directory after cleaning, as in a real checkout.
+        (package / 'keep.log').write_text('package log\n')
+        result = drone_git.change('clear')
+        self.assertFalse(result['dirty'])
+        self.assertEqual(result['branch'], 'dual-hover')
+        self.assertEqual(drone_git.git('rev-parse', 'HEAD'), revision)
+        self.assertEqual((self.repo / 'node.py').read_text(), 'old code\n')
+        self.assertFalse((self.repo / 'scratch.txt').exists())
+        self.assertFalse((package / 'scratch.txt').exists())
+        self.assertEqual((self.repo / 'keep.log').read_text(), 'saved log\n')
+        self.assertEqual((package / 'keep.log').read_text(), 'package log\n')
+
+    def test_both_drones_are_prepared_before_mutation_and_partial_failures_are_reported(self):
+        for action, branch, preparation in [('switch', 'coordination-stability', 'prepare'),
+                                             ('clear', None, 'prepare-clear')]:
+            for failure in ({'error': 'Running routine'}, {'error': 'offline'}):
+                prepared = {'drone1': {'target': 'abc'}, 'drone2': failure}
+                with mock.patch.object(drones, 'branch_results', return_value=prepared) as calls:
+                    self.assertEqual(drones.branch_action(action, branch)['phase'], 'prepare')
+                    calls.assert_called_once_with(preparation, branch)
+            prepared = {drone: {'target': 'abc'} for drone in drones.DRONES}
+            partial = {'drone1': {'branch': 'coordination-stability'}, 'drone2': {'error': 'connection lost'}}
+            with mock.patch.object(drones, 'branch_results', side_effect=[prepared, partial]) as calls:
+                self.assertEqual(drones.branch_action(action, branch), {'phase': action, 'drones': partial})
+                self.assertEqual(calls.call_args, mock.call('clear') if action == 'clear'
+                                 else mock.call('switch', branch, 'abc'))
+        with mock.patch.object(drones, 'branch_results') as calls:
+            for name in ('--force', 'main; reboot', None):
+                with self.assertRaises(ValueError):
+                    drones.branch_action('switch', name)
+            with self.assertRaises(ValueError):
+                drones.branch_action('unknown')
+            with drones._branch_lock:
+                with self.assertRaisesRegex(RuntimeError, 'already in progress'):
+                    drones.branch_action('clear')
+            calls.assert_not_called()
+
+
 class RestartTest(unittest.TestCase):
+    def test_fc_reboot_requires_new_usb_and_safe_verification_without_resending(self):
+        # No real serial devices, Docker calls, or delays are used.
+        for fault, error in [(None, None), ('unchanged', 'did not reconnect'),
+                             ('wrong_usb', 'did not reconnect'), ('armed_before', 'armed'),
+                             ('armed_after', 'armed'), ('owned', 'owned'),
+                             ('calibrating', 'calibration did not finish'),
+                             ('serial', 'serial verification')]:
+            with self.subTest(fault=fault), TemporaryDirectory() as directory:
+                root = Path(directory)
+                port = root / 'serial'
+                port.touch()
+                usb = root / 'usb'
+                usb.mkdir()
+                generation = usb / 'devnum'
+                generation.write_text('3\n')
+                connection = mock.MagicMock()
+                connection.__enter__.return_value = connection
+                serial = SimpleNamespace(Serial=mock.Mock(return_value=connection), SerialException=OSError)
+
+                def write(packet):
+                    if fault != 'unchanged':
+                        generation.write_text('5\n')
+                    return len(packet)
+
+                def msp(connection, command):
+                    if command == 68:
+                        raise OSError('device reports readiness to read but returned no data')
+                    return {2: b'BTFL', 1: bytes([0, 1, 48])}[command]
+
+                checks = []
+                def disarmed(connection):
+                    checks.append(True)
+                    if fault == 'armed_before' or (fault == 'armed_after' and len(checks) > 1):
+                        raise RuntimeError('Flight controller is armed; refusing to continue.')
+                    if len(checks) > 1 and (fault == 'serial' or (fault is None and len(checks) == 2)):
+                        raise OSError('USB is still becoming ready')
+
+                def wait(check, message):
+                    for _ in range(4):
+                        if check():
+                            return
+                    raise RuntimeError(message)
+
+                connection.write.side_effect = write
+                with mock.patch.dict(sys.modules, {'serial': serial}), \
+                        mock.patch.object(warm_reboot_fc, 'port_unused',
+                                          side_effect=RuntimeError('Serial port is still owned') if fault == 'owned' else None), \
+                        mock.patch.object(warm_reboot_fc, 'usb_device',
+                                          side_effect=lambda port: root if fault == 'wrong_usb' and connection.write.called else usb), \
+                        mock.patch.object(warm_reboot_fc, 'msp', side_effect=msp), \
+                        mock.patch.object(warm_reboot_fc, 'check_disarmed', side_effect=disarmed), \
+                        mock.patch.object(warm_reboot_fc, 'calibration_complete',
+                                          side_effect=[False] * 4 if fault == 'calibrating' else [False, True]) as calibrated, \
+                        mock.patch.object(warm_reboot_fc, 'wait_for', side_effect=wait):
+                    if error:
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            warm_reboot_fc.reboot_controller(port)
+                    else:
+                        warm_reboot_fc.reboot_controller(port)
+                        self.assertEqual(calibrated.call_count, 2)
+                        self.assertEqual(len(checks), 4, 'retry only read-only verification after USB returns')
+                if fault in ('armed_before', 'owned'):
+                    connection.write.assert_not_called()
+                else:
+                    connection.write.assert_called_once_with(b'$M<\x00DD')
+                if fault in ('unchanged', 'wrong_usb'):
+                    self.assertEqual(serial.Serial.call_count, 1, 'never verify the old or a different USB device')
+
     @unittest.skipUnless(shutil.which('bash'), 'requires bash')
     def test_failed_restart_stages_do_not_launch_replacement_nodes(self):
         launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'

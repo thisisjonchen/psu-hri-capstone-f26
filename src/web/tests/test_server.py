@@ -1,15 +1,19 @@
 """Hardware-free checks for the laptop dashboard server."""
 import asyncio
+import io
+import json
 import mimetypes
 import subprocess
 import sys
 import threading
 import unittest
 from pathlib import Path
+from email.message import Message
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import DashboardHandler
+import drones
 import peer_relay
 
 
@@ -38,6 +42,32 @@ import server
 
 
 class ResponseTest(unittest.TestCase):
+    def test_branch_mutations_require_explicit_action_and_request_header(self):
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.allowed = lambda: True
+        handler.path = '/api/branches'
+        handler.respond = mock.Mock()
+        handler.send_error = mock.Mock()
+        handler.headers = Message()
+        handler.headers['Content-Type'] = 'application/json'
+        with mock.patch.object(drones, 'branch_results', return_value={
+                drone: {'dirty': False} for drone in drones.DRONES}) as calls:
+            handler.do_POST()
+            handler.send_error.assert_called_once_with(403)
+            handler.headers['X-Routine-Request'] = '1'
+            for body in ({'branch': 'main'}, {'action': 'unknown'}, {'action': 'clear'}):
+                payload = json.dumps(body).encode()
+                handler.rfile = io.BytesIO(payload)
+                handler.headers['Content-Length'] = str(len(payload))
+                handler.do_POST()
+                if body.get('action') == 'clear':
+                    self.assertEqual(handler.respond.call_args.args[0], 200)
+                    self.assertEqual(calls.call_args_list, [mock.call('prepare-clear', None), mock.call('clear')])
+                else:
+                    self.assertEqual(handler.respond.call_args.args[0], 400)
+                    calls.assert_not_called()
+                del handler.headers['Content-Length']
+
     def test_closed_browser_connection_ends_response_without_retry(self):
         for stage in ('headers', 'body'):
             for error in (BrokenPipeError, ConnectionResetError, OSError):

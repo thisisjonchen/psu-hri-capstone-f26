@@ -860,6 +860,7 @@ class DroneSession {
     };
     publisher('mode', '/pidrone/desired/mode', 'pidrone_pkg/Mode');
     publisher('heartbeat', '/pidrone/heartbeat/web_interface', 'std_msgs/Empty');
+    publisher('guardEnabled', '/pidrone/coordination/enabled', 'std_msgs/Bool');
     publisher('coordination', '/pidrone/coordination/paired', 'std_msgs/Bool');
     publisher('positionMode', '/pidrone/position_control', 'std_msgs/Bool');
     publisher('twist', '/pidrone/desired/twist', 'geometry_msgs/Twist');
@@ -1180,19 +1181,22 @@ function stopHeldKeys() {
   heldKeys.clear();
 }
 
-// Enable the guard before arming only when both drones have fresh room positions.
-let coordinationPaired = true;
+// Select automatic pairing before arming unless the operator disables the guard.
+let separationGuardEnabled = false;
+let coordinationPaired = false;
 
 function publishCoordinationSelection() {
   const previous = coordinationPaired;
   const connected = Object.values(drones).filter(drone => drone.connected);
-  if (!connected.length) { coordinationPaired = true; return; }
   const now = Date.now();
   const freshModes = connected.every(drone => drone.modeReceivedAt !== null &&
     now - drone.modeReceivedAt >= 0 && now - drone.modeReceivedAt <= 1500);
+  const disarmed = freshModes && connected.every(drone => drone.field('flightMode').textContent === 'DISARMED');
+  document.getElementById('separation-guard').disabled = !disarmed;
+  if (!connected.length) { coordinationPaired = separationGuardEnabled; return; }
   if (!freshModes) return;
-  if (connected.every(drone => drone.field('flightMode').textContent === 'DISARMED')) {
-    coordinationPaired = connected.length === 2 && connected.every(drone =>
+  if (disarmed) {
+    coordinationPaired = separationGuardEnabled && connected.length === 2 && connected.every(drone =>
       drone.fusedPose && drone.fusionReadyAt !== null && drone.fusedReceivedAt !== null &&
       [drone.fusionReadyAt, drone.fusedReceivedAt, drone.fusedStamp * 1000].every(stamp =>
         Number.isFinite(stamp) && now - stamp >= 0 && now - stamp <= 500));
@@ -1201,7 +1205,12 @@ function publishCoordinationSelection() {
     drone.preflightReceivedAt = null;
     drone.field('flightMode').title = 'Preflight unavailable';
   });
-  connected.forEach(drone => drone.publish('coordination', { data: coordinationPaired }));
+  connected.forEach(drone => {
+    if (drone.field('flightMode').textContent === 'DISARMED') {
+      drone.publish('guardEnabled', { data: separationGuardEnabled });
+    }
+    drone.publish('coordination', { data: coordinationPaired });
+  });
 }
 
 function isFormControl(target) {
@@ -1209,6 +1218,20 @@ function isFormControl(target) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const guardToggle = document.getElementById('separation-guard');
+  guardToggle.checked = separationGuardEnabled;
+  guardToggle.addEventListener('change', () => {
+    // Recheck freshness at the click, including time since the last UI refresh.
+    publishCoordinationSelection();
+    if (guardToggle.disabled) {
+      guardToggle.checked = separationGuardEnabled;
+      return;
+    }
+    separationGuardEnabled = guardToggle.checked;
+    publishCoordinationSelection();
+    feedback(separationGuardEnabled ? 'Separation guard enabled for automatic pairing.' :
+      'Separation guard disabled for both drones. Check each drone’s status below.');
+  });
   const fullscreenButton = document.getElementById('fullscreen-toggle');
   fullscreenButton.hidden = !document.fullscreenEnabled;
   const updateFullscreen = () => {

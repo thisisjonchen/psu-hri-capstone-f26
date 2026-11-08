@@ -71,11 +71,17 @@ class DistancePIDTest(unittest.TestCase):
         self.fixture.params['/pidrone/coordination'] = {
             'drone_id': 'drone2', 'peer_id': 'drone1', 'min_distance': .6, 'max_distance': 2.,
             'nominal_separation_m': 1.5}
-        self.c = self.fixture.controller()
+        self.c = self.guarded_controller()
         self.c.room_generation_callback(NS(data=0))
         self.c.room_pose = copy.deepcopy(self.c.room_pose)
         self.c.room_pose.pose.covariance[0] = self.c.room_pose.pose.covariance[7] = .0004
         self.c.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
+
+    def guarded_controller(self):
+        controller = self.fixture.controller()
+        # Existing guard cases exercise a flight with protection explicitly enabled.
+        controller.coordination_enabled = controller.coordination_active = True
+        return controller
 
     def peer(self, x=2.2):
         pose = copy.deepcopy(self.c.room_pose.pose)
@@ -139,6 +145,50 @@ class DistancePIDTest(unittest.TestCase):
         self.fixture.now += 2.1
         self.assertEqual(self.c.flight_readiness().reason, 'flight_setup_unavailable')
 
+    def test_guard_defaults_off_and_only_changes_while_disarmed(self):
+        self.c = self.fixture.controller()
+        self.c.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
+        self.c.room_generation_callback(NS(data=0))
+        self.c.current_mode_callback(NS(mode='DISARMED'))
+        self.assertFalse(self.c.coordination_enabled)
+        self.c.coordination_selection_callback(NS(data=False))
+        self.c.room_ready_callback(NS(data=False))
+        self.assertTrue(self.c.flight_readiness().ready, 'disabled guard needs no UWB or peer')
+        self.assertFalse(self.c.flight_readiness().paired)
+        self.c.local_ready_callback(NS(data=False))
+        self.assertEqual(self.c.flight_readiness().reason, 'local_estimate_unavailable')
+        self.c.local_ready_callback(NS(data=True))
+        self.c.room_ready_callback(NS(data=True))
+        self.c.current_mode_callback(NS(mode='ARMED'))
+        self.c.coordination_enabled_callback(NS(data=True))
+        self.assertTrue(self.c.flight_readiness().ready)
+        self.c.current_mode_callback(NS(mode='FLYING'))
+        self.c.coordination_enabled_callback(NS(data=True))
+        command = helpers.twist()
+        command.linear.x = .05
+        self.c.desired_twist_callback(command)
+        self.c.peer_state_callback(self.peer(1.5))  # Too close, but explicitly disabled.
+        for elapsed in (0, .6):
+            self.fixture.now += elapsed
+            self.c.calc_error()
+            self.assertEqual(self.c.coordination_status, 'disabled')
+            self.assertFalse(self.c.coordination_active)
+            self.assertAlmostEqual(self.c.current_velocity.x + self.c.pid_error.x / 100., .05)
+            self.assertEqual(self.c.current_mode, 'FLYING')
+        self.c.current_mode_callback(NS(mode='DISARMED'))
+        self.assertFalse(self.c.coordination_enabled)
+        self.c.coordination_enabled_callback(NS(data=True))
+        self.c.coordination_selection_callback(NS(data=True))
+        self.assertEqual(self.c.flight_readiness().reason, 'peer_state_stale')
+        self.c.current_mode_callback(NS(mode='ARMED'))
+        self.c.current_mode_callback(NS(mode='FLYING'))
+        self.c.coordination_enabled_callback(NS(data=False))  # Cannot disable midflight either.
+        self.c.desired_twist_callback(command)
+        self.c.peer_state_callback(self.peer(1.5))
+        self.c.calc_error()
+        self.assertEqual(self.c.coordination_status, 'too_close')
+        self.assertLess(self.c.pid_error.x, 0)
+
     def test_automatic_identity_and_legacy_flag_cannot_disable_paired_protection(self):
         geometry = {'nominal_separation_m': 1.5, 'payload_drop_m': .5}
         settings = {'enabled': False, 'min_distance': 1.2, 'max_distance': 1.8}
@@ -147,7 +197,7 @@ class DistancePIDTest(unittest.TestCase):
                 config = automatic_coordination(geometry, settings, 'http://%s%s:11311' % (own, suffix))
                 self.assertEqual((config['drone_id'], config['peer_id']), (own, peer))
                 self.fixture.params['/pidrone/coordination'] = config
-                controller = self.fixture.controller()
+                controller = self.guarded_controller()
                 self.assertEqual(controller.distance_guard.follow_peer, own == 'drone2')
                 self.assertEqual(controller.distance_guard.nominal, 1.5)
                 self.assertAlmostEqual(controller.distance_guard.speed_limit, .1 * 2. / 3. if own == 'drone1' else .1)
@@ -157,7 +207,7 @@ class DistancePIDTest(unittest.TestCase):
         # Also check parameters left over from an older ROS session.
         config['enabled'] = False
         self.fixture.params['/pidrone/coordination'] = config
-        controller = self.fixture.controller()
+        controller = self.guarded_controller()
         self.assertIsNotNone(controller.distance_guard)
         controller.desired_velocity.x = .05
         controller.calc_error()
@@ -186,7 +236,7 @@ class DistancePIDTest(unittest.TestCase):
             self.fixture.params['/pidrone/coordination'].update(
                 drone_id=own, peer_id=other, min_distance=.85,
                 max_distance=1.15, nominal_separation_m=1.)
-            controller = self.fixture.controller()
+            controller = self.guarded_controller()
             controller.room_generation_callback(NS(data=0))
             controller.room_pose = copy.deepcopy(controller.room_pose)
             controller.room_pose.pose.covariance[0] = .01
@@ -216,7 +266,7 @@ class DistancePIDTest(unittest.TestCase):
             self.fixture.params['/pidrone/coordination'] = dict(
                 drone_id='drone%d' % (index+1), peer_id='drone%d' % (2-index),
                 min_distance=.85, max_distance=1.15, nominal_separation_m=1.)
-            controller = self.fixture.controller()
+            controller = self.guarded_controller()
             controller.peer_state_callback.__globals__['monotonic'] = lambda: self.fixture.now
             controller.room_generation_callback(NS(data=0))
             controller.current_state = copy.deepcopy(controller.current_state)

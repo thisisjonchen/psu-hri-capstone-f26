@@ -16,6 +16,7 @@
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
   <script src="js/routines.js?v=20261106-terminal-result" defer></script>
+  <script src="js/branches.js" defer></script>
 </head>
 <body>
   <main class="dashboard-shell">
@@ -25,6 +26,16 @@
       <a href="https://usa.honda-ri.com/" target="_blank" rel="noopener noreferrer"><img src="images/honda-research-institute.png" alt="Honda Research Institute"></a>
     </div></div><div class="header-actions">
     <a class="btn btn-outline-secondary icon-button with-label github-link" href="https://github.com/thisisjonchen/psu-hri-capstone-f26" target="_blank" rel="noopener noreferrer" aria-label="View PALS on GitHub" title="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg><span>GitHub</span></a>
+    <details class="branch-picker" id="drone-branches">
+      <summary class="btn btn-outline-secondary icon-button with-label" title="Change both drones’ Git branch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10c0 7-12 3-12 10"/></svg><span>Branches</span></summary>
+      <div class="branch-panel">
+        <dl class="branch-current"><dt>Drone 1</dt><dd id="drone1-branch">Not loaded</dd><dt>Drone 2</dt><dd id="drone2-branch">Not loaded</dd></dl>
+        <label for="branch-select">Select branch</label>
+        <select id="branch-select" disabled><option value="">Select a branch</option></select>
+        <div class="branch-actions"><button class="btn btn-primary" id="branch-apply" type="button" disabled>Switch</button><button class="btn btn-outline-secondary" id="branch-refresh" type="button">Refresh</button><button class="btn btn-outline-danger" id="branch-clear" type="button" disabled>Clear local changes</button></div>
+        <p class="map-note" id="branch-message" role="status" aria-live="polite"></p>
+      </div>
+    </details>
     <button class="btn btn-outline-secondary icon-button" id="fullscreen-toggle" type="button" aria-pressed="false" hidden aria-label="Full screen" title="Full screen"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="expand-icon" d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><path class="collapse-icon" d="M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5"/></svg></button></div></div>
     <section class="panel fleet-controls" id="fleetControls" aria-label="Telemetry">
       <div class="panel-header"><h2>Telemetry</h2></div>
@@ -126,7 +137,7 @@
       </section></div>
     </section>
     <section class="panel routine-panel" aria-label="Control">
-      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting or restarting. Restart reboots the flight controller, restarts all nodes, checks gyro readings and relocalizes. Before restarting, leave powered for a few minutes and remove props; keep each drone untouched on the floor until complete. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>Flight setup is automatic before arming. With both drones connected and fresh UWB room positions, the separation guard is enabled. Otherwise, flight uses local EKF estimates without the separation guard. Once enabled for flight, paired protection stays on through UWB or connection losses. Check each drone’s Separation guard status below. Hover over its flight state for preflight details.</p><p><strong>Keyboard shortcuts</strong></p>
+      <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content"><p>Keep drones disarmed, stationary, and facing map +Y before connecting or restarting. Restart reboots the flight controller, restarts all nodes, checks gyro readings and relocalizes. Before restarting, leave powered for a few minutes and remove props; keep each drone untouched on the floor until complete. Click a terminal to type. If connection fails, check the connection and click Connect to retry.</p><p>The Separation guard switch applies to both drones and can be changed while all connected drones are disarmed. Turn it off to disable spacing corrections and peer checks for the flight, even if peer telemetry arrives. With the switch on, pairing is automatic when both drones have fresh UWB room positions, or a peer joins during flight; paired protection stays on through UWB or connection losses. The guard defaults off onboard and when this page opens. Check each drone’s Separation guard status below for confirmation. Hover over its flight state for preflight details.</p><p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
@@ -144,6 +155,7 @@
           <button class="btn btn-primary" data-command="takeoff">Takeoff</button>
           <button class="btn btn-danger" data-command="disarm">Disarm all</button>
         </div>
+        <label class="guard-toggle" title="Applies to both drones. Change while disarmed."><input id="separation-guard" type="checkbox" role="switch"> Separation guard</label>
         <div class="routine-actions"><button class="btn btn-outline-secondary icon-button with-label" id="nodes-restart" type="button" disabled aria-label="Restart nodes and relocalize" title="Reboot the flight controller, restart all nodes, check gyro readings and relocalize"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 1 0-2 6M20 4v7h-7"/></svg><span>Restart</span></button><select id="routine-target" aria-label="Routine target"><option value="all">All connected drones</option><option value="drone1">Drone 1 only</option><option value="drone2">Drone 2 only</option></select><select id="routine-script" aria-label="Routine script"><option value="">Select routine</option></select><div class="routine-args"><input id="routine-args" value="--fly" aria-label="Shared routine arguments" spellcheck="false" autocomplete="off"></div><button class="btn btn-primary" id="routine-execute" type="button" disabled>Run</button></div>
       </div>
       <p class="command-feedback" id="commandFeedback" role="status" aria-live="polite" hidden></p>

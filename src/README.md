@@ -23,6 +23,12 @@ Assuming that the base environment is already set up on the DD24 by following th
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
+**Separation guard** defaults off onboard and in the dashboard, bypassing spacing
+corrections and peer checks for both drones. Confirm
+**Disabled on drone** in each status panel before flight. Local estimate checks and
+disarm/watchdog behavior remain active. Re-enable it under **Controls** while the
+connected drones are disarmed. The dashboard resets the switch off when reopened.
+
 For the complete firmware, driver and code rollout, see the
 [drone update guide](../tools/DRONE_UPDATE.md).
 
@@ -116,13 +122,14 @@ For older captures containing `motion_vectors_raw`, use `--camera encoder`.
 New captures use JPEGs and omit encoder vectors.
 
 ## Changing Branches
-If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
-1. Use the drone's dashboard terminal, or `ssh duckie@[drone].local` (password **quackquack**).
-2. Go to the directory where we have the repo: `cd ~/catkin_ws/src/pidrone_pkg`
-3. You should have the branch you want to change to in mind. If you are unsure of the current branch of the drone, run `git branch --show-current`
-4. To change to the branch you want, do `git checkout -f [branch]`
-5. You are ready to go! Feel free to test as needed. If you need to modify any code, do so on your laptop/base station, push to the branch, then pull.
-6. Restart the nodes while disarmed and facing +Y: `bash ~/catkin_ws/src/pidrone_pkg/boot/pals-start.sh restart`.
+Open **Branches** next to GitHub, select a published branch, then **Switch**.
+Both drones must be reachable, report DISARMED, and have no running routine or local
+changes. Save or stash local changes in their terminals, or use **Clear local changes**
+to discard uncommitted changes and untracked files on both drones after confirmation.
+Clearing keeps commits and ignored files. Switching fetches origin,
+updates each tracking branch without discarding commits, and leaves nodes running.
+Rebuild if native code changed, then use **Restart** with props removed, stationary
+on the floor facing +Y. **Refresh** shows each drone's current branch and revision.
    
    
 ## Cloning the Repo

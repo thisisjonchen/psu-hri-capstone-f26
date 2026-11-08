@@ -97,6 +97,9 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .status-value.alert-success { color: var(--success); background: transparent; }
 .coordination-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--line); padding-top: var(--space-2); font-size: var(--type-label); }
 .coordination-status [data-field="coordination"] { min-width: 0; overflow-wrap: anywhere; }
+.guard-toggle { display: inline-flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--type-label); cursor: pointer; }
+.guard-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--blue); }
+.guard-toggle:has(input:disabled) { color: var(--muted); cursor: default; }
 .metric-label { color: var(--muted); font-size: var(--type-label); font-weight: 600; }
 .speed-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .speed-readings span, .speed-readings strong { display: block; }
@@ -295,6 +298,18 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .partner-logos img { display: block; height: var(--partner-logo-height); width: auto; }
 .header-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .github-link svg { fill: currentColor; stroke: none; }
+.branch-picker { position: relative; }
+.branch-picker > summary { list-style: none; cursor: pointer; }
+.branch-picker > summary::-webkit-details-marker { display: none; }
+.branch-panel { position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; width: min(360px, calc(100vw - 48px)); padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); box-shadow: 0 8px 30px #17233724; }
+.branch-current { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0 0 12px; font-size: var(--type-label); }
+.branch-current dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; color: var(--muted); }
+.branch-current dd[data-error="true"] { color: var(--error); }
+.branch-panel label { display: block; margin: 0 0 4px; font-size: var(--type-label); color: var(--muted); }
+.branch-panel select { width: 100%; min-height: var(--control-default); padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--ink); }
+.branch-panel select:focus-visible { outline: 3px solid #0072b266; outline-offset: 2px; }
+.branch-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.branch-panel .map-note { margin: 12px 0 0; }
 @media (max-width: 480px) {
   .page-title { gap: 8px; }
   .partner-logos { --partner-logo-height: 22px; gap: 8px; padding-left: 8px; }

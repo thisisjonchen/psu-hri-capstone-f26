@@ -5,9 +5,8 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
-import time
 
-from flash_fc import check_disarmed, msp, port_unused, require, run, stop_fc, wait_for
+from flash_fc import check_disarmed, msp, port_unused, require, run, stop_fc, usb_device, wait_for
 
 
 # Observe the FC's calibrated gyro, before the EKF estimates its own bias.
@@ -67,9 +66,50 @@ def calibration_complete(connection):
     return not flags & (1 << 12)  # CALIBRATING in Betaflight MSP API 1.48.
 
 
-def warm_reboot():
+def reboot_controller(port):
+    """Send one reboot, then verify a new USB enumeration and calibrated FC."""
     import serial
 
+    port_unused(port)
+    usb = usb_device(port)
+    generation = (usb / 'devnum').read_text()
+    with serial.Serial(str(port), 115200, timeout=0.1, write_timeout=3, exclusive=True) as connection:
+        check_disarmed(connection)
+        require(msp(connection, 2) == b'BTFL' and msp(connection, 1) == bytes([0, 1, 48]),
+                'Expected Betaflight MSP API 1.48; no reboot sent.')
+        # MSP_REBOOT resets USB immediately after preparing its reply. Do not
+        # read that disappearing connection or resend the reboot on a timeout.
+        packet = b'$M<' + bytes([0, 68, 68])
+        require(connection.write(packet) == len(packet), 'FC reboot command was not fully written.')
+
+    def reconnected():
+        try:
+            return (port.exists() and (usb / 'devnum').read_text() != generation
+                    and usb_device(port) == usb)
+        except (OSError, RuntimeError):
+            # sysfs and the by-id link can briefly disagree during enumeration.
+            return False
+
+    wait_for(reconnected, 'FC reboot not confirmed: the pinned USB device did not reconnect.')
+
+    def verified():
+        if not reconnected():
+            return False
+        port_unused(port)
+        try:
+            with serial.Serial(str(port), 115200, timeout=0.1, write_timeout=3, exclusive=True) as connection:
+                check_disarmed(connection)
+                return calibration_complete(connection)
+        except (serial.SerialException, OSError):
+            # Only retry read-only verification after USB returns. Armed state,
+            # invalid MSP replies and conflicting serial owners still fail.
+            return False
+
+    wait_for(verified, 'FC reconnected, but serial verification or gyro calibration did not finish; '
+             'keep the drone still and check its USB connection.')
+
+
+def warm_reboot():
     require(os.geteuid() == 0, 'Run through pals-start.sh restart.')
     home = Path('/home/duckie')
     pins = home / 'catkin_ws/pals.ports'
@@ -86,18 +126,7 @@ def warm_reboot():
     wait_for(lambda: run(['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
                           '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']).returncode == 1,
              'Localization did not stop.')
-    port_unused(port)
-    with serial.Serial(str(port), 115200, timeout=0.1, write_timeout=3, exclusive=True) as connection:
-        check_disarmed(connection)
-        require(msp(connection, 2) == b'BTFL' and msp(connection, 1) == bytes([0, 1, 48]),
-                'Expected Betaflight MSP API 1.48; no reboot sent.')
-        require(msp(connection, 68) == b'\x00', 'Normal reboot was not acknowledged.')
-    time.sleep(3)
-    wait_for(lambda: port.exists(), 'FC USB port did not return.')
-    port_unused(port)
-    with serial.Serial(str(port), 115200, timeout=0.1, write_timeout=3, exclusive=True) as connection:
-        check_disarmed(connection)
-        wait_for(lambda: calibration_complete(connection), 'Gyro calibration did not finish; keep the drone still.')
+    reboot_controller(port)
     # USB enumeration can change the tty name after a reboot.
     lines = [line for line in environment.read_text().splitlines() if not line.startswith('PALS_FC_PORT=')]
     lines.append('PALS_FC_PORT=' + str(port.resolve()))

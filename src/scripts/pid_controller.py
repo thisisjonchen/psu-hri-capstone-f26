@@ -130,7 +130,8 @@ class PIDController(object):
         self.coordination_published_at = None
         self.coordination_status = 'disabled'
         self.coordination_error = ''
-        self.coordination_active = True
+        self.coordination_enabled = False
+        self.coordination_active = False
         self.coordination_selection = self.coordination_selection_received = None
         if self.coordination_config is not None:
             try:
@@ -149,9 +150,16 @@ class PIDController(object):
                     self.room_target_gain, speed_limit, follow_peer=own > peer)
                 self.coordination_status = 'waiting_for_peer'
             except (KeyError, TypeError, ValueError) as error:
-                # Keep altitude control running, but block horizontal motion.
+                # If the guard is enabled, block horizontal motion, not altitude control.
                 self.coordination_error = 'invalid_configuration'
                 rospy.logwarn('Distance control configuration: %s', error)
+
+    @synchronized
+    def coordination_enabled_callback(self, msg):
+        # An explicit operator override lasts until changed while disarmed.
+        if self.current_mode == 'DISARMED':
+            self.coordination_enabled = bool(msg.data)
+            self.coordination_active = self.coordination_enabled
 
     @synchronized
     def coordination_selection_callback(self, msg):
@@ -182,7 +190,7 @@ class PIDController(object):
         if not self.accept_peer(msg, self.peer_state):
             return
         self.peer_state, self.peer_received = msg, monotonic()
-        if self.current_mode == 'FLYING':
+        if self.current_mode == 'FLYING' and self.coordination_enabled:
             # Once a peer joins, keep paired protection until disarm.
             self.coordination_active = True
 
@@ -206,7 +214,8 @@ class PIDController(object):
 
     def flight_readiness(self):
         report = FlightReadiness()
-        report.mode, report.paired = self.current_mode, self.coordination_active
+        report.mode = self.current_mode
+        report.paired = self.coordination_enabled and self.coordination_active
         if self.current_mode not in ('DISARMED', 'ARMED'):
             report.reason = 'already_flying'
             return report
@@ -215,8 +224,8 @@ class PIDController(object):
             if received is None or not 0 <= monotonic() - received <= 2.:
                 report.reason = 'flight_setup_unavailable'
                 return report
-            report.paired = bool(self.coordination_selection)
-        if self.coordination_error or self.distance_guard is None:
+            report.paired = self.coordination_enabled and bool(self.coordination_selection)
+        if self.coordination_enabled and (self.coordination_error or self.distance_guard is None):
             report.reason = self.coordination_error or 'guard_unavailable'
             return report
         if not self.local_ready():
@@ -392,12 +401,12 @@ class PIDController(object):
         if previous == 'DISARMED' and msg.mode in ('ARMED', 'FLYING'):
             received = self.coordination_selection_received
             fresh_selection = received is not None and 0 <= monotonic() - received <= 2.
-            # Default to paired protection if the selection is missing or invalid.
-            self.coordination_active = (bool(self.coordination_selection)
-                                        if fresh_selection and not self.coordination_error else True)
+            # An enabled guard defaults to paired protection if the selection is invalid.
+            self.coordination_active = self.coordination_enabled and (
+                bool(self.coordination_selection) if fresh_selection and not self.coordination_error else True)
         if msg.mode == 'DISARMED' and previous != 'DISARMED':
             self.coordination_selection = self.coordination_selection_received = None
-            self.coordination_active = True
+            self.coordination_active = self.coordination_enabled
         self.current_mode = msg.mode
         if previous != msg.mode:
             self.cancel_room_target()
@@ -560,7 +569,9 @@ class PIDController(object):
                 # Position correction supplements, rather than removes, velocity damping.
                 self.pid_error.x += self.lr_pid.step(self.position_error.x, pose_dt)
                 self.pid_error.y += self.fb_pid.step(self.position_error.y, pose_dt)
-        if self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
+        if not self.coordination_enabled:
+            self.coordination_status = 'disabled'
+        elif self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
             # Include both room-target commands and local-position PID corrections.
             # Do not overwrite the route's requested velocity or its stored target.
             requested = (self.current_velocity.x + self.pid_error.x / 100.,
@@ -656,7 +667,7 @@ def main(ControllerClass):
                 settings = yaml.safe_load(stream)
             config = automatic_coordination(geometry, settings, os.environ.get('ROS_MASTER_URI', ''))
         except (IOError, ValueError, TypeError, yaml.YAMLError) as error:
-            # Keep the PID running, but block horizontal motion.
+            # Keep the PID running; an enabled guard will block horizontal motion.
             rospy.logwarn('Automatic coordination configuration: %s', error)
             config = {}
         rospy.set_param('/pidrone/coordination', config)
@@ -702,6 +713,7 @@ def main(ControllerClass):
         from std_msgs.msg import String
         pid_controller.coordination_status_pub = rospy.Publisher('/pidrone/coordination/status', String, queue_size=1)
         pid_controller.preflight_pub = rospy.Publisher('/pidrone/coordination/preflight', FlightReadiness, queue_size=1)
+        rospy.Subscriber('/pidrone/coordination/enabled', Bool, pid_controller.coordination_enabled_callback, queue_size=1)
         rospy.Subscriber('/pidrone/coordination/paired', Bool, pid_controller.coordination_selection_callback, queue_size=1)
         rospy.Subscriber('/pidrone/coordination/peer', PeerState, pid_controller.peer_state_callback, queue_size=1)
         rospy.Subscriber('/pidrone/coordination/peer_preview', PeerState, pid_controller.peer_preview_callback, queue_size=1)

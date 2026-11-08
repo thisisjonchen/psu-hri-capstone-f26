@@ -5,6 +5,112 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+function branchPicker(respond, confirm = () => true) {
+  const elements = new Map(['drone-branches', 'branch-select', 'branch-apply', 'branch-refresh', 'branch-clear',
+    'branch-message', 'drone1-branch', 'drone2-branch'].map(id => [id, {
+      value: '', textContent: '', dataset: {}, addEventListener() {},
+      replaceChildren(...options) { this.options = options; }
+    }]));
+  const requests = [];
+  const context = vm.createContext({ document: { getElementById: id => elements.get(id), addEventListener() {} },
+    Option: class { constructor(text, value) { this.text = text; this.value = value; } },
+    AbortController, setTimeout, clearTimeout, window: { confirm },
+    fetch: async (url, options) => {
+      requests.push({ url, ...options });
+      return { ok: true, json: async () => respond(options) };
+    }
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/branches.js'), 'utf8'), context);
+  return { picker: vm.runInContext('new DroneBranches()', context), elements, requests };
+}
+
+test('branch picker shows both revisions and switches both to a shared branch', async () => {
+  const snapshot = { drone1: { branch: 'dual-hover', revision: '111', branches: ['dual-hover', 'new', 'only-one'] },
+    drone2: { branch: 'dual-hover', revision: '222', branches: ['dual-hover', 'new'] } };
+  const app = branchPicker(options => options.method === 'POST' ? { phase: 'switch', drones: {
+    drone1: { branch: 'new', revision: '333' }, drone2: { branch: 'new', revision: '333' }
+  } } : { drones: snapshot });
+  await app.picker.load();
+  assert.equal(app.elements.get('drone1-branch').textContent, 'dual-hover · 111');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'dual-hover · 222');
+  assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'dual-hover', 'new']);
+  app.picker.select.value = 'new';
+  app.picker.render();
+  const change = app.picker.switchBoth();
+  assert.equal(app.picker.apply.disabled, true);
+  await app.picker.switchBoth();
+  await change;
+  assert.equal(app.requests.length, 2, 'one status request and one mutation for both drones');
+  assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'new' });
+  assert.equal(app.requests[1].headers['X-Routine-Request'], '1');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'new · 333');
+  assert.match(app.picker.message.textContent, /Restart.*rebuild/);
+});
+
+test('branch picker blocks local changes and reports offline or partially switched drones', async () => {
+  let response = { drones: {
+    drone1: { branch: 'old', revision: '111', branches: ['new'], dirty: true },
+    drone2: { branch: 'old', revision: '111', branches: ['new'] }
+  } };
+  const app = branchPicker(() => response);
+  await app.picker.load();
+  app.picker.select.value = 'new';
+  app.picker.render();
+  assert.equal(app.picker.apply.disabled, true);
+  assert.match(app.picker.message.textContent, /Save or stash/);
+  await app.picker.switchBoth();
+  assert.equal(app.requests.length, 1);
+  response.drones.drone1.dirty = false;
+  await app.picker.load();
+  response = { phase: 'switch', drones: { drone1: { branch: 'new', revision: '222' }, drone2: { error: 'offline' } } };
+  await app.picker.switchBoth();
+  assert.equal(app.elements.get('drone1-branch').textContent, 'new · 222');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'offline');
+  assert.match(app.picker.message.textContent, /incomplete.*Refresh/);
+  assert.equal(app.picker.apply.disabled, true);
+  assert.equal(app.picker.clear.disabled, true);
+});
+
+test('clearing local changes requires confirmation and enables switching only after success', async () => {
+  let confirmed = false;
+  let prompt = '';
+  let response = { drones: {
+    drone1: { branch: 'old', revision: '111', branches: ['old', 'new'], dirty: true },
+    drone2: { branch: 'old', revision: '222', branches: ['old', 'new'], dirty: true }
+  } };
+  const app = branchPicker(() => response, message => { prompt = message; return confirmed; });
+  await app.picker.load();
+  assert.equal(app.picker.clear.disabled, false);
+  await app.picker.clearBoth();
+  assert.match(prompt, /Drone 1 and Drone 2/);
+  assert.match(prompt, /permanently.*uncommitted.*untracked/);
+  assert.equal(app.requests.length, 1, 'cancel must not send a mutation');
+  confirmed = true;
+  response = { phase: 'prepare', drones: { drone1: {}, drone2: { error: 'Drone must report DISARMED' } } };
+  await app.picker.clearBoth();
+  assert.match(app.picker.message.textContent, /No files changed/);
+  assert.equal(app.picker.clear.disabled, true, 'refresh required after a failed safety check');
+  response = { drones: {
+    drone1: { branch: 'old', revision: '111', branches: ['old', 'new'], dirty: true },
+    drone2: { branch: 'old', revision: '222', branches: ['old', 'new'], dirty: true }
+  } };
+  await app.picker.load();
+  response = { phase: 'clear', drones: {
+    drone1: { branch: 'old', revision: '111', dirty: false },
+    drone2: { branch: 'old', revision: '222', dirty: false }
+  } };
+  const clearing = app.picker.clearBoth();
+  assert.equal(app.picker.clear.disabled, true);
+  await app.picker.clearBoth();
+  await clearing;
+  assert.equal(app.requests.length, 4, 'a second click must not duplicate the clear request');
+  assert.deepEqual(JSON.parse(app.requests[3].body), { action: 'clear' });
+  assert.equal(app.elements.get('drone1-branch').textContent, 'old · 111');
+  assert.equal(app.picker.apply.disabled, false);
+  assert.equal(app.picker.clear.disabled, true);
+  assert.equal(app.picker.message.textContent, 'Local changes cleared on both drones.');
+});
+
 // Test command routing without opening network sockets or contacting hardware.
 function dashboard({ discover = true, calibrationFetch = null } = {}) {
   const listeners = {};
@@ -46,7 +152,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
   }
-  for (const id of ['fullscreen-toggle', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
+  for (const id of ['fullscreen-toggle', 'separation-guard', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
     'target-selection', 'target-clear', 'target-send', 'target-stop', 'target-command-status', 'target-status', 'map-stream-status']) elements.set(id, element());
   for (const name of ['scan', 'measure', 'edit', 'apply', 'cancel', 'status', 'preview', 'selection', 'toggle', 'panel', 'form', 'success']) elements.set('calibration-' + name, element());
@@ -173,6 +279,9 @@ function readyRoom(app, drone, seconds = 1) {
 
 test('automatic pairing requires fresh room positions and stays latched after arming', () => {
   const app = dashboard();
+  const toggle = app.elements.get('separation-guard');
+  toggle.checked = true;
+  toggle.listeners.change();
   const a = app.connect('drone1');
   assert.equal(a.publishers.coordination.messages.length, 0, 'wait for a fresh flight mode');
   app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
@@ -214,8 +323,60 @@ test('automatic pairing requires fresh room positions and stays latched after ar
   assert.equal(a.publishers.coordination.messages.length, count);
 });
 
+test('separation toggle defaults off, applies to both drones, and locks outside fresh disarmed mode', () => {
+  const app = dashboard();
+  const toggle = app.elements.get('separation-guard');
+  assert.equal(toggle.checked, false);
+  const a = app.connect('drone1'), b = app.connect('drone2');
+  app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(toggle.disabled, true, 'unknown flight modes lock the switch');
+  assert.equal(a.publishers.guardEnabled.messages.length, 0);
+  for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
+  for (const drone of [a, b]) readyRoom(app, drone);
+  assert.equal(toggle.disabled, false);
+  for (const drone of [a, b]) {
+    assert.equal(last(drone, 'guardEnabled').data, false);
+    assert.equal(last(drone, 'coordination').data, false, 'fresh UWB must not enable a disabled guard');
+  }
+  toggle.checked = true;
+  toggle.listeners.change();
+  for (const drone of [a, b]) {
+    assert.equal(last(drone, 'guardEnabled').data, true);
+    assert.equal(last(drone, 'coordination').data, true);
+  }
+  toggle.checked = false;
+  toggle.listeners.change();
+  for (const drone of [a, b]) assert.equal(last(drone, 'guardEnabled').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
+  assert.equal(toggle.disabled, true);
+  toggle.checked = true;
+  toggle.listeners.change();
+  assert.equal(toggle.checked, false);
+  assert.equal(last(a, 'guardEnabled').data, false);
+  assert.equal(last(a, 'coordination').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'FLYING' });
+  b.disconnect();
+  assert.equal(toggle.disabled, true);
+  assert.equal(last(a, 'coordination').data, false);
+  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(toggle.disabled, false);
+  app.advanceTime(1501);
+  toggle.checked = true;
+  toggle.listeners.change();
+  assert.equal(toggle.disabled, true, 'recheck mode freshness when toggled');
+  assert.equal(toggle.checked, false);
+  a.disconnect();
+  app.connect('drone1');
+  app.receive(a, '/pidrone/mode', { mode: 'DISARMED' });
+  assert.equal(last(a, 'guardEnabled').data, false, 'reconnect retains the disabled choice');
+  assert.equal(a.publishers.mode.messages.length, 0, 'guard changes never issue flight commands');
+});
+
 test('flight-state tooltip shows preflight refusal and expires grants at the source timestamp', () => {
   const app = dashboard();
+  const toggle = app.elements.get('separation-guard');
+  toggle.checked = true;
+  toggle.listeners.change();
   const a = app.connect('drone1'), b = app.connect('drone2');
   for (const drone of [a, b]) app.receive(drone, '/pidrone/mode', { mode: 'DISARMED' });
   for (const drone of [a, b]) readyRoom(app, drone);
@@ -366,6 +527,9 @@ test('shared commands reach both bridges and individual commands only their targ
 
 test('synchronized start waits for both drones and uses available room positions', () => {
   const app = dashboard();
+  const toggle = app.elements.get('separation-guard');
+  toggle.checked = true;
+  toggle.listeners.change();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const publishers = [a, b].map(drone => drone.publishers.routineStart);
   const starts = () => publishers.map(topic => topic.messages.length);
