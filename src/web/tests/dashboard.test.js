@@ -1886,39 +1886,39 @@ test('tap selection, overlapping targets, and keyboard adjustment work without c
   assert.doesNotMatch(html, /id="target-(drone|x|y|submit)"/);
 });
 
-test('mapped AprilTags follow changed positions across drones and clear on generation change', () => {
+test('mapped AprilTags average positions by ID and clear reports on generation change', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  const tagMap = (x, count, time = 100) => ({
+  const tagMap = (x, count, time = 100, y = 2) => ({
     header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
     tag_ids: [0], zones: ['PICKUP'],
-    positions: [{ x, y: 2, z: 0 }], sample_counts: [count]
+    positions: [{ x, y, z: 0 }], sample_counts: [count]
   });
   app.receive(a, '/pidrone/apriltag/map', tagMap(1, 4));
-  app.receive(b, '/pidrone/apriltag/map', tagMap(1.2, 6));
+  app.receive(b, '/pidrone/apriltag/map', tagMap(1.5, 6, 100, 3));
   const tags = app.fleetMap.mappedTags();
   assert.equal(tags.length, 1);
   assert.equal(tags[0].id, 0);
-  assert.equal(tags[0].x, 1.2);
+  assert.deepEqual([tags[0].x, tags[0].y], [1.25, 2.5]);
   assert.equal(app.fleetMap.chart.data.datasets.find(d => d.key === 'apriltags').data.length, 1);
-  // A new location wins even when the other drone has more historical samples.
+  // Each drone contributes one equally weighted estimate, regardless of sample count.
   app.receive(a, '/pidrone/apriltag/map', tagMap(2, 3, 101));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 2);
-  // Updates to a different tag must not refresh the cached location of tag 0.
-  const otherTag = tagMap(1.2, 6, 102);
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.75);
+  const otherTag = tagMap(1.5, 6, 102, 3);
   otherTag.tag_ids.push(1); otherTag.zones.push('DROP_OFF');
   otherTag.positions.push({ x: 3, y: 2, z: 0 }); otherTag.sample_counts.push(3);
   app.receive(b, '/pidrone/apriltag/map', otherTag);
-  assert.equal(app.fleetMap.mappedTags()[0].x, 2);
-  // Small moves must not be averaged back toward the other drone's old marker.
-  app.receive(a, '/pidrone/apriltag/map', tagMap(1.4, 3, 103));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 1.4);
+  const updated = app.fleetMap.mappedTags();
+  assert.equal(updated.length, 2);
+  assert.equal(updated[0].x, 1.75);
+  assert.equal(updated[1].x, 3);
   app.receive(a, '/pidrone/apriltag/map', tagMap(1, 20, 100));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 1.4);
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.75);
   app.receive(a, '/pidrone/localization/generation', { data: 0 });
   app.receive(a, '/pidrone/localization/generation', { data: 1 });
   assert.equal(app.fleetMap.tagReports.drone1, undefined);
   assert.equal(app.fleetMap.mappedTags().length, 2); // Drone 2's independent map remains.
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.5);
   b.disconnect();
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });

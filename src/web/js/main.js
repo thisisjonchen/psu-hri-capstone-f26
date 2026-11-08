@@ -31,7 +31,6 @@ class FleetMap {
     this.tagReports = {};
     this.payloadReports = {};
     this.lastPayload = null;
-    this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
       [0, 1, 2].map(i => ({
@@ -308,15 +307,9 @@ class FleetMap {
         !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
     const previous = this.tagReports[id];
     if (previous && stamp <= previous.stamp) return;
-    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => {
-      const value = { id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
-        z: points[i].z, count: counts[i] };
-      const old = previous && previous.frame === frame && previous.tags.find(p => p.id === tag);
-      // Keep a local revision so cached tags do not look newly observed.
-      const unchanged = old && ['zone', 'x', 'y', 'z', 'count'].every(key => old[key] === value[key]);
-      value.revision = unchanged ? old.revision : ++this.tagRevision;
-      return value;
-    }) };
+    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => ({
+      id: tag, zone: zones[i], x: points[i].x, y: points[i].y
+    })) };
     this.render();
   }
 
@@ -328,13 +321,18 @@ class FleetMap {
       if (!drones[id].connected || !report || report.frame !== this.room.frame ||
           !this.hasMatchingReport(id)) return;
       report.tags.forEach(tag => {
-        const previous = groups.get(tag.id);
-        if (!previous || tag.revision > previous.revision) groups.set(tag.id, tag);
+        const group = groups.get(tag.id);
+        if (group) {
+          group.x += tag.x;
+          group.y += tag.y;
+          group.count++;
+        } else {
+          groups.set(tag.id, { ...tag, count: 1 });
+        }
       });
     });
-    // Lifetime sample counts and averaging can pin a moved tag to its old spot.
     return Array.from(groups.values()).sort((a, b) => a.id - b.id)
-      .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x, y: tag.y }));
+      .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x / tag.count, y: tag.y / tag.count }));
   }
 
   updatePayloadPoint(id, message) {
