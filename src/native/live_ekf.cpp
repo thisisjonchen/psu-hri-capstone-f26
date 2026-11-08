@@ -144,27 +144,6 @@ bool vertical_output(const Filter& estimate, const Filter* previous,
         estimate.state[2],estimate.state[5],predicted.state[5]-previous->state[5],
         estimate.stamp-previous->stamp);
 }
-bool vertical_tracking_error(const Filter& fusion, const std::deque<VerticalOutputSample>& history,
-                             std::array<double,2>& error) {
-    error.fill(std::numeric_limits<double>::quiet_NaN());
-    if (history.empty() || !std::isfinite(fusion.stamp)
-        || fusion.stamp<history.front().stamp || fusion.stamp>history.back().stamp) return false;
-    auto right=std::lower_bound(history.begin(),history.end(),fusion.stamp,
-        [](const VerticalOutputSample& sample,double stamp) { return sample.stamp<stamp; });
-    double height=right->height, velocity=right->velocity;
-    if (right->stamp!=fusion.stamp) {
-        const auto& left=*(right-1);
-        const double gap=right->stamp-left.stamp;
-        if (!(gap>0. && gap<=.15)) return false;
-        const double fraction=(fusion.stamp-left.stamp)/gap;
-        height=left.height+fraction*(height-left.height);
-        velocity=left.velocity+fraction*(velocity-left.velocity);
-    }
-    const double dh=fusion.state[2]-height, dv=fusion.state[5]-velocity;
-    if (!std::isfinite(dh) || !std::isfinite(dv)) return false;
-    error={{dh,dv}};
-    return true;
-}
 bool Filter::correct(const cv::Mat& innovation, const cv::Mat& h, const cv::Mat& r, double gate, bool xy_only) {
     if (!cv::checkRange(innovation) || !cv::checkRange(h) || !cv::checkRange(r)) return false;
     auto s=state; auto p=covariance;
@@ -472,22 +451,15 @@ bool LiveEKF::correct(const Measurement& m) {
     }
     cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
-        ++range_correction_.sequence;
-        range_correction_.stamp=m.stamp;
-        range_correction_.innovation=std::numeric_limits<double>::quiet_NaN();
-        range_correction_.accepted=range_correction_.ground_reset=false;
         const Rotation r=rotation(filter_.quaternion());
         const Vec center=filter_.position()+r*profile_.range_offset,direction=r*profile_.range_beam;
         // Range can correct a height prediction that has crossed below the floor.
         if (direction[2]>=-.1) return false;
         const double predicted=-center[2]/direction[2];
-        range_correction_.innovation=m.value-predicted;
         h.at<double>(0,2)=-1./direction[2];
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
         for (int j=0;j<3;++j) h.at<double>(0,6+j)=(a(2,j)+predicted*b(2,j))/direction[2];
-        range_correction_.accepted=filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,
-                                                  cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63);
-        if (range_correction_.accepted) return true;
+        if (filter_.correct((cv::Mat_<double>(1,1)<<m.value-predicted),h,cv::Mat::eye(1,1,CV_64F)*(.02*.02),6.63)) return true;
         // Recover rejected floor range only if rest still holds when delayed fusion reaches it.
         if (!m.ground_rest || mode_!="DISARMED" || !was_stationary_ || !rest_since_
             || m.stamp<(rest_since_-origin_ns_)/1.e9+.5) return false;
@@ -495,7 +467,6 @@ bool LiveEKF::correct(const Measurement& m) {
         if (!std::isfinite(height) || height<=0.) return false;
         const Vec height_jacobian(a(2,0)+m.value*b(2,0),a(2,1)+m.value*b(2,1),a(2,2)+m.value*b(2,2));
         filter_.reset_height(height,height_jacobian,.02*.02*direction[2]*direction[2]);
-        range_correction_.ground_reset=true;
         return true;
     }
     if (m.sensor=="zero_velocity") {
@@ -581,7 +552,6 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
     s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
-    s.range_correction=range_correction_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));

@@ -82,18 +82,6 @@ change gyro sampling or PID loop rates. They are applied to drone2; drone1 is un
 
 ## EKF recording and replay
 
-For scalar diagnostics without images or drone-side data files:
-
-```sh
-python3 tools/flow_capture.py telemetry --drone drone2 --seconds 45
-```
-
-After rebuilding the ROS messages and EKF, this also records `/pidrone/ekf/vertical`:
-projected and smoothed height/velocity, accelerometer bias, and the latest ToF
-correction result. The topic publishes only with a subscriber. ToF results retain
-their original timestamps and sequence numbers; repeated sequences are one attempt,
-and gaps indicate missed intermediate attempts. Older builds omit this optional topic.
-
 Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
 each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
 Both paths consume integrated IMU increments directly. Splitting an interval assumes

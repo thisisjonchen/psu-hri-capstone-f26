@@ -63,16 +63,6 @@ Output body_output(const Filter&, const Vec& angular_rate);
 bool vertical_output(const Filter& estimate, const Filter* previous,
                      const std::vector<Imu>& intervals, std::array<double,2>& output);
 
-struct VerticalOutputSample { double stamp, height, velocity; };
-bool vertical_tracking_error(const Filter& fusion, const std::deque<VerticalOutputSample>& history,
-                             std::array<double,2>& error);
-
-struct RangeCorrection {
-    std::uint64_t sequence = 0;
-    double stamp = 0., innovation = std::numeric_limits<double>::quiet_NaN();
-    bool accepted = false, ground_reset = false;
-};
-
 struct Snapshot {
     Filter filter;
     std::int64_t origin_ns = 0;
@@ -82,7 +72,6 @@ struct Snapshot {
     double range_aid = -1.e100, horizontal_aid = -1.e100;
     double takeoff_deadline = -1.e100;
     int uwb_rejections = 0;
-    RangeCorrection range_correction;
     std::string fault;
     bool range_ready(double now) const;
     bool ready(double now, const Filter& estimate, std::string& reason) const;
@@ -136,7 +125,6 @@ private:
     std::vector<Initial> initial_;
     std::deque<Fix> uwb_initial_;
     int uwb_rejections_ = 0;
-    RangeCorrection range_correction_;
     std::int64_t origin_ns_ = 0, last_imu_ns_ = 0, rest_since_ = 0;
     double last_imu_ = 0., closed_through_ = -1.e-9, mode_at_ = -1.e100;
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;

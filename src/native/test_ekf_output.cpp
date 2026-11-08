@@ -1,7 +1,6 @@
 #include "live_ekf.h"
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <cmath>
 
 namespace {
 pals::Filter resting(double stamp, double height=.05) {
@@ -71,79 +70,6 @@ TEST(EkfOutput, RecoveryDoesNotMakeStaleRangeOrOutputReady) {
     s.filter.state[2]=std::numeric_limits<double>::quiet_NaN();
     std::array<double,2> vertical={{0.,0.}};
     EXPECT_FALSE(pals::vertical_output(s.filter,nullptr,{},vertical));
-}
-
-TEST(EkfOutput, TrackingDiagnosticsCompareTheSameTimeWithoutBridgingOutputGaps) {
-    auto fusion=resting(1.05,.31);
-    fusion.state[5]=-.03;
-    const std::deque<pals::VerticalOutputSample> history={
-        {1.,.30,-.1},{1.1,.32,.1},{1.4,.8,.4}};
-    std::array<double,2> error;
-    ASSERT_TRUE(pals::vertical_tracking_error(fusion,history,error));
-    EXPECT_NEAR(0.,error[0],1.e-12);
-    EXPECT_NEAR(-.03,error[1],1.e-12);
-    fusion.stamp=1.1;
-    ASSERT_TRUE(pals::vertical_tracking_error(fusion,history,error));
-    EXPECT_NEAR(-.01,error[0],1.e-12);
-    EXPECT_NEAR(-.13,error[1],1.e-12);
-    for (double stamp:{.9,1.2,1.5}) {
-        fusion.stamp=stamp;
-        EXPECT_FALSE(pals::vertical_tracking_error(fusion,history,error));
-        EXPECT_TRUE(std::isnan(error[0]));
-        EXPECT_TRUE(std::isnan(error[1]));
-    }
-    EXPECT_FALSE(pals::vertical_tracking_error(fusion,{},error));
-}
-
-TEST(EkfOutput, RangeDiagnosticsRetainAttemptTimeAndReportAcceptedAndRejectedUpdates) {
-    pals::Profile p{};
-    p.acceleration_scale=9.8/2048.; p.gyro_scale=.001; p.delay=.35;
-    p.imu_rotation=p.camera_rotation=pals::Rotation::eye();
-    p.range_beam=pals::Vec(0.,0.,-1.);
-    pals::LiveEKF ekf(p);
-    std::int64_t ns=10000000000LL;
-    auto step=[&]() {
-        ns+=10000000LL;
-        ekf.imu(ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},ns/1.e9);
-    };
-    for (int i=0;i<950;++i) {
-        ekf.mode("DISARMED",ns/1.e9);
-        if (i%10==0) {
-            ekf.range(ns,.05,.01,3.);
-            ekf.uwb(ns,0.,0.,.0004);
-        }
-        step();
-    }
-    ASSERT_TRUE(ekf.snapshot().initialized);
-    ekf.mode("FLYING",ns/1.e9);
-    for (int i=0;i<40;++i) step();
-    const auto before=ekf.snapshot();
-    const auto accepted_ns=ns;
-    ekf.range(ns,.06,.01,3.);
-    for (int i=0;i<40;++i) step();
-    const auto accepted=ekf.snapshot();
-    EXPECT_EQ(before.range_correction.sequence+1,accepted.range_correction.sequence);
-    EXPECT_NEAR((accepted_ns-accepted.origin_ns)/1.e9,accepted.range_correction.stamp,1.e-9);
-    EXPECT_NEAR(.01,accepted.range_correction.innovation,.001);
-    EXPECT_TRUE(accepted.range_correction.accepted);
-    EXPECT_FALSE(accepted.range_correction.ground_reset);
-
-    const auto rejected_ns=ns;
-    ekf.range(ns,2.5,.01,3.);
-    for (int i=0;i<40;++i) step();
-    const auto rejected=ekf.snapshot();
-    EXPECT_EQ(accepted.range_correction.sequence+1,rejected.range_correction.sequence);
-    EXPECT_NEAR((rejected_ns-rejected.origin_ns)/1.e9,rejected.range_correction.stamp,1.e-9);
-    EXPECT_GT(rejected.range_correction.innovation,2.);
-    EXPECT_FALSE(rejected.range_correction.accepted);
-    EXPECT_FALSE(rejected.range_correction.ground_reset);
-    EXPECT_EQ(accepted.range_aid,rejected.range_aid);
-    EXPECT_LT(rejected.filter.position()[2],.1);
-
-    for (int i=0;i<10;++i) step();
-    const auto unchanged=ekf.snapshot();
-    EXPECT_EQ(rejected.range_correction.sequence,unchanged.range_correction.sequence);
-    EXPECT_EQ(rejected.range_correction.stamp,unchanged.range_correction.stamp);
 }
 
 int main(int argc, char** argv) {

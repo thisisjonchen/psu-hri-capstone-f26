@@ -61,7 +61,6 @@ add_message_files(
   FlightReadiness.msg
   MspImu.msg
   IntegratedImu.msg
-  EkfVertical.msg
 
 )
 
