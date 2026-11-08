@@ -18,6 +18,7 @@ from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStampe
 from pidrone_pkg.msg import Mode, RC, State, FlightReadiness
 from std_msgs.msg import Empty, Bool, UInt32, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
+from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, automatic_coordination
 from localization.uwb_locator import monotonic
 from pidrone_pkg.msg import AnchorLayout
 from three_dim_vec import Position, Velocity, Error, RPY
@@ -119,15 +120,38 @@ class PIDController(object):
         self.room_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
         if not all(np.isfinite(v) and v > 0 for v in (self.room_target_gain, self.room_speed_limit)):
             raise ValueError('Room target gain and speed must be positive')
-        # The paired/solo selection is still reported, but no distance guard
-        # limits motion or arming: drones fly without separation protection.
+        self.coordination_config = rospy.get_param('/pidrone/coordination', None)
+        self.distance_guard = None
+        self.peer_state = self.peer_received = None
+        self.peer_preview = self.peer_preview_received = None
         self.coordination_status_pub = None
         self.preflight_pub = None
         self.coordination_published = None
         self.coordination_published_at = None
         self.coordination_status = 'disabled'
+        self.coordination_error = ''
         self.coordination_active = True
         self.coordination_selection = self.coordination_selection_received = None
+        if self.coordination_config is not None:
+            try:
+                config = self.coordination_config
+                if not isinstance(config, dict):
+                    raise ValueError('Coordination must be a parameter dictionary')
+                own, peer = config['drone_id'], config['peer_id']
+                if (not all(isinstance(v, (str, type(u''))) and v for v in (own, peer)) or own == peer):
+                    raise ValueError('Use two distinct drone identities')
+                speed_limit = min(.15, self.room_speed_limit)
+                # The first ID alphabetically leads; the follower needs extra speed.
+                if own < peer:
+                    speed_limit *= 2. / 3.
+                self.distance_guard = DistanceGuard(float(config['min_distance']),
+                    float(config['max_distance']), float(config['nominal_separation_m']),
+                    self.room_target_gain, speed_limit, follow_peer=own > peer)
+                self.coordination_status = 'waiting_for_peer'
+            except (KeyError, TypeError, ValueError) as error:
+                # Keep altitude control running, but block horizontal motion.
+                self.coordination_error = 'invalid_configuration'
+                rospy.logwarn('Distance control configuration: %s', error)
 
     @synchronized
     def coordination_selection_callback(self, msg):
@@ -135,6 +159,50 @@ class PIDController(object):
         if self.current_mode == 'DISARMED':
             self.coordination_selection = msg.data
             self.coordination_selection_received = monotonic()
+
+    def accept_peer(self, msg, previous):
+        config = self.coordination_config
+        if (self.distance_guard is None or msg.drone_id != config['peer_id']
+                or msg.recipient_id != config['drone_id']):
+            return False
+        stamp = msg.header.stamp.to_sec()
+        if not fresh(stamp, rospy.get_time()):
+            return False
+        # Repeated packets must not extend the freshness timeout.
+        return previous is None or stamp > previous.header.stamp.to_sec()
+
+    @synchronized
+    def peer_preview_callback(self, msg):
+        # Use this stream only before takeoff.
+        if self.current_mode in ('DISARMED', 'ARMED') and self.accept_peer(msg, self.peer_preview):
+            self.peer_preview, self.peer_preview_received = msg, monotonic()
+
+    @synchronized
+    def peer_state_callback(self, msg):
+        if not self.accept_peer(msg, self.peer_state):
+            return
+        self.peer_state, self.peer_received = msg, monotonic()
+        if self.current_mode == 'FLYING':
+            # Once a peer joins, keep paired protection until disarm.
+            self.coordination_active = True
+
+    def peer_margin(self, peer, received):
+        """Validate both positions and return their combined uncertainty."""
+        pose = self.room_pose
+        if self.coordination_error:
+            return None, self.coordination_error
+        if not self.room_ready(allow_prediction=False):
+            return None, 'local_position_unavailable'
+        if (peer is None or not fresh(peer.header.stamp.to_sec(), rospy.get_time()) or
+                not 0 <= monotonic() - received <= STATE_TIMEOUT):
+            return None, 'peer_state_stale'
+        if peer.header.frame_id != pose.header.frame_id or peer.recipient_generation != self.room_generation:
+            return None, 'reference_mismatch'
+        try:
+            margin = uncertainty(pose.pose.covariance) + uncertainty(peer.pose.covariance)
+        except (ValueError, TypeError, IndexError, OverflowError):
+            return None, 'invalid_covariance'
+        return margin, ''
 
     def flight_readiness(self):
         report = FlightReadiness()
@@ -148,12 +216,42 @@ class PIDController(object):
                 report.reason = 'flight_setup_unavailable'
                 return report
             report.paired = bool(self.coordination_selection)
+        if self.coordination_error or self.distance_guard is None:
+            report.reason = self.coordination_error or 'guard_unavailable'
+            return report
         if not self.local_ready():
             report.reason = 'local_estimate_unavailable'
             return report
         report.header = self.current_state.header
+        if report.paired:
+            peer = self.peer_preview
+            margin, report.reason = self.peer_margin(peer, self.peer_preview_received)
+            if margin is None:
+                return report
+            p, other = self.room_pose.pose.pose.position, peer.pose.pose.position
+            try:
+                report.reason = self.distance_guard.preflight((p.x, p.y), (other.x, other.y), margin)
+            except (ValueError, TypeError, OverflowError):
+                report.reason = 'invalid_state'
+            if report.reason:
+                return report
+            report.header = min((self.current_state.header, self.room_pose.header, peer.header),
+                                key=lambda header: header.stamp.to_sec())
         report.ready, report.reason = True, 'ready'
         return report
+
+    def coordinated_velocity(self, requested):
+        """Filter the final body XY request after all route/hold corrections."""
+        peer, pose = self.peer_state, self.room_pose
+        margin, error = self.peer_margin(peer, self.peer_received)
+        if error:
+            return (0, 0), error
+        p, q = pose.pose.pose.position, pose.pose.pose.orientation
+        angle = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+        world, status = self.distance_guard.filter(
+            (p.x, p.y), (peer.pose.pose.position.x, peer.pose.pose.position.y),
+            (peer.velocity.x, peer.velocity.y), rotate(requested, angle), margin)
+        return rotate(world, -angle), status
 
     def local_ready(self):
         # Fusion owns sensor validity. Only watchdog its published estimate here.
@@ -190,6 +288,8 @@ class PIDController(object):
     def room_generation_callback(self, msg):
         if self.room_generation is not None and self.room_generation != msg.data:
             self.cancel_room_target()
+            self.peer_state = self.peer_received = None
+            self.peer_preview = self.peer_preview_received = None
         self.room_generation = msg.data
 
     @synchronized
@@ -292,14 +392,17 @@ class PIDController(object):
         if previous == 'DISARMED' and msg.mode in ('ARMED', 'FLYING'):
             received = self.coordination_selection_received
             fresh_selection = received is not None and 0 <= monotonic() - received <= 2.
-            # Default to paired if the selection is missing.
-            self.coordination_active = bool(self.coordination_selection) if fresh_selection else True
+            # Default to paired protection if the selection is missing or invalid.
+            self.coordination_active = (bool(self.coordination_selection)
+                                        if fresh_selection and not self.coordination_error else True)
         if msg.mode == 'DISARMED' and previous != 'DISARMED':
             self.coordination_selection = self.coordination_selection_received = None
             self.coordination_active = True
         self.current_mode = msg.mode
         if previous != msg.mode:
             self.cancel_room_target()
+            self.peer_state = self.peer_received = None
+            self.peer_preview = self.peer_preview_received = None
             self.altitude.cancel_takeoff()
             self.altitude.cancel_landing()
             rospy.loginfo('PID mode %s -> %s', previous, msg.mode)
@@ -352,6 +455,8 @@ class PIDController(object):
         requested_xy = (self.desired_velocity.x, self.desired_velocity.y)
 
         # Learn the constant push only from a fresh IMU/flow velocity estimate.
+        # calc_error already applies the spacing filter to the velocity request.
+        # Keep adapting to that request so spacing corrections can unwind old trim.
         now = rospy.get_time()
         command = self.velocity.step((self.pid_error.x / 100., self.pid_error.y / 100.), now, xy_ready)
         command.append(1500 + self.desired_yaw_velocity)
@@ -455,6 +560,18 @@ class PIDController(object):
                 # Position correction supplements, rather than removes, velocity damping.
                 self.pid_error.x += self.lr_pid.step(self.position_error.x, pose_dt)
                 self.pid_error.y += self.fb_pid.step(self.position_error.y, pose_dt)
+        if self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
+            # Include both room-target commands and local-position PID corrections.
+            # Do not overwrite the route's requested velocity or its stored target.
+            requested = (self.current_velocity.x + self.pid_error.x / 100.,
+                         self.current_velocity.y + self.pid_error.y / 100.)
+            command, self.coordination_status = self.coordinated_velocity(requested)
+            for axis, value in zip(('x', 'y'), command):
+                measured = getattr(self.current_velocity, axis)
+                setattr(self.pid_error, axis, 100 * (value - measured)
+                        if xy_ready and np.isfinite(measured) else 0)
+        elif self.coordination_config is not None:
+            self.coordination_status = 'inactive' if self.coordination_active else 'solo'
         report = self.flight_readiness() if self.preflight_pub is not None else None
         status = (self.coordination_status, self.current_mode,
                   (report.ready, report.reason, report.paired) if report is not None else None)
@@ -528,6 +645,21 @@ def main(ControllerClass):
     node_name = os.path.splitext(os.path.basename(__file__))[0]
     rospy.init_node(node_name)
 
+    # Load defaults when no coordination settings were supplied.
+    if not rospy.has_param('/pidrone/coordination'):
+        import yaml
+        params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
+        try:
+            with open(os.path.join(params_dir, 'payload_geometry.yaml')) as stream:
+                geometry = yaml.safe_load(stream)
+            with open(os.path.join(params_dir, 'coordination.yaml')) as stream:
+                settings = yaml.safe_load(stream)
+            config = automatic_coordination(geometry, settings, os.environ.get('ROS_MASTER_URI', ''))
+        except (IOError, ValueError, TypeError, yaml.YAMLError) as error:
+            # Keep the PID running, but block horizontal motion.
+            rospy.logwarn('Automatic coordination configuration: %s', error)
+            config = {}
+        rospy.set_param('/pidrone/coordination', config)
     if not rospy.has_param('/pidrone/altitude/controller'):
         import yaml
         params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
@@ -566,10 +698,13 @@ def main(ControllerClass):
     rospy.Subscriber('/pidrone/reset_transform', Empty, pid_controller.reset_callback)
     rospy.Subscriber('/pidrone/picamera/lost', Bool, pid_controller.lost_callback)
     if pid_controller.use_fusion:
+        from pidrone_pkg.msg import PeerState
         from std_msgs.msg import String
         pid_controller.coordination_status_pub = rospy.Publisher('/pidrone/coordination/status', String, queue_size=1)
         pid_controller.preflight_pub = rospy.Publisher('/pidrone/coordination/preflight', FlightReadiness, queue_size=1)
         rospy.Subscriber('/pidrone/coordination/paired', Bool, pid_controller.coordination_selection_callback, queue_size=1)
+        rospy.Subscriber('/pidrone/coordination/peer', PeerState, pid_controller.peer_state_callback, queue_size=1)
+        rospy.Subscriber('/pidrone/coordination/peer_preview', PeerState, pid_controller.peer_preview_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/local_ready', Bool, pid_controller.local_ready_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/ready', Bool, pid_controller.room_ready_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped, pid_controller.room_pose_callback, queue_size=1)

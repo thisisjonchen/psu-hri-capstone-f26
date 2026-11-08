@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs on the Pi host for the dashboard's Connect, Restart and Relocalize
 # buttons. Starts the pidrone_pkg container and the `pidrone` screen session
-# (pi.screenrc) that owns every onboard node. Starting succeeds once the EKF has
-# initialized facing map +Y at the UWB position; `align` restarts localization (its SE window).
+# (pi.screenrc) that owns every onboard node. The EKF starts facing map +Y at the
+# UWB position, so `align` restarts localization (its SE window).
 # Usage: pals-start.sh start|restart|align|warm-reboot|status
 set -u
 container=pidrone_pkg
@@ -42,37 +42,20 @@ resolve_ports() {
     printf 'PALS_FC_PORT=%s\nPALS_UWB_PORT=%s\n' "$fc" "$uwb" > "$env_file"
 }
 
-# The EKF node sets this report once it has its starting position and heading.
-# Ctrl-C stops waiting but still succeeds, so Connect attaches the terminal.
-wait_for_ekf() {
-    local report progress shown= stopped=
-    trap 'stopped=1' INT
-    echo "Waiting for the EKF: keep the drone still on the floor, facing +Y, with UWB streaming (Ctrl-C stops waiting)..."
-    for _ in $(seq 120); do
-        report=$(docker exec "$container" bash -ic 'timeout 3 rosparam get /ekf_localization/initialized' 2>/dev/null |
-            grep -o 'EKF initialized.*' | tr -d "'\"")
-        [[ -n "$report" ]] && { trap - INT; echo "$report"; return 0; }
-        # Startup progress written by the EKF node (x/20 UWB fixes at rest).
-        progress=$(docker exec "$container" sh -c "tail -n1 /tmp/ekf_startup.log 2>/dev/null")
-        [[ -n "$progress" && "$progress" != "$shown" ]] && { echo "$progress"; shown=$progress; }
-        [[ -z "$stopped" ]] && sleep 1
-        [[ -n "$stopped" ]] && { trap - INT; echo "Stopped waiting; the EKF keeps initializing (see the SE window)."; return 0; }
-    done
-    trap - INT
-    echo "EKF did not initialize; check the SE window." >&2
-    return 1
-}
-
 align_heading() {
     docker exec "$container" screen -S "$session" -p SE -X stuff '^C'
     # [e] keeps pgrep -f from matching this script's own bash command line.
     docker exec "$container" bash -ic '
         for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
         pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null && { echo "Localization did not stop; check the SE window."; exit 1; }
-        # Clear the old report so the wait below sees the new EKF.
-        rosparam delete /ekf_localization/initialized >/dev/null 2>&1
-        screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"' 2>/dev/null || return 1
-    wait_for_ekf
+        screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"
+        # The EKF needs eight seconds at rest with UWB streaming.
+        for _ in $(seq 30); do
+            timeout 2 rostopic echo -n1 /pidrone/localization/local_ready/data 2>/dev/null | grep -q True &&
+                { echo "EKF initialized facing map +Y at the UWB position."; exit 0; }
+            sleep 0.5
+        done
+        echo "Localization restarted but is not ready; check the SE window."; exit 1' 2>/dev/null
 }
 
 case "${1:-}" in
@@ -119,18 +102,17 @@ wait_for_bridge() {
     for _ in $(seq 120); do
         if (exec 3<>/dev/tcp/127.0.0.1/9090) 2>/dev/null; then
             echo "Nodes started; rosbridge is up."
-            return 0
+            exit 0
         fi
         sleep 0.5
     done
     echo "rosbridge did not start; check screen window 6 (rosbridge)." >&2
-    return 1
+    exit 1
 }
 
 if session_running; then
     echo "Screen session '$session' is already running."
-    wait_for_bridge && wait_for_ekf
-    exit
+    wait_for_bridge
 fi
 if docker exec "$container" pgrep -x rosmaster >/dev/null 2>&1; then
     echo "ROS is already running outside the '$session' session; stop it or reboot." >&2
@@ -142,8 +124,7 @@ docker exec -d "$container" bash -ic "screen -dmS $session -c pi.screenrc"
 for _ in $(seq 20); do
     if session_running; then
         echo "Started screen session '$session'; waiting for rosbridge..."
-        wait_for_bridge && wait_for_ekf
-        exit
+        wait_for_bridge
     fi
     sleep 0.5
 done

@@ -18,7 +18,7 @@ Assuming that the base environment is already set up on the DD24 by following th
    Run the command again to replace an existing dashboard on the same port; restart while disarmed.
 3. Place each drone disarmed on a level floor, stationary and facing the top of the map (+Y).
 4. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
-5. Keep it still for at least four seconds, until it has 20 UWB fixes, while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
+5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
 6. Read all instructions carefully and be ready to disarm at all times.
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.

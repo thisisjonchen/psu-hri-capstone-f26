@@ -8,8 +8,6 @@ except ImportError:
     from urlparse import urlparse
 
 STATE_TIMEOUT = 0.5
-# NTP-synced drone and laptop clocks disagree by tens of milliseconds over Wi-Fi.
-CLOCK_TOLERANCE = 0.1
 
 
 def automatic_coordination(geometry, settings, master_uri):
@@ -33,7 +31,7 @@ def finite(values):
 
 
 def fresh(stamp, now):
-    return finite((stamp, now)) and stamp > 0 and -CLOCK_TOLERANCE <= now - stamp <= STATE_TIMEOUT
+    return finite((stamp, now)) and stamp > 0 and 0 <= now - stamp <= STATE_TIMEOUT
 
 
 def uncertainty(covariance):

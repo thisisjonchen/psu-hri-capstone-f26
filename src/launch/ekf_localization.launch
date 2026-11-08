@@ -1,5 +1,5 @@
 <launch>
-  <!-- Start disarmed, resting on the floor facing map +Y until it has 20 UWB fixes (at least four seconds). -->
+  <!-- Start disarmed, resting on the floor facing map +Y with UWB streaming; allow eight seconds to initialize. -->
   <arg name="calibration" default="$(find pidrone_pkg)/params/ekf.yaml"/>
   <arg name="body_frame" default="pidrone_body"/>
   <arg name="frame_id" default="map"/>

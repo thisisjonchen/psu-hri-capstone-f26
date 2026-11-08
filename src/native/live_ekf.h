@@ -11,8 +11,6 @@
 
 namespace pals {
 using Vec = cv::Vec3d;
-// UWB fixes averaged at rest for the starting room position.
-const int startup_fixes = 20;
 using Rotation = cv::Matx33d;
 using Quaternion = cv::Vec4d;
 Rotation rotation(const Quaternion& q);
@@ -40,8 +38,6 @@ struct Filter {
     std::array<double, 16> state = {};
     std::array<double, 225> covariance = {};
     double stamp = 0.;
-    // Innovation norm of the latest correction attempt, for logging.
-    double last_innovation = 0.;
     Vec position() const { return Vec(state.data()); }
     Vec velocity() const { return Vec(state.data()+3); }
     Quaternion quaternion() const { return Quaternion(state.data()+6); }
@@ -54,14 +50,9 @@ struct Filter {
     bool correct(const cv::Mat& innovation, const cv::Mat& observation, const cv::Mat& noise, double gate,
                  bool xy_only = false);
     void reset_height(double height, const Vec& attitude_jacobian, double variance);
-    // Add variance to horizontal position, in public (room-frame) coordinates.
-    void inflate_horizontal(double variance);
     cv::Mat public_covariance() const;
     bool navigation_variance_valid() const;
 };
-
-// One fused measurement, reported to the node for logging.
-struct Update { std::string sensor; double innovation; bool accepted; };
 
 struct Output {
     Quaternion quaternion;
@@ -78,7 +69,7 @@ struct Snapshot {
     double delay = 0.;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
     double takeoff_deadline = -1.e100;
-    int uwb_rejections = 0, uwb_startup = 0, uwb_recoveries = 0;
+    int uwb_rejections = 0;
     std::string fault;
     bool range_ready(double now) const;
     bool ready(double now, const Filter& estimate, std::string& reason) const;
@@ -109,7 +100,6 @@ public:
     void imu(std::int64_t stamp, Imu sample, double received);
     Snapshot snapshot() const;
     const Filter& filter() const { return filter_; }
-    std::vector<Update> take_updates() { std::vector<Update> result; result.swap(updates_); return result; }
 private:
     struct Measurement {
         double stamp, end = 0., value = 0.;
@@ -132,8 +122,7 @@ private:
     std::map<std::pair<double, std::string>, Measurement> measurements_;
     std::vector<Initial> initial_;
     std::deque<Fix> uwb_initial_;
-    std::vector<Update> updates_;
-    int uwb_rejections_ = 0, uwb_recoveries_ = 0;
+    int uwb_rejections_ = 0;
     std::int64_t origin_ns_ = 0, last_imu_ns_ = 0, rest_since_ = 0;
     double last_imu_ = 0., closed_through_ = -1.e-9, mode_at_ = -1.e100;
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;

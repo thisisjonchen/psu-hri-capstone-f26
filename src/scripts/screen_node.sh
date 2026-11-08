@@ -24,29 +24,13 @@ pidrone_node_check() {
             fi
         done
         pending=("${missing[@]}")
-        ((${#pending[@]})) || { echo "All ${#windows[@]} nodes are running."; pidrone_ekf_check; return; }
+        ((${#pending[@]})) || { echo "All ${#windows[@]} nodes are running."; return 0; }
         sleep 3
     done
     for name in "${pending[@]}"; do
         printf '  MISSING  %s (window %s; switch with ` then the number)\n' "$name" "${windows[$name]}"
     done
     return 1
-}
-
-# The routine shell opens once the EKF reports its starting position and heading.
-pidrone_ekf_check() {
-    local progress
-    echo 'Waiting for the EKF: keep the drone still on the floor, facing +Y, with UWB streaming (Ctrl-C stops waiting)...'
-    # Startup progress (x/20 UWB fixes) prints only until the EKF initializes.
-    { tail -n+1 -F /tmp/ekf_startup.log 2>/dev/null & } 2>/dev/null
-    progress=$!
-    disown "$progress"
-    # A subshell so Ctrl-C ends only the wait, not the window's shell.
-    ( trap 'exit 130' INT
-      until report=$(rosparam get /ekf_localization/initialized 2>/dev/null); do sleep 1; done
-      sleep 0.2
-      tr -d "'\"" <<<"$report" ) || echo 'Stopped waiting; the EKF keeps initializing (see the SE window).'
-    kill "$progress" 2>/dev/null
 }
 
 pidrone_screen_node() {
