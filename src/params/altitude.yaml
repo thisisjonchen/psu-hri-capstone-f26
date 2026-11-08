@@ -21,8 +21,8 @@ rate_i_limit: 0.71
 # Climb and descent speed limits (m/s), like ArduPilot PILOT_SPEED_UP/DN.
 climb_limit: 0.3
 descent_limit: 0.2
-# Takeoff target ramp (m/s), as in the earlier hover behavior.
-takeoff_rate: 0.10
+# Takeoff target ramp (m/s).
+takeoff_rate: 0.15
 # Thrust curve, like ArduPilot MOT_THST_EXPO: thrust = (1 - e) * a + e * a^2.
 thrust_expo: 0.65
 # Angle boost while leaning, capped at this tilt. Conservative: sized for the
