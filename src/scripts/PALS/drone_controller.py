@@ -50,6 +50,7 @@ class Drone(object):
         self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
         self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
         self.landing_pub = rospy.Publisher('/pidrone/desired/land', Float32, queue_size=1)
+        self.takeoff_pub = rospy.Publisher('/pidrone/desired/takeoff_height', Float32, queue_size=1)
         self.position_mode_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
         self.heartbeat_pub = rospy.Publisher(
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
@@ -173,7 +174,7 @@ class Drone(object):
         if '/state_estimator' in rosnode.get_node_names():
             raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
-        publishers = (self.mode_pub, self.twist_pub, self.pose_pub, self.landing_pub,
+        publishers = (self.mode_pub, self.twist_pub, self.pose_pub, self.landing_pub, self.takeoff_pub,
                       self.position_mode_pub, self.heartbeat_pub)
         reason = 'Waiting for flight nodes'
         reported_reason = None
@@ -295,8 +296,11 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, continue_after=None):
+    def takeoff(self, hold_xy=False, continue_after=None, height=None):
         """Take off; optionally continue after a timed climb instead of settling."""
+        height = self.takeoff_height if height is None else height
+        if math.isnan(height) or math.isinf(height) or height <= 0:
+            raise ValueError('Takeoff height must be finite and positive')
         if continue_after is not None and (math.isnan(continue_after) or
                 math.isinf(continue_after) or not 0 < continue_after < 10):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
@@ -310,8 +314,10 @@ class Drone(object):
         if self.voltage < self.MIN_START_V:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
+        self.takeoff_pub.publish(Float32(data=height))
+        rospy.loginfo('Taking off to %.2f m', height)
         self._set_mode('ARMED')
-        self.target_height = self.takeoff_height
+        self.target_height = height
         rospy.sleep(1.0)
         self._check_sensors()
         self._check_battery()
@@ -335,11 +341,10 @@ class Drone(object):
                 rospy.sleep(min(0.1, remaining))
                 continue
             now = time.time()
-            settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
+            settled_since = self._settled_since(height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
-                self.target_height = self.takeoff_height
-                rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
-                              self.ALTITUDE_SETTLE_SECONDS)
+                rospy.loginfo('Takeoff altitude %.2f m held for %.1f seconds; continuing routine',
+                              height, self.ALTITUDE_SETTLE_SECONDS)
                 return
             rospy.sleep(0.1)
         if continue_after is not None:

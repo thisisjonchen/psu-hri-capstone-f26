@@ -398,12 +398,13 @@ class RoutineControlTest(unittest.TestCase):
         drone.wait_for_start = mock.Mock()
         self.globals['Mode'] = lambda name: NS(mode=name)
         drone.mode_pub.publish = drone._mode_received
-        for delay in (1.0, None):
-            with self.subTest(continue_after=delay):
+        for delay, height in ((1.0, None), (None, None), (None, .6)):
+            with self.subTest(continue_after=delay, height=height):
+                target = .25 if height is None else height
                 drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
                 drone.voltage = 16.
                 drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
-                heights = iter([.10] * 20 if delay else [.19, .21, .32] + [.25] * 15)
+                heights = iter([.10] * 20 if delay else [.19, .21, .32] + [target] * 15)
                 observed = []
                 flying_seconds = [0.]
 
@@ -420,16 +421,40 @@ class RoutineControlTest(unittest.TestCase):
                         observed.append(drone.height)
 
                 self.ros.sleep = tick
-                drone.takeoff(hold_xy=True, continue_after=delay)
-                self.assertEqual(drone.target_height, .25)
+                drone.takeoff(hold_xy=True, continue_after=delay, height=height)
+                self.assertEqual(drone.target_height, target)
+                self.assertEqual(self.fusion.messages['/pidrone/desired/takeoff_height'][-1].data, target)
                 self.assertEqual(drone.mode, 'FLYING')
                 self.assertEqual(drone.xy_anchor, (1, 2))
                 if delay is not None:
                     self.assertAlmostEqual(flying_seconds[0], 1.0)
                     self.assertEqual(drone.height, .10, 'do not wait for the old 0.20 m threshold')
                 else:
-                    self.assertEqual(drone.height, .25)
-                    self.assertGreaterEqual(observed.count(.25), 11)
+                    self.assertEqual(drone.height, target)
+                    self.assertGreaterEqual(observed.count(target), 11)
+
+    def test_requested_takeoff_height_survives_mode_resets_without_canceling_ramp(self):
+        for delivery in ('DISARMED', 'ARMED', 'FLYING'):
+            with self.subTest(delivery=delivery):
+                controller = self.fusion.controller()
+                controller.current_position.z = .05
+                for mode in ('DISARMED', 'ARMED', 'FLYING'):
+                    controller.current_mode_callback(NS(mode=mode))
+                    if mode == delivery:
+                        controller.takeoff_height_callback(NS(data=.6))
+                self.assertEqual(controller.desired_position.z, .6)
+                ramp = controller.altitude.takeoff
+                self.assertIsNotNone(ramp)
+                for invalid in (0, -1, float('nan'), float('inf')):
+                    controller.takeoff_height_callback(NS(data=invalid))
+                self.assertEqual(controller.desired_position.z, .6)
+                controller.altitude.step(.6, .05, 0, 1, ramp[0] + 1)
+                self.assertAlmostEqual(controller.altitude.target, .15)
+                controller.altitude.step(.6, .6, 0, 1, ramp[0] + 6)
+                self.assertEqual(controller.altitude.target, .6)
+                controller.current_mode_callback(NS(mode='DISARMED'))
+                controller.current_mode_callback(NS(mode='ARMED'))
+                self.assertEqual(controller.desired_position.z, controller.takeoff_height)
 
     def test_prototype_moves_after_timed_takeoff_and_lands_on_completion_or_failure(self):
         module = ModuleType('drone_controller')
@@ -462,7 +487,7 @@ class RoutineControlTest(unittest.TestCase):
                 drone = mock.Mock(mode='FLYING', takeoff_height=.3)
                 drone.finish = type(self.drone).finish.__get__(drone)
                 if failed:
-                    drone.move_to_altitude.side_effect = RuntimeError('altitude did not settle')
+                    drone.takeoff.side_effect = RuntimeError('altitude did not settle')
                 args = [script, '--fly', '--seconds', '10']
                 if height is not None:
                     args += ['--height', str(height)]
@@ -477,9 +502,7 @@ class RoutineControlTest(unittest.TestCase):
                     else:
                         main()
                         drone.hover.assert_called_once_with(10.)
-                expected = [mock.call.ready(), mock.call.takeoff(hold_xy=True)]
-                if height is not None:
-                    expected.append(mock.call.move_to_altitude(height))
+                expected = [mock.call.ready(), mock.call.takeoff(hold_xy=True, height=height)]
                 if not failed:
                     expected.append(mock.call.hover(10.))
                 expected.append(mock.call.land(hold_xy=True))
@@ -507,7 +530,7 @@ class RoutineControlTest(unittest.TestCase):
             self.drone.ready()
         self.nodes.get_node_names.return_value = ['/fusion_localization']
         drone = self.drone
-        for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub, drone.landing_pub,
+        for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub, drone.landing_pub, drone.takeoff_pub,
                           drone.position_mode_pub, drone.heartbeat_pub):
             publisher.get_num_connections = lambda: 1
         drone.voltage, drone.battery_at = 16, self.fusion.now

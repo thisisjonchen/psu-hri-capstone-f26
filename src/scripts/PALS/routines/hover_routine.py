@@ -32,9 +32,7 @@ def main():
     drone = Drone()
     drone.ready()
     try:
-        drone.takeoff(hold_xy=True)
-        if args.height is not None:
-            drone.move_to_altitude(args.height)
+        drone.takeoff(hold_xy=True, height=args.height)
         rospy.loginfo('Holding altitude %.2f m for %.2f seconds with fused X/Y hold',
                       drone.takeoff_height if args.height is None else args.height, args.seconds)
         drone.hover(args.seconds)

@@ -48,6 +48,7 @@ class PIDController(object):
         self.current_mode = 'DISARMED'
         self.desired_mode = 'DISARMED'
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
+        self.requested_takeoff_height = None
         settings = dict(rospy.get_param('/pidrone/altitude/controller', {}))
         if 'throttle_range' in settings:
             settings['throttle_range'] = tuple(settings['throttle_range'])
@@ -373,6 +374,15 @@ class PIDController(object):
         self.desired_position.z = desired_z
 
     @synchronized
+    def takeoff_height_callback(self, msg):
+        """Set an absolute takeoff destination without canceling the climb ramp."""
+        if not np.isfinite(msg.data) or msg.data <= 0:
+            rospy.logwarn('Ignoring invalid takeoff height: %s', msg.data)
+            return
+        self.requested_takeoff_height = msg.data
+        self.desired_position.z = msg.data
+
+    @synchronized
     def landing_callback(self, msg):
         """Descend using the floor height measured before this flight."""
         if self.current_mode != 'FLYING' or not np.isfinite(msg.data) or not 0 <= msg.data <= 0.12:
@@ -405,6 +415,7 @@ class PIDController(object):
             self.coordination_active = self.coordination_enabled and (
                 bool(self.coordination_selection) if fresh_selection and not self.coordination_error else True)
         if msg.mode == 'DISARMED' and previous != 'DISARMED':
+            self.requested_takeoff_height = None
             self.coordination_selection = self.coordination_selection_received = None
             self.coordination_active = self.coordination_enabled
         self.current_mode = msg.mode
@@ -600,7 +611,8 @@ class PIDController(object):
         """Reset targets, command deadlines and PID state for a flight mode change."""
         # reset position control variables
         self.position_error = Error(0,0,0)
-        self.desired_position = Position(self.current_position.x, self.current_position.y, self.takeoff_height)
+        height = self.takeoff_height if self.requested_takeoff_height is None else self.requested_takeoff_height
+        self.desired_position = Position(self.current_position.x, self.current_position.y, height)
         rospy.loginfo("PID reset target=%s m source=%s", self.desired_position.z, __file__)
         # reset velocity control_variables
         self.velocity_error = Error(0,0,0)
@@ -702,6 +714,7 @@ def main(ControllerClass):
                      queue_size=1, tcp_nodelay=True)
     rospy.Subscriber('/pidrone/desired/pose', Pose, pid_controller.desired_pose_callback)
     rospy.Subscriber('/pidrone/desired/land', Float32, pid_controller.landing_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/desired/takeoff_height', Float32, pid_controller.takeoff_height_callback, queue_size=1)
     rospy.Subscriber('/pidrone/desired/twist', Twist, pid_controller.desired_twist_callback)
     rospy.Subscriber('/pidrone/mode', Mode, pid_controller.current_mode_callback)
     rospy.Subscriber('/pidrone/desired/mode', Mode, pid_controller.desired_mode_callback)
