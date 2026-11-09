@@ -16,7 +16,7 @@ from pidrone_pkg.msg import PayloadDetection, PayloadMapPoint, TagDetection, Tag
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, UInt32
 
-from localization.apriltag_geometry import camera_rotation, project_floor_tag
+from localization.apriltag_geometry import camera_rotation, estimate_tag_center, project_floor_tag
 
 
 class AprilTagMappingNode(object):
@@ -24,6 +24,10 @@ class AprilTagMappingNode(object):
         self.lock = threading.RLock()
         self.frame = rospy.get_param('~frame_id', 'map')
         self.plane_z = float(rospy.get_param('~tag_plane_z', 0.0))
+        self.tag_sizes = {int(tag_id): float(size) for tag_id, size in
+                          rospy.get_param('~tag_sizes_m', {}).items()}
+        if any(not np.isfinite(size) or size <= 0 for size in self.tag_sizes.values()):
+            raise ValueError('Tag sizes must be positive meters')
         self.payload_plane_z = float(rospy.get_param('~payload_plane_z', self.plane_z))
         self.max_distance = float(rospy.get_param('~max_tag_distance', 3.0))
         self.max_skew = float(rospy.get_param('~max_image_pose_skew', 0.35))
@@ -265,8 +269,22 @@ class AprilTagMappingNode(object):
                                       and 0 <= message.center_y[index] < info.height):
                     continue
                 try:
-                    measurement = self.project(
-                        (message.center_x[index], message.center_y[index]), self.plane_z, pose)
+                    if tag_id in self.tag_sizes:
+                        if len(message.corner_x) != count * 4 or len(message.corner_y) != count * 4:
+                            raise ValueError('Missing tag corners')
+                        start = index * 4
+                        xs = message.corner_x[start:start + 4]
+                        ys = message.corner_y[start:start + 4]
+                        if not (all(0 <= x < info.width for x in xs) and
+                                all(0 <= y < info.height for y in ys)):
+                            raise ValueError('Tag corners are outside the image')
+                        measurement = estimate_tag_center(
+                            list(zip(xs, ys)), self.tag_sizes[tag_id], info.K, info.D,
+                            pose[0], pose[1], self.camera_offset, self.rotation,
+                            self.max_distance, info.distortion_model)
+                    else:
+                        measurement = self.project(
+                            (message.center_x[index], message.center_y[index]), self.plane_z, pose)
                 except ValueError as error:
                     rospy.logwarn_throttle(5, 'AprilTag geometry rejected: {}'.format(error))
                     continue

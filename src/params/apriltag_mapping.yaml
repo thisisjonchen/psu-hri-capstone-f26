@@ -1,4 +1,10 @@
-# AprilTag centers must lie on this horizontal plane in the UWB map (meters).
+# Measured black-square side lengths in meters, keyed by tag ID (as strings).
+# Configured tags use four-corner pose estimation.
+tag_sizes_m:
+  '0': 0.114  # PAYLOAD
+  '1': 0.114  # DROP_OFF
+
+# Tags without a measured size are projected onto this UWB map height (meters).
 # For tags laid flat on the floor and UWB z=0 at that floor, leave at 0.
 tag_plane_z: 0.0
 

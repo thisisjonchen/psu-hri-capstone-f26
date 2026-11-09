@@ -196,6 +196,9 @@ drones by tag ID. If a tag moves, an older saved position can still influence
 the average until that drone updates or clears its map.
 
 Camera feeds outline detected tags in cyan using their four image corners.
+Set `tag_sizes_m` in `params/apriltag_mapping.yaml` to enable four-corner
+pose estimation for those IDs. Measure each printed black square edge to edge,
+excluding its white margin. Unconfigured tags use floor projection.
 Outlines expire when observations stop; they may lag the separate MJPEG stream.
 Rebuild catkin after deploying the updated `TagDetection.msg` corner fields.
 

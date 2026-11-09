@@ -261,6 +261,22 @@ class AprilTagMappingTests(unittest.TestCase):
         sample(10)
         self.assertAlmostEqual(mapped_x(), .5)
 
+    def test_measured_square_recovers_tag_center_above_floor(self):
+        self.node.rotation = camera_rotation(90)
+        self.node.tag_sizes[0] = .1
+        # A 10 cm tag spans 60 px at 0.5 m depth with a 300 px focal length.
+        # Its center is 60 px right of the optical axis, i.e. 10 cm right.
+        for _ in range(3):
+            self.now += .1
+            self.set_pose(self.now)
+            self.node.detection_callback(NS(
+                header=NS(stamp=Stamp(self.now)), camera_online=True,
+                image_width=320, image_height=240, tag_ids=[0], zones=['PAYLOAD'],
+                center_x=[220], center_y=[120],
+                corner_x=[190, 250, 250, 190], corner_y=[150, 150, 90, 90]))
+        point, = self.maps[-1].positions
+        np.testing.assert_allclose((point.x, point.y, point.z), (1.1, 2, .5), atol=1e-7)
+
 
 if __name__ == '__main__':
     unittest.main()
