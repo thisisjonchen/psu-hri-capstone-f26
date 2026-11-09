@@ -86,11 +86,11 @@ class AprilTagMappingTests(unittest.TestCase):
                                      D=[0] * 5, distortion_model='plumb_bob',
                                      header=NS(frame_id='camera')))
 
-    def set_pose(self, pose_stamp):
+    def set_pose(self, pose_stamp, position=(1, 2, 1), yaw=0, sign=1):
         pose = Pose()
         pose.header.frame_id, pose.header.stamp = 'map', Stamp(pose_stamp)
-        pose.pose.pose.position = NS(x=1, y=2, z=1)
-        pose.pose.pose.orientation.w = 1
+        pose.pose.pose.position = NS(x=position[0], y=position[1], z=position[2])
+        pose.pose.pose.orientation = NS(x=0, y=0, z=sign*math.sin(yaw/2), w=sign*math.cos(yaw/2))
         self.node.pose_callback(pose)
 
     def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
@@ -102,6 +102,7 @@ class AprilTagMappingTests(unittest.TestCase):
         return message
 
     def test_payload_projects_at_configured_height_and_invalidates_without_fresh_input(self):
+        self.set_pose(99.85)
         self.set_pose(99.98)
         detection = NS(header=NS(stamp=Stamp(99.9), frame_id='camera'), camera_online=True,
                        detected=True, image_width=320, image_height=240, center_x=190, center_y=120)
@@ -120,6 +121,7 @@ class AprilTagMappingTests(unittest.TestCase):
         self.node.payload_callback(detection)  # The fused pose has expired.
         self.assertFalse(self.payload_points[-1].valid)
         self.assertEqual(self.payload_points[-1].header.stamp.to_sec(), 99.9)
+        self.set_pose(100.36)
         self.set_pose(self.now)
         self.node.payload_callback(detection)
         self.assertTrue(self.payload_points[-1].valid)
@@ -129,10 +131,13 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual(self.maps[-1].tag_ids, [])
 
     def test_delayed_detections_publish_coordinates_once_per_image(self):
-        # Pose updates can overtake image processing; older poses also remain valid.
-        for index, pose_offset in enumerate((-.03, -.03, -.15)):
+        # Use the image-time midpoint during translation and yaw, even with
+        # opposite quaternion signs on the bracketing poses.
+        for index in range(3):
             self.now = 100 + index * .1
-            message = self.observe(self.now - .1, self.now + pose_offset)
+            self.set_pose(self.now - .08, position=(.9, 2, 1), yaw=-.2)
+            self.set_pose(self.now - .02, position=(1.1, 2, 1), yaw=.2, sign=-1)
+            message = self.observe(self.now - .05, self.now - .02)
             published = len(self.maps)
             self.node.detection_callback(message)
             self.assertEqual(len(self.maps), published)
@@ -153,10 +158,26 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual(self.maps[-1].tag_ids, [])
         self.assertIsNone(self.node.pose)
 
+    def test_unbracketed_image_can_retry_and_history_resets_on_readiness_loss(self):
+        message = self.observe(99.95, 99.9)
+        self.assertEqual(self.node.tags, {})
+        self.set_pose(99.98)
+        self.node.detection_callback(message)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
+        self.node.ready_callback(NS(data=False))
+        self.node.ready_callback(NS(data=True))
+        self.set_pose(100)
+        message.header.stamp = Stamp(99.99)
+        self.node.detection_callback(message)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
+        self.node.generation_callback(NS(data=2))
+        self.assertEqual(len(self.node.poses), 0)
+
     def test_timing_fix_does_not_accept_stale_future_or_zero_stamps(self):
         for image_stamp, pose_stamp in ((99.5, 100), (99.9, 99.5),
                                        (100.1, 100), (99.9, 100.1)):
             self.node.pose = None
+            self.node.poses.clear()
             self.observe(image_stamp, pose_stamp)
             self.assertEqual(self.node.tags, {})
         # Cached poses must expire even if callbacks stop arriving.

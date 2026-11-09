@@ -23,7 +23,8 @@ camera_offset_body: [0.0, 0.0, 0.0]
 # Frame and maximum range; keep tight range for stable floor intersections.
 frame_id: map
 max_tag_distance: 3.0
-# Photo and fused pose stamps must be near each other, in seconds.
+# Maximum age of images and both poses bracketing exposure time, in seconds.
+# Mapping interpolates position/attitude; unbracketed images are skipped.
 max_image_pose_skew: 0.35
 # Maximum deviation within a candidate cluster (meters). Larger moves start a
 # new cluster; the last confirmed marker remains until that cluster is confirmed.

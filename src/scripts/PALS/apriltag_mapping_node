@@ -7,6 +7,7 @@ as the drone's existing AprilTag detector, UWB localization, and fusion node.
 from __future__ import print_function
 
 import threading
+from collections import deque
 
 import numpy as np
 import rospy
@@ -42,6 +43,7 @@ class AprilTagMappingNode(object):
             raise ValueError('Invalid mapping calibration or thresholds')
         self.ready = False
         self.pose = None
+        self.poses = deque(maxlen=256)
         self.camera_info = None
         self.generation = None
         self.last_detection_stamp = None
@@ -87,6 +89,7 @@ class AprilTagMappingNode(object):
                 self.clear_payload()
                 self.tags.clear()
                 self.pose = None
+                self.poses.clear()
                 self.last_detection_stamp = None
                 rospy.logwarn('UWB room generation changed; clearing measured AprilTag map')
                 self.publish_map()
@@ -97,6 +100,7 @@ class AprilTagMappingNode(object):
             self.ready = bool(msg.data)
             if not self.ready:
                 self.pose = None
+                self.poses.clear()
                 self.clear_payload()
 
     def pose_callback(self, msg):
@@ -109,7 +113,13 @@ class AprilTagMappingNode(object):
             values = (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
             if not all(np.isfinite(v) for v in values) or sum(v*v for v in values[3:]) < 1e-12:
                 return
+            stamp = self._stamp(msg)
+            if self.pose is not None and stamp <= self._stamp(self.pose):
+                return
             self.pose = msg
+            self.poses.append(msg)
+            while self.poses and not self._fresh(self.poses[0]):
+                self.poses.popleft()
 
     def camera_callback(self, msg):
         with self.lock:
@@ -136,22 +146,51 @@ class AprilTagMappingNode(object):
         age = rospy.Time.now().to_sec() - seconds
         return seconds > 0 and 0 <= age <= self.max_skew
 
-    def projection_ready(self, message):
+    def projection_pose(self, message):
+        """Interpolate fresh EKF-derived room poses; never extrapolate a ray."""
         info = self.camera_info
         if message.image_width != info.width or message.image_height != info.height:
             rospy.logwarn_throttle(5, 'CameraInfo size %dx%d != camera image %dx%d: run camera calibration',
                                    info.width, info.height, message.image_width, message.image_height)
-            return False
-        # Fused pose retains the UWB fix stamp. Either stamp can lead within the
-        # skew limit, but both measurements must still be fresh.
-        return (self._fresh(self.pose) and
-                abs(self._stamp(message) - self._stamp(self.pose)) <= self.max_skew)
+            return None
+        stamp = self._stamp(message)
+        before = None
+        for pose in self.poses:
+            if not self._fresh(pose):
+                continue
+            p, q = pose.pose.pose.position, pose.pose.pose.orientation
+            position = np.array([p.x, p.y, p.z], dtype=float)
+            rotation = np.array([q.x, q.y, q.z, q.w], dtype=float)
+            rotation /= np.linalg.norm(rotation)
+            at = self._stamp(pose)
+            if at == stamp:
+                return position, rotation
+            if at < stamp:
+                before = (at, position, rotation)
+                continue
+            if before is None:
+                return None
+            start, p0, q0 = before
+            fraction = (stamp - start) / (at - start)
+            # SLERP along the shortest arc; q and -q describe the same attitude.
+            dot = np.dot(q0, rotation)
+            if dot < 0:
+                rotation, dot = -rotation, -dot
+            dot = np.clip(dot, 0., 1.)
+            if dot > .9995:
+                q = q0 + fraction * (rotation - q0)
+            else:
+                angle = np.arccos(dot)
+                q = (np.sin((1 - fraction) * angle) * q0 +
+                     np.sin(fraction * angle) * rotation) / np.sin(angle)
+            return p0 + fraction * (position - p0), q / np.linalg.norm(q)
+        return None
 
-    def project(self, pixel, plane_z):
+    def project(self, pixel, plane_z, pose):
         info = self.camera_info
-        p, q = self.pose.pose.pose.position, self.pose.pose.pose.orientation
-        return project_floor_tag(pixel, info.K, info.D, (p.x, p.y, p.z),
-                                 (q.x, q.y, q.z, q.w), self.camera_offset, self.rotation,
+        position, rotation = pose
+        return project_floor_tag(pixel, info.K, info.D, position,
+                                 rotation, self.camera_offset, self.rotation,
                                  plane_z=plane_z, max_distance=self.max_distance,
                                  distortion_model=info.distortion_model)
 
@@ -168,7 +207,11 @@ class AprilTagMappingNode(object):
         with self.lock:
             if (self.generation is None or not self.ready or self.pose is None or
                     self.camera_info is None or not message.camera_online or
-                    not self._fresh(message) or not self.projection_ready(message)):
+                    not self._fresh(message)):
+                self.clear_payload()
+                return
+            pose = self.projection_pose(message)
+            if pose is None:
                 self.clear_payload()
                 return
             observation_time = self._stamp(message)
@@ -183,7 +226,7 @@ class AprilTagMappingNode(object):
                 self.clear_payload()
                 return
             try:
-                position = self.project((message.center_x, message.center_y), self.payload_plane_z)
+                position = self.project((message.center_x, message.center_y), self.payload_plane_z, pose)
             except ValueError as error:
                 rospy.logwarn_throttle(5, 'Payload geometry rejected: {}'.format(error))
                 self.clear_payload()
@@ -207,14 +250,15 @@ class AprilTagMappingNode(object):
             # frame must never count as multiple independent observations.
             if self.last_detection_stamp is not None and observation_time <= self.last_detection_stamp:
                 return
-            self.last_detection_stamp = observation_time
             count = len(message.tag_ids)
             if (count != len(message.zones) or count != len(message.center_x) or
                     count != len(message.center_y) or len(set(message.tag_ids)) != count or count == 0):
                 return
             info = self.camera_info
-            if not self.projection_ready(message):
+            pose = self.projection_pose(message)
+            if pose is None:
                 return
+            self.last_detection_stamp = observation_time
             changed = False
             for index, tag_id in enumerate(message.tag_ids):
                 if tag_id < 0 or not (0 <= message.center_x[index] < info.width
@@ -222,7 +266,7 @@ class AprilTagMappingNode(object):
                     continue
                 try:
                     measurement = self.project(
-                        (message.center_x[index], message.center_y[index]), self.plane_z)
+                        (message.center_x[index], message.center_y[index]), self.plane_z, pose)
                 except ValueError as error:
                     rospy.logwarn_throttle(5, 'AprilTag geometry rejected: {}'.format(error))
                     continue

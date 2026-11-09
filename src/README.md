@@ -185,6 +185,11 @@ current map session and labels it as last seen. A room layout or localization
 generation change clears the saved point. The marker assumes the configured
 payload height.
 
+Tag and payload mapping interpolate fused position and attitude at the image
+timestamp. Images need an exact-time pose or fresh poses on both sides; frames
+without that history are skipped. `max_image_pose_skew` bounds image and pose age.
+This aligns reported timestamps; it does not correct sensor timestamp bias.
+
 The floor AprilTag detector reports two `tag36h11` IDs, **0 (PAYLOAD)** and
 **1 (DROP_OFF)**. The map averages the latest saved XY positions from both
 drones by tag ID. If a tag moves, an older saved position can still influence
