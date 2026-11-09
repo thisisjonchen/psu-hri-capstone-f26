@@ -26,7 +26,7 @@ from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
 from localization import monotonic
-from localization.distance_guard import fresh, STATE_TIMEOUT
+from localization.state_checks import fresh, STATE_TIMEOUT
 from localization.imu_clock import ImuClock
 import os
 
@@ -61,8 +61,6 @@ class FlightController(object):
         self.prev_mode = 'DISARMED'         #initialize as disarmed
         self.mode_lock = threading.RLock()
         self.preflight = self.preflight_received = self.preflight_stamp = None
-        self.coordination_selection = self.selection_received = None
-        self.flight_paired = None
         self.calibration_owner = rospy.get_param('/pidrone/localization/calibration_owner', '')
         self.calibration_request = ''
         # Clear the retired flight lock when upgrading an existing ROS session.
@@ -131,22 +129,11 @@ class FlightController(object):
                 if reason:
                     rospy.logwarn_throttle(1, 'Refusing %s: %s' % (msg.mode, reason))
                     return
-                if self.curr_mode == 'DISARMED':
-                    self.flight_paired = self.preflight.paired
             self.prev_mode = self.curr_mode
             self.curr_mode = msg.mode
             if self.prev_mode != self.curr_mode:
                 self.preflight = self.preflight_received = self.preflight_stamp = None
-            if self.curr_mode == 'DISARMED':
-                self.flight_paired = None
             self.update_command()
-
-    def coordination_selection_callback(self, msg):
-        with self.mode_lock:
-            if self.curr_mode == 'DISARMED':
-                if self.coordination_selection != msg.data:
-                    self.preflight = self.preflight_received = None
-                self.coordination_selection, self.selection_received = msg.data, monotonic()
 
     def preflight_callback(self, msg):
         with self.mode_lock:
@@ -166,14 +153,6 @@ class FlightController(object):
                 or not 0 <= monotonic() - self.preflight_received <= STATE_TIMEOUT
                 or report.mode != self.curr_mode):
             return 'preflight_unavailable'
-        if self.curr_mode == 'DISARMED':
-            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= 2.:
-                return 'flight_setup_unavailable'
-            paired = self.coordination_selection
-        else:
-            paired = self.flight_paired
-        if report.paired != paired:
-            return 'flight_setup_changed'
         return '' if report.ready else (report.reason or 'preflight_not_ready')
 
     def calibration_owner_callback(self, msg):
@@ -549,7 +528,6 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
-    rospy.Subscriber('/pidrone/coordination/paired', Bool, fc.coordination_selection_callback, queue_size=1)
     rospy.Subscriber('/pidrone/coordination/preflight', FlightReadiness, fc.preflight_callback, queue_size=1)
     rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,

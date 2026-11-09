@@ -23,11 +23,9 @@ Assuming that the base environment is already set up on the DD24 by following th
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
-**Separation guard** defaults off onboard and in the dashboard, bypassing spacing
-corrections and peer checks for both drones. Confirm
-**Disabled on drone** in each status panel before flight. Local estimate checks and
-disarm/watchdog behavior remain active. Re-enable it under **Controls** while the
-connected drones are disarmed. The dashboard resets the switch off when reopened.
+Solo routines fly one drone and refuse to take off while both drones are connected.
+To fly both together, select both and run a `paired_*.py` routine (see
+`scripts/PALS/routines/README.md`).
 
 For the complete firmware, driver and code rollout, see the
 [drone update guide](../tools/DRONE_UPDATE.md).

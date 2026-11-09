@@ -133,7 +133,7 @@ class FlightControllerLoopTest(unittest.TestCase):
 
     def readiness(self, fc, **changes):
         report = NS(header=NS(stamp=fusion_helpers.Stamp(self.env.ros_now)),
-                    mode=fc.curr_mode, paired=True, ready=True, reason='ready')
+                    mode=fc.curr_mode, ready=True, reason='ready')
         report.__dict__.update(changes)
         fc.preflight_callback(report)
         return report
@@ -157,7 +157,6 @@ class FlightControllerLoopTest(unittest.TestCase):
 
     def test_arm_and_takeoff_require_readiness_but_disarm_does_not(self):
         fc = self.controller()
-        fc.coordination_selection_callback(NS(data=True))
         fc.desired_mode_callback(NS(mode='ARMED'))
         self.assertEqual(fc.curr_mode, 'DISARMED')
         self.readiness(fc, ready=False, reason='uncertainty_too_large')
@@ -191,7 +190,6 @@ class FlightControllerLoopTest(unittest.TestCase):
 
     def test_stale_or_repeated_reports_do_not_restore_readiness(self):
         fc = self.controller()
-        fc.coordination_selection_callback(NS(data=True))
         grant = self.readiness(fc)
         self.assertEqual(fc.preflight_failure(), '')
         self.readiness(fc, ready=False, reason='peer_state_stale')
@@ -206,29 +204,6 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.readiness(fc)
         self.env.ros_now += .51  # The source timestamp must also be fresh.
         self.assertEqual(fc.preflight_failure(), 'preflight_unavailable')
-
-    def test_solo_readiness_matches_selection_and_locks_when_armed(self):
-        fc = self.controller()
-        self.readiness(fc, paired=False)
-        self.assertEqual(fc.preflight_failure(), 'flight_setup_unavailable')
-        fc.coordination_selection_callback(NS(data=True))
-        self.env.ros_now += .01
-        self.readiness(fc, paired=False)
-        self.assertEqual(fc.preflight_failure(), 'flight_setup_changed')
-        fc.coordination_selection_callback(NS(data=False))
-        self.env.ros_now += .01
-        self.readiness(fc, paired=False)
-        self.env.now += 2.1
-        self.env.ros_now += .01
-        self.readiness(fc, paired=False)
-        self.assertEqual(fc.preflight_failure(), 'flight_setup_unavailable')
-        fc.coordination_selection_callback(NS(data=False))
-        fc.desired_mode_callback(NS(mode='ARMED'))
-        self.assertEqual(fc.curr_mode, 'ARMED')
-        fc.coordination_selection_callback(NS(data=True))
-        self.readiness(fc, paired=False)
-        fc.desired_mode_callback(NS(mode='FLYING'))
-        self.assertEqual(fc.curr_mode, 'FLYING')
 
     def test_commands_precede_batched_imu_and_battery_stays_fresh_at_reduced_rate(self):
         polling = self.main.__globals__['select']

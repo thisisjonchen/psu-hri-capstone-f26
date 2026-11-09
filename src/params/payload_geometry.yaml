@@ -1,4 +1,4 @@
-# Distances in meters, loaded with coordination.yaml at PID startup.
+# Distances in meters.
 nominal_separation_m: 1.0
 payload_drop_m: 0.5
 # payload_drop_m is for planning only; it does not set altitude.
@@ -8,4 +8,3 @@ payload_drop_m: 0.5
 # Effective length per rope = sqrt(payload_drop_m^2 + (nominal_separation_m / 2)^2)
 #                         = approximately 0.707 m; allow extra material for knots/fittings.
 # The drop is measured between drone and payload attachment points, not to ground.
-# Provisional unloaded separation limits live in coordination.yaml.

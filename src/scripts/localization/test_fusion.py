@@ -242,7 +242,7 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['nav_msgs.msg'].Odometry = lambda: NS(header=NS(), child_frame_id='')
         sys.modules['pidrone_pkg.msg'].State = state
         sys.modules['pidrone_pkg.msg'].FlightReadiness = lambda: NS(
-            header=NS(stamp=Stamp(0), frame_id=''), mode='', paired=False, ready=False, reason='')
+            header=NS(stamp=Stamp(0), frame_id=''), mode='', ready=False, reason='')
         sys.modules['pidrone_pkg.msg'].Mode = sys.modules['pidrone_pkg.msg'].RC = NS
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
@@ -593,6 +593,26 @@ class FusionNodeTest(unittest.TestCase):
         # 0.15 m above the 0.35 m target and climbing: the cascade reduces throttle.
         self.assertAlmostEqual(controller.altitude.target, .35)
         self.assertLess(command[3], controller.altitude.hover_throttle)
+
+    def test_altitude_target_during_takeoff_moves_the_ramp_end(self):
+        controller = self.controller()
+        current = state()
+        current.header.stamp = Stamp(self.ros_now)
+        current.pose_with_covariance.pose.orientation.w = 1
+        current.pose_with_covariance.pose.position.z = .05
+        controller.current_state_callback(current)
+        controller.current_mode = 'ARMED'
+        controller.current_mode_callback(NS(mode='FLYING'))
+        controller.desired_pose_callback(NS(position=NS(x=0, y=0, z=.25)))  # 0.25 -> 0.5 m
+        self.ros_now += 1
+        controller.step()
+        self.assertAlmostEqual(controller.altitude.target, .15, msg='climb at the 0.10 m/s ramp')
+        controller.desired_pose_callback(NS(position=NS(x=0, y=0, z=-.45)))  # below the ramp
+        controller.step()
+        self.assertAlmostEqual(controller.altitude.target, .05)
+        self.ros_now += controller.altitude.TAKEOFF_THROTTLE_RAMP_SECONDS
+        controller.step()
+        self.assertIsNone(controller.altitude.takeoff, 'the climb ends once the throttle ramp finishes')
 
     def test_manual_velocity_expires_before_output_and_reset_clears_yaw(self):
         controller = self.controller()

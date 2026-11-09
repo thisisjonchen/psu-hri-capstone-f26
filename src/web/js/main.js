@@ -611,10 +611,7 @@ class DroneSession {
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
-    this.coordinationReceivedAt = null;
     this.preflightReceivedAt = null;
-    this.preflightReady = false;
-    this.routineReadyAt = null;
     this.root = document.getElementById(id);
     this.ros = null;
     this.publishers = {};
@@ -685,28 +682,11 @@ class DroneSession {
         (this.fusionReadyAt !== null && Date.now() - this.fusionReadyAt > 500)) this.clearFusion();
   }
 
-  setCoordination(value) {
-    const labels = { clear: 'Active · clear', inactive: 'Standby', solo: 'Solo flight',
-      disabled: 'Disabled on drone', tracking_spacing: 'Maintaining spacing', limited: 'Limiting motion',
-      unavailable: 'Unavailable' };
-    const status = this.field('coordination');
-    status.dataset.state = ['disabled', 'unavailable'].includes(value) ? value
-      : ['clear', 'tracking_spacing'].includes(value) ? 'active'
-      : ['inactive', 'solo'].includes(value) ? 'standby' : 'warning';
-    status.title = 'Separation guard: ' + (labels[value] || value.replace(/_/g, ' '));
-    status.setAttribute('aria-label', status.title);
-  }
-
-  refreshCoordination() {
+  refreshPreflight() {
     if (this.preflightReceivedAt !== null &&
         (Date.now() < this.preflightReceivedAt || Date.now() - this.preflightReceivedAt > 500)) {
       this.preflightReceivedAt = null;
       this.field('flightMode').title = 'Preflight unavailable';
-    }
-    if (this.coordinationReceivedAt !== null &&
-        (Date.now() - this.coordinationReceivedAt < 0 || Date.now() - this.coordinationReceivedAt > 500)) {
-      this.coordinationReceivedAt = null;
-      this.setCoordination('unavailable');
     }
   }
 
@@ -747,7 +727,6 @@ class DroneSession {
     button.setAttribute('aria-label', button.textContent + ' Drone ' + this.id.slice(-1));
     this.field('telemetry').hidden = !connected;
     this.field('batteryStatus').hidden = !connected;
-    this.field('coordination').hidden = !connected;
     status.disabled = !active;
     status.querySelector('[data-connection-action]').textContent = connected ? 'Disconnect' : 'Cancel';
     if (connected && document.activeElement === button) status.focus();
@@ -774,11 +753,8 @@ class DroneSession {
     this.fusedStamp = null;
     this.fusionGeneration = null;
     this.clearFusion();
-    this.coordinationReceivedAt = null;
-    this.setCoordination('unavailable');
     this.preflightReceivedAt = null;
     this.field('flightMode').title = 'Preflight unavailable';
-    this.preflightReady = false;
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedPosition'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
@@ -847,7 +823,6 @@ class DroneSession {
   }
 
   disconnect(status = 'Disconnected') {
-    if (syncStart && syncStart.ids.includes(this.id)) awaitSyncStart(null);
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.waitUntil = 0;
@@ -865,7 +840,6 @@ class DroneSession {
     if (ros) ros.close();
     this.resetTelemetry();
     this.setStatus(status);
-    publishCoordinationSelection();
     updateLayout();
   }
 
@@ -875,8 +849,6 @@ class DroneSession {
     };
     publisher('mode', '/pidrone/desired/mode', 'pidrone_pkg/Mode');
     publisher('heartbeat', '/pidrone/heartbeat/web_interface', 'std_msgs/Empty');
-    publisher('guardEnabled', '/pidrone/coordination/enabled', 'std_msgs/Bool');
-    publisher('coordination', '/pidrone/coordination/paired', 'std_msgs/Bool');
     publisher('positionMode', '/pidrone/position_control', 'std_msgs/Bool');
     publisher('twist', '/pidrone/desired/twist', 'geometry_msgs/Twist');
     publisher('pose', '/pidrone/desired/pose', 'geometry_msgs/Pose');
@@ -884,9 +856,6 @@ class DroneSession {
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
     publisher('map', '/pidrone/map', 'std_msgs/Empty');
-    publisher('routineStart', '/pidrone/routine/start', 'std_msgs/Empty');
-    // ROSLIB advertises on first publish, and the routine would miss that first start.
-    this.publishers.routineStart.advertise();
     this.publish('heartbeat', {});
     this.heartbeat = setInterval(() => this.publish('heartbeat', {}), 1000);
 
@@ -939,46 +908,33 @@ class DroneSession {
     subscribe('/pidrone/mode', 'pidrone_pkg/Mode', message => {
       if (this.field('flightMode').textContent !== message.mode) {
         this.preflightReceivedAt = null;
-        this.preflightReady = false;
         this.field('flightMode').title = 'Preflight unavailable';
       }
       this.field('flightMode').textContent = message.mode;
       this.modeReceivedAt = Date.now();
-      publishCoordinationSelection();
-    });
-    subscribe('/pidrone/coordination/status', 'std_msgs/String', message => {
-      if (typeof message.data !== 'string' || !message.data.trim()) return;
-      this.coordinationReceivedAt = Date.now();
-      this.setCoordination(message.data);
     });
     subscribe('/pidrone/coordination/preflight', 'pidrone_pkg/FlightReadiness', message => {
       if (typeof message.reason !== 'string' || message.mode !== this.field('flightMode').textContent) return;
       const now = Date.now();
       const stamp = message.header && message.header.stamp;
       const time = stamp && (stamp.secs + stamp.nsecs / 1e9) * 1000;
-      const current = message.paired === coordinationPaired && Number.isFinite(time) &&
+      const current = Number.isFinite(time) &&
         time > 0 && time <= now && now - time <= 500;
       // Repeated reports must not make old sensor data look fresh.
       this.preflightReceivedAt = message.ready === true && current ? time : now;
-      this.preflightReady = message.ready === true && current;
       const status = this.field('flightMode');
       if (message.mode === 'FLYING') {
         status.title = 'In flight';
       } else if (message.ready !== true) {
         status.title = 'Preflight blocked · ' + (message.reason || 'unavailable').replace(/_/g, ' ');
       } else if (current) {
-        status.title = 'Preflight ready · ' + (message.paired ? 'paired' : 'solo');
+        status.title = 'Preflight ready';
       } else {
         status.title = 'Preflight unavailable';
       }
-      this.refreshCoordination();
-      releaseSyncStart();
+      this.refreshPreflight();
     });
 
-    subscribe('/pidrone/routine/ready', 'std_msgs/Empty', () => {
-      this.routineReadyAt = Date.now();
-      releaseSyncStart();
-    });
     subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
       this.positionMode = !!message.data;
     });
@@ -1147,38 +1103,7 @@ function connectDrone(id) {
   });
 }
 
-// Release the routines together once all selected drones report ready.
-let syncStart = null;
-function awaitSyncStart(ids) {
-  syncStart = ids && { ids: ids.slice(), dispatched: false, expires: Date.now() + 120000 };
-  if (ids) ids.forEach(id => { drones[id].routineReadyAt = null; });
-}
-function confirmSyncStart() {
-  if (syncStart) { syncStart.dispatched = true; releaseSyncStart(); }
-}
-function releaseSyncStart() {
-  if (!syncStart || !syncStart.dispatched) return;
-  if (Date.now() > syncStart.expires) { awaitSyncStart(null); return; }
-  publishCoordinationSelection();
-  const group = syncStart.ids.map(id => drones[id]);
-  if (!group.every(drone => drone.connected && drone.routineReadyAt !== null &&
-      Date.now() - drone.routineReadyAt >= 0 && Date.now() - drone.routineReadyAt <= 500 &&
-      drone.field('flightMode').textContent === 'DISARMED' && drone.modeReceivedAt !== null &&
-      Date.now() - drone.modeReceivedAt >= 0 && Date.now() - drone.modeReceivedAt <= 1500)) return;
-  const blocked = group.filter(drone => !drone.preflightReady || drone.preflightReceivedAt === null ||
-    Date.now() - drone.preflightReceivedAt < 0 || Date.now() - drone.preflightReceivedAt > 500);
-  if (blocked.length) {
-    feedback('Waiting for ' + blocked.map(drone => drone.id + ': ' +
-      (drone.preflightReady ? 'Preflight unavailable' : drone.field('flightMode').title)).join('; '));
-    return;
-  }
-  syncStart = null;
-  group.forEach(drone => drone.publish('routineStart', {}));
-  feedback('Synchronized start sent to ' + group.map(drone => drone.id).join(' and ') + '.');
-}
-
 function dispatch(action, target = currentTarget()) {
-  if (action === 'disarm' || action === 'stop') awaitSyncStart(null);
   const sessions = sessionsFor(target);
   const available = sessions.filter(drone => drone.connected);
   // Stop and disarm can still reach a remaining drone if its partner is offline.
@@ -1205,56 +1130,11 @@ function stopHeldKeys() {
   heldKeys.clear();
 }
 
-// Select automatic pairing before arming unless the operator disables the guard.
-let separationGuardEnabled = false;
-let coordinationPaired = false;
-
-function publishCoordinationSelection() {
-  const previous = coordinationPaired;
-  const connected = Object.values(drones).filter(drone => drone.connected);
-  const now = Date.now();
-  const freshModes = connected.every(drone => drone.modeReceivedAt !== null &&
-    now - drone.modeReceivedAt >= 0 && now - drone.modeReceivedAt <= 1500);
-  const disarmed = freshModes && connected.every(drone => drone.field('flightMode').textContent === 'DISARMED');
-  document.getElementById('separation-guard').disabled = !disarmed;
-  if (!connected.length) { coordinationPaired = separationGuardEnabled; return; }
-  if (!freshModes) return;
-  if (disarmed) {
-    coordinationPaired = separationGuardEnabled && connected.length === 2 && connected.every(drone =>
-      drone.fusedPose && drone.fusionReadyAt !== null && drone.fusedReceivedAt !== null &&
-      [drone.fusionReadyAt, drone.fusedReceivedAt, drone.fusedStamp * 1000].every(stamp =>
-        Number.isFinite(stamp) && now - stamp >= 0 && now - stamp <= 500));
-  }
-  if (previous !== coordinationPaired) connected.forEach(drone => {
-    drone.preflightReceivedAt = null;
-    drone.preflightReady = false;
-    drone.field('flightMode').title = 'Preflight unavailable';
-  });
-  connected.forEach(drone => {
-    if (drone.field('flightMode').textContent === 'DISARMED') {
-      drone.publish('guardEnabled', { data: separationGuardEnabled });
-    }
-    drone.publish('coordination', { data: coordinationPaired });
-  });
-}
-
 function isFormControl(target) {
   return target && (target.isContentEditable || !!target.closest('input, textarea, select, summary'));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const guardToggle = document.getElementById('separation-guard');
-  guardToggle.checked = separationGuardEnabled;
-  guardToggle.addEventListener('change', () => {
-    // Recheck freshness at the click, including time since the last UI refresh.
-    publishCoordinationSelection();
-    if (guardToggle.disabled) {
-      guardToggle.checked = separationGuardEnabled;
-      return;
-    }
-    separationGuardEnabled = guardToggle.checked;
-    publishCoordinationSelection();
-  });
   const fullscreenButton = document.getElementById('fullscreen-toggle');
   fullscreenButton.hidden = !document.fullscreenEnabled;
   const updateFullscreen = () => {
@@ -1285,8 +1165,7 @@ document.addEventListener('DOMContentLoaded', () => {
   fleetMap = new FleetMap();
   anchorCalibration = new AnchorCalibration();
   setInterval(() => {
-    publishCoordinationSelection();
-    Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); drone.refreshCoordination(); });
+    Object.values(drones).forEach(drone => { drone.expireConnection(); drone.refreshDetection(); drone.refreshVerticalSpeed(); drone.refreshLocalization(); drone.refreshPreflight(); });
     fleetMap.refreshAnchors();
     anchorCalibration.refresh();
   }, 250);
