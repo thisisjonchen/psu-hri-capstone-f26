@@ -136,6 +136,7 @@ private:
     std::shared_ptr<Camera> camera_;
     std::deque<Imu> imu_;
     std::deque<AngularInterval> angular_;
+    std::deque<std::pair<std::int64_t, Vec>> startup_rates_;
     std::map<std::pair<double, std::string>, Measurement> measurements_;
     std::vector<Initial> initial_;
     std::deque<Fix> uwb_initial_;

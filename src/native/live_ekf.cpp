@@ -357,6 +357,13 @@ bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,co
         // Average brief gyro noise without relaxing the limit on sustained rotation.
         const double end=(stamp-origin_ns_)/1.e9;
         if (!mean_rate(end-.2,end,rest_rate)) { clear_rest(); return false; }
+    } else {
+        // The same 0.2 s average at startup, before the filter keeps angular history.
+        startup_rates_.push_back({stamp,rate});
+        while (stamp-startup_rates_.front().first>200000000LL) startup_rates_.pop_front();
+        rest_rate=Vec(0.,0.,0.);
+        for (const auto& r:startup_rates_) rest_rate+=r.second;
+        rest_rate/=double(startup_rates_.size());
     }
     const double range_age=(stamp-range_.stamp)/1.e9;
     bool quiet=ground_rest_allowed()
