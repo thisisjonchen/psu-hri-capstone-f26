@@ -401,8 +401,9 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
         for (const auto& f:uwb_initial_) if (f.stamp<=ns && ns-f.stamp<=4000000000LL) {
             tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
         }
-        // Keep waiting for UWB over the newest eight seconds of rest.
-        if (fixes<30) { initial_.erase(initial_.begin()); return; }
+        // Keep resting until the newest four seconds hold 20 fixes (5 Hz); tags set to
+        // 10 Hz have been measured delivering as few as 7 fixes per second.
+        if (fixes<20) { initial_.erase(initial_.begin()); return; }
         tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }
