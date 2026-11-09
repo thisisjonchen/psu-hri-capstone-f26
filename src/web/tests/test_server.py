@@ -86,8 +86,7 @@ class PeerRelayLifecycleTest(unittest.TestCase):
         with mock.patch('websockets.asyncio.client.connect', side_effect=attempts) as connect, \
                 mock.patch.object(peer_relay, 'Client', side_effect=clients), \
                 mock.patch.object(peer_relay, 'peer_messages',
-                                  side_effect=[ValueError('stale pose'), ([peer_relay.PEER_TOPIC, peer_relay.PREVIEW_TOPIC], messages),
-                                               ([peer_relay.PREVIEW_TOPIC] * 2, messages)]) as states:
+                                  side_effect=[ValueError('stale pose'), messages, messages]) as states:
             async def wait(_):
                 if states.call_count == 3:
                     stop.set()
@@ -100,7 +99,7 @@ class PeerRelayLifecycleTest(unittest.TestCase):
         clients[0].send.assert_not_called()
         for index, client in enumerate(clients[1:]):
             client.send.assert_called_once_with({
-                'op': 'publish', 'topic': peer_relay.PEER_TOPIC if index == 0 else peer_relay.PREVIEW_TOPIC,
+                'op': 'publish', 'topic': peer_relay.PEER_TOPIC,
                 'msg': messages[index % 2]})
         for socket in sockets:
             socket.__aexit__.assert_awaited_once()
@@ -125,7 +124,7 @@ class PeerRelayLifecycleTest(unittest.TestCase):
             stop.set()
         with mock.patch('websockets.asyncio.client.connect', side_effect=[mock.MagicMock(), mock.MagicMock()]), \
                 mock.patch.object(peer_relay, 'Client', side_effect=clients), \
-                mock.patch.object(peer_relay, 'peer_messages', return_value=([peer_relay.PEER_TOPIC] * 2, [{}, {}])), \
+                mock.patch.object(peer_relay, 'peer_messages', return_value=[{}, {}]), \
                 mock.patch.object(peer_relay.asyncio, 'sleep', side_effect=wait):
             peer_relay.run(stop)
         self.assertTrue(delivered.is_set())

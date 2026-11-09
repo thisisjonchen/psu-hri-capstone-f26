@@ -81,7 +81,7 @@ class HandshakeTest(unittest.TestCase):
         start = self.now + 3
         self.peer_says(leader, lambda now: (0, 'idle') if not self.proposed() else
                        (1, 'accepted' if now < start else 'executing'))
-        leader.run('wait', [2], 3, 10)
+        leader.wait(2, lead_s=3, hold_s=10)
         plan = self.published['/pidrone/coordination/plan'][0]
         self.assertEqual((plan.plan_id, plan.action, plan.params, plan.hold_s), (1, 'wait', [2.], 10.))
         self.assertAlmostEqual(plan.start_time.to_sec(), start)
@@ -142,23 +142,6 @@ class HandshakeTest(unittest.TestCase):
                 self.assertEqual(self.states(follower)[-1], 'failed')
                 limit = start + .5 if case == 'never_started' else start + 1.5
                 self.assertLessEqual(self.now, limit + .06)
-
-    def test_takeoff_plan_adds_a_settle_pad_and_rejects_unsafe_starts(self):
-        takeoff = self.module['ACTIONS']['takeoff']
-        stale = mock.Mock(side_effect=RuntimeError('Fused position is missing/stale'))
-        drone = NS(mode='DISARMED', ground_height=.05, takeoff_rate=.1, voltage=16., ARM_SECONDS=1.,
-                   ALTITUDE_SETTLE_SECONDS=1., MIN_START_V=15.2, _check_battery=lambda: None,
-                   _hold_pose=lambda local=False: None)
-        params = takeoff.prepare(drone, [.5])
-        self.assertAlmostEqual(params[1], 1 + 4.5 + 3)
-        takeoff.validate(drone, params)
-        self.assertEqual(takeoff.duration(params), params[1])
-        for change, bad, reason in [
-                ({}, [1.2, 20], 'height'), ({}, [.5, 6], 'needs'), ({'mode': 'FLYING'}, params, 'disarmed'),
-                ({'voltage': 15.}, params, 'battery'), ({'_hold_pose': stale}, params, 'stale')]:
-            with self.subTest(reason=reason):
-                with self.assertRaisesRegex((ValueError, RuntimeError), reason):
-                    takeoff.validate(NS(**dict(vars(drone), **change)), bad)
 
     def test_follower_lands_when_no_plan_starts_within_the_hold(self):
         follower = self.handshake('drone2')

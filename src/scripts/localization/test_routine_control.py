@@ -23,7 +23,7 @@ class RoutineControlTest(unittest.TestCase):
         self.ros.Timer = mock.Mock()
         self.ros.Duration = lambda seconds: seconds
         self.ros.is_shutdown = lambda: False
-        sys.modules['pidrone_pkg.msg'].Battery = NS
+        sys.modules['pidrone_pkg.msg'].Battery = sys.modules['pidrone_pkg.msg'].PeerState = NS
         sys.modules['geometry_msgs.msg'].Pose = lambda: Pose().pose.pose
         sys.modules['geometry_msgs.msg'].Twist = twist
         sys.modules['std_msgs.msg'].Bool = lambda value: NS(data=value)
@@ -263,6 +263,7 @@ class RoutineControlTest(unittest.TestCase):
             drone.height = max(.05, drone.height - .02)
 
         self.ros.sleep = tick
+        self.assertAlmostEqual(drone.landing_seconds(), .05 / .15 + .1 / .1 + 1)
         drone.land(hold_xy=True)
         self.assertEqual(drone.mode, 'DISARMED')
         self.assertIsNone(drone.xy_anchor)
@@ -289,6 +290,15 @@ class RoutineControlTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Landing was not confirmed'):
             drone.land()
         self.assertEqual(drone.mode, 'FLYING', 'a landing timeout must not disarm in the air')
+
+        # Stalled 8 cm above the floor: touchdown after 1 s without a new lowest height.
+        drone.height = .13
+        check = mock.Mock()
+        started = self.fusion.now
+        drone.land(check=check)
+        self.assertEqual(drone.mode, 'DISARMED')
+        self.assertAlmostEqual(self.fusion.now - started, 1.0, delta=.11)
+        self.assertTrue(check.called)
 
     def test_finish_preserves_disarm_and_manual_landing_recovery(self):
         drone = self.drone
@@ -325,49 +335,22 @@ class RoutineControlTest(unittest.TestCase):
             disarm.assert_not_called()
             drone.heartbeat.shutdown.assert_not_called()
 
-    def advance_until(self, release_at=None):
-        started = self.fusion.now
-        self.drone.voltage = 16.
-        self.drone.battery_at = self.drone.mode_at = self.drone.height_at = started
-
-        def sleep(seconds):
-            self.fusion.now += seconds
-            self.drone.battery_at = self.drone.mode_at = self.drone.height_at = self.fusion.now
-            if release_at is not None and self.fusion.now - started >= release_at:
-                self.drone._start_received(None)
-        self.globals['time'] = NS(time=lambda: self.fusion.now, sleep=sleep)
-
-    def test_synchronized_start_posts_ready_and_ignores_an_earlier_start(self):
+    def test_solo_takeoff_refuses_while_the_peer_is_connected(self):
         drone = self.drone
-        drone.mode = 'DISARMED'
-        drone._start_received(None)  # From a previous run: must not release this one.
-        self.advance_until(release_at=.5)
-        drone.wait_for_start()
-        ready = self.fusion.messages['/pidrone/routine/ready']
-        self.assertTrue(2 <= len(ready) <= 4)  # 5 Hz for 0.5 s
-
-    def test_no_start_or_mode_change_aborts_before_arming(self):
-        drone = self.drone
-        drone.mode = 'DISARMED'
-        self.advance_until()
-        with self.assertRaisesRegex(RuntimeError, 'No synchronized start within 30 s'):
-            drone.wait_for_start()
-        drone.mode = 'ARMED'
-        with self.assertRaisesRegex(RuntimeError, 'Mode changed to ARMED'):
-            drone.wait_for_start()
-        drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
+        drone.mode, drone.height, drone.ground_height, drone.voltage = 'DISARMED', .05, .05, 16.
+        drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
         drone.mode_pub.publish = mock.Mock()
-        with self.assertRaisesRegex(RuntimeError, 'No synchronized start'):
+        drone._peer_received(None)
+        with self.assertRaisesRegex(RuntimeError, 'Both drones are connected'):
             drone.takeoff()
-        drone.mode_pub.publish.assert_not_called()
+        drone.peer_at = self.fusion.now - 2  # peer disconnected
         drone.height_at = self.fusion.now - 2
         with self.assertRaisesRegex(RuntimeError, 'Downward range is missing/stale'):
-            drone.wait_for_start()
+            drone.takeoff()
         drone.mode_pub.publish.assert_not_called()
 
     def test_takeoff_can_continue_after_one_second_without_changing_altitude_target(self):
         drone = self.drone
-        drone.wait_for_start = mock.Mock()
         self.globals['Mode'] = lambda name: NS(mode=name)
         drone.mode_pub.publish = drone._mode_received
         for delay in (1.0, None):
@@ -437,6 +420,7 @@ class RoutineControlTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, error):
                         drone.takeoff_at(.5, start, start + 8.5, check)
                     continue
+                self.assertAlmostEqual(drone.takeoff_seconds(.5), 1 + .45 / drone.takeoff_rate)
                 drone.takeoff_at(.5, start, start + 8.5, check)
                 self.assertEqual(events['ARMED'], start)
                 self.assertAlmostEqual(events['FLYING'], start + 1)

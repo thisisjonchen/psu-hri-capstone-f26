@@ -95,8 +95,6 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .status-value { font-size: var(--type-value); font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .status-value.alert-danger { color: var(--error); background: transparent; }
 .status-value.alert-success { color: var(--success); background: transparent; }
-.coordination-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--space-1) var(--space-3); border-top: 1px solid var(--line); padding-top: var(--space-2); font-size: var(--type-label); }
-.coordination-status [data-field="coordination"] { min-width: 0; overflow-wrap: anywhere; }
 .metric-label { color: var(--muted); font-size: var(--type-label); font-weight: 600; }
 .speed-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .speed-readings span, .speed-readings strong { display: block; }

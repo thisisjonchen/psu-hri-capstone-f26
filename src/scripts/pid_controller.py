@@ -121,28 +121,13 @@ class PIDController(object):
             raise ValueError('Room target gain and speed must be positive')
         self.preflight_pub = None
         self.preflight_published = self.preflight_published_at = None
-        self.coordination_active = True
-        self.coordination_selection = self.coordination_selection_received = None
-
-    @synchronized
-    def coordination_selection_callback(self, msg):
-        # Keep the flight setup through connection losses after arming.
-        if self.current_mode == 'DISARMED':
-            self.coordination_selection = msg.data
-            self.coordination_selection_received = monotonic()
 
     def flight_readiness(self):
         report = FlightReadiness()
-        report.mode, report.paired = self.current_mode, self.coordination_active
+        report.mode = self.current_mode
         if self.current_mode not in ('DISARMED', 'ARMED'):
             report.reason = 'already_flying'
             return report
-        if self.current_mode == 'DISARMED':
-            received = self.coordination_selection_received
-            if received is None or not 0 <= monotonic() - received <= 2.:
-                report.reason = 'flight_setup_unavailable'
-                return report
-            report.paired = bool(self.coordination_selection)
         if not self.local_ready():
             report.reason = 'local_estimate_unavailable'
             return report
@@ -285,14 +270,6 @@ class PIDController(object):
     def current_mode_callback(self, msg):
         """ Update the current mode """
         previous = self.current_mode
-        if previous == 'DISARMED' and msg.mode in ('ARMED', 'FLYING'):
-            received = self.coordination_selection_received
-            fresh_selection = received is not None and 0 <= monotonic() - received <= 2.
-            # Default to paired protection if the selection is missing or invalid.
-            self.coordination_active = bool(self.coordination_selection) if fresh_selection else True
-        if msg.mode == 'DISARMED' and previous != 'DISARMED':
-            self.coordination_selection = self.coordination_selection_received = None
-            self.coordination_active = True
         self.current_mode = msg.mode
         if previous != msg.mode:
             self.cancel_room_target()
@@ -453,7 +430,7 @@ class PIDController(object):
                 self.pid_error.y += self.fb_pid.step(self.position_error.y, pose_dt)
         if self.preflight_pub is not None:
             report = self.flight_readiness()
-            status = (report.mode, report.ready, report.reason, report.paired)
+            status = (report.mode, report.ready, report.reason)
             now = monotonic()
             if status != self.preflight_published or now - self.preflight_published_at >= 0.1:
                 self.preflight_pub.publish(report)
@@ -559,7 +536,6 @@ def main(ControllerClass):
     rospy.Subscriber('/pidrone/picamera/lost', Bool, pid_controller.lost_callback)
     if pid_controller.use_fusion:
         pid_controller.preflight_pub = rospy.Publisher('/pidrone/coordination/preflight', FlightReadiness, queue_size=1)
-        rospy.Subscriber('/pidrone/coordination/paired', Bool, pid_controller.coordination_selection_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/local_ready', Bool, pid_controller.local_ready_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/ready', Bool, pid_controller.room_ready_callback, queue_size=1)
         rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped, pid_controller.room_pose_callback, queue_size=1)

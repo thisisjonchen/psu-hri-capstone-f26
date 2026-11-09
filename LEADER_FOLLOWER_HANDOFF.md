@@ -40,11 +40,11 @@ rebuild this from scratch.
 | Any failure | Both drones **land immediately** (or stay disarmed if on the ground) via the routine's `finally: drone.finish()`. No new automatic disarm trigger was added. |
 | When handshakes happen | Only while held: DISARMED on the ground, or FLYING with the `lock_xy()` hold. |
 | Hold between plans | Every plan carries `hold_s`, set by the routine. After the action, both drones hold X/Y until `end + hold_s`. If no next plan has started by then, both land. Both compute that deadline from the same shared times. |
-| Dashboard start | The dashboard's existing synchronized start (`/pidrone/routine/start`) stays unchanged for solo routines. Paired routines do **not** use it: launch both routines, and the leader proposes once the follower's status appears. |
+| Dashboard start | Removed. Solo `takeoff()` starts when the routine runs and is **refused while both drones are connected** (peer telemetry on `/pidrone/coordination/peer` within 1 s). Paired routines (`paired_*.py`) run on both drones with one Run; the leader proposes once the follower's status appears. |
 | Takeoff height | Given in the plan (0.25–1.0 m), climbed directly on the existing 0.10 m/s takeoff ramp. |
 | Takeoff end | A shared end time = arm (1 s) + climb from the leader's ground height + 3 s settle pad, computed by the leader and sent in the plan. Must be within ±5 cm for the last 1 s. |
 | Takeoff X/Y | `lock_xy()` on the existing EKF odometry (rate-limited EKF position). Requires the EKF local and room estimates to be fresh before acceptance. |
-| Code layout | Flight control stays in `Drone` (`drone_controller.py`). Actions in `coordination.py` are thin: they validate and sequence. |
+| Code layout | Layers and conventions are in `src/scripts/PALS/README.md`: flight behaviour and its timing in `Drone`, the protocol in `coordination.py`, thin blocks in `actions.py`. |
 | Formation (agreed, not built) | Move targets `(X ± D/2, Y)`, D = `nominal_separation_m` from `src/params/payload_geometry.yaml` (1.0 m). The follower couples Y to the leader and keeps D along X. |
 
 Owner workflow preference: implement in **small, reviewed steps**, explain each one
@@ -68,8 +68,9 @@ code minimal with sparse comments.
   of its 10 Hz pose loop and its validity checks. A delivery that stalls for more than
   0.1 s is dropped, because senders re-publish their status at 10 Hz and the leader
   re-publishes the plan every 50 ms until it is accepted.
-- The relay still also sends `PeerState` pose telemetry on `/pidrone/coordination/peer`
-  and `/peer_preview`. **Nothing on the drones consumes these now** (see Cleanup).
+- The relay also sends `PeerState` pose telemetry on `/pidrone/coordination/peer` at 10 Hz
+  whenever both drones have valid localization on the same anchor map (any flight mode).
+  `Drone.takeoff()` uses it to refuse solo flight; the planned separation check will use it.
 
 ### Messages (`src/msg/`, registered in `src/CMakeLists.txt`)
 
@@ -98,9 +99,10 @@ string reason
 ```python
 from coordination import Leader, Follower
 
-leader = Leader(drone)                         # on drone1 only; raises on drone2
-leader.run('takeoff', [0.5], lead_s=10, hold_s=30)
-leader.finish()                                # follower's run() returns; each routine then lands itself
+pair = Leader(drone, lead_s=10, hold_s=30)     # on drone1 only; raises on drone2
+pair.takeoff(0.5)                              # = pair.run('takeoff', [0.5], 10, 30)
+pair.land(hold_s=5)                            # synchronized landing; per-call override
+pair.finish()                                  # follower's run() returns
 
 Follower(drone).run()                          # on drone2: executes plans until the leader finishes
 ```
@@ -181,13 +183,14 @@ Keep flight control in `Drone`, and have actions call it.
   should propose the next plan immediately and use `lead_s` to wait, or call `finish()`.
 - **`plan_id` restarts at 1 for each leader session.** The follower ignores ids at or
   below its last one, so restart both routines together.
-- **The landing at the end of a routine, or on failure, is not synchronized.** Each drone
-  lands itself.
+- **Landing on failure, or by `finish()` without a `land` plan, is not synchronized.** Each
+  drone lands itself. Use the `land` block for a synchronized landing.
 
 ## 5. Takeoff action (done)
 
-### `Takeoff` in `coordination.py`
-- The routine passes `[height]`. `prepare` returns `[height, ARM_SECONDS + (height − ground) / takeoff_rate + 3.0]`.
+### `Takeoff` in `actions.py`
+- The routine passes `[height]`. `prepare` returns `[height, drone.takeoff_seconds(height) + 3.0]`, where
+  `Drone.takeoff_seconds` = `ARM_SECONDS + (height − ground) / takeoff_rate`.
   Example: 0.5 m from a 0.05 m ground gives 1 + 4.5 + 3 = 8.5 s.
 - `validate` rejects if:
   - the params aren't 2 finite values;
@@ -254,7 +257,10 @@ Landing, mode changes and reset still cancel the ramp. One side effect: the dash
 
 | File | Role | Status |
 |---|---|---|
-| `src/scripts/PALS/coordination.py` | handshake, registry, `Takeoff` action | new |
+| `src/scripts/PALS/README.md` | architecture and conventions (follow this) | new |
+| `src/scripts/PALS/coordination.py` | handshake protocol and action registry | new |
+| `src/scripts/PALS/actions.py` | paired blocks (`Takeoff`, `Land`) | new |
+| `src/scripts/PALS/routines/paired_hover.py` | reference paired routine (both drones, one Run) | new |
 | `src/scripts/PALS/drone_controller.py` | `takeoff_at`, `_check_ground_start`, `_set_mode(timeout)` | modified |
 | `src/scripts/pid_controller.py` | guard removed; ramp retarget | modified |
 | `src/scripts/localization/state_checks.py` | `fresh`, `finite`, `uncertainty`, timeouts (moved from the deleted guard) | new |
@@ -264,7 +270,8 @@ Landing, mode changes and reset still cancel the ramp. One side effect: the dash
 | `src/scripts/flight_controller_node.py` | import moved to `state_checks` | modified |
 | `src/params/payload_geometry.yaml` | comments only (D = `nominal_separation_m`) | modified |
 | `src/scripts/PALS/routines/README.md` | Paired routines section | modified |
-| `src/scripts/localization/test_coordination.py` | 7 handshake and takeoff tests | new |
+| `src/scripts/localization/test_coordination.py` | handshake protocol tests | new |
+| `src/scripts/localization/test_actions.py` | block tests (`Takeoff`, `Land`) | new |
 | `src/scripts/localization/test_peer_relay.py` | relay parser tests (moved) plus a forwarding test | new |
 | `src/scripts/localization/test_fusion.py` | + ramp retarget test | modified |
 | `src/scripts/localization/test_routine_control.py` | + timed takeoff test | modified |
@@ -279,47 +286,39 @@ PYTHONPATH=src/scripts .venv/bin/python -m unittest discover -s src/scripts/loca
 node --test src/web/tests/dashboard.test.js
 git diff --check
 ```
-Current result: 125 localization tests, **3 known failures that already exist on a clean
+Current result: 124 localization tests, **3 known failures that already exist on a clean
 HEAD** (`test_tag_hold` ×2, `test_velocity_controller`). Web tests and dashboard tests
-(40) pass. There is no Python 2 on the development laptop, so 2.7 compatibility was
+(37) pass. There is no Python 2 on the development laptop, so 2.7 compatibility was
 checked by reading the code only.
 
 ## 9. Cleanup still needed
 
-1. **Old paired/solo plumbing** from the guard era, now meaningless:
-   - the dashboard's automatic selection publishing `/pidrone/coordination/paired`
-     (`src/web/js/main.js`, around `publishCoordinationSelection`);
-   - the flight controller's `flight_setup_changed` / `flight_setup_unavailable` arming checks;
-   - `FlightReadiness.paired` and its echo in `pid_controller.flight_readiness`;
-   - the related tests (`test_flight_controller.py` and `dashboard.test.js` around lines 174 and 217).
-
-   **This currently makes arming depend on the dashboard being open and connected.**
-   Keep the useful part: refusing to arm unless a fresh preflight report says the local
-   estimate is ready.
-2. **Dashboard "Separation guard" field** (`index.html`, `css/main.css`, the status subscription
-   in `main.js`, and the test around `dashboard.test.js:240`). It always shows "Unavailable" now.
-3. **Relay pose topics** `/coordination/peer` and `/coordination/peer_preview` (`PeerState.msg`):
-   nothing on the drones consumes them. Either reuse them for formation coupling (step 6 below)
-   or delete them.
-4. **The working tree is not committed.** The guard deletions are staged and everything else is
-   unstaged. There are also unrelated user edits (`hover_routine.py`, EKF and boot files) and
-   untracked ` 2.py`/` 2.yaml` duplicates and `venv/`. Don't sweep those into a commit without asking.
+1. **The working tree is not committed.** There are also unrelated user edits (EKF startup,
+   boot and dashboard files, `hover_routine.py --height`), untracked ` 2.py`/` 2.yaml`
+   duplicates and `venv/`. Don't sweep those into a commit without asking.
+2. **Merge with `coordination-stability`** (Jon): conflicts in `pid_controller.py` (drop his
+   optional guard), `drone_controller.py`, `peer_relay.py`, `test_distance_guard.py` (delete),
+   and the EKF startup files. His `payload_carry.py` uses the removed dashboard start and should
+   be deleted or rebuilt from blocks.
 
 ## 10. Roadmap (next steps, in order)
 
-1. **Example routines.** `routines/paired_leader.py` (`ready → takeoff → finish`, with `--fly`,
-   height, `lead_s` and `hold_s` arguments, `finally: finish()`) and a generic
-   `routines/paired_follower.py` (`ready → Follower.run()`). Both must run under Python 2.7, and
-   both need `sys.path` set up like the existing routines (`sys.path.insert(0, PALS dir)`).
+1. **Example routine** (done). `routines/paired_hover.py --fly [--height] [--seconds]` runs on both
+   drones and branches on `identity()`. The dashboard synchronized start, the paired/solo
+   selection (`/pidrone/coordination/paired`, `FlightReadiness.paired`), the "Separation guard"
+   field and the relay's `peer_preview` topic were removed.
 2. **Deploy.** Run `catkin_make` on both drones so `Plan`/`PlanStatus` exist, then do a first
    onboard run. The owner deploys; don't restart hardware processes without permission.
 3. **Ground check (props off), run by the owner.** Measure each drone's NTP offset (for example
    `chronyc tracking`). Run the paired takeoff with props removed and compare the logged
    `Plan N takeoff started X s after ...` lines, then estimate the start skew.
-   Note: this arms the motors.
-4. **Synchronized `land` action.** A timed descent so both drones touch down together.
-   It might use `Drone.land`'s landing path (`/pidrone/desired/land` → `AltitudeController.start_landing`)
-   with a shared end time.
+   Note: this arms the motors. Then fly `paired_hover.py`.
+4. **Synchronized `land` action** (done, not flown). `Drone.land(hold_xy, check, deadline)` disarms
+   at ground + 5 cm, or when stalled below ground + 10 cm with no new 1 cm of progress for 1 s; the
+   default timeout floor is 10 s. `Drone.landing_seconds()` reads `AltitudeController`'s descent
+   rates. The `Land` block (`actions.py`) sends `[landing_seconds + 3 s]` and runs
+   `drone.land(hold_xy=True, check=check, deadline=end)`. Routines call it as `pair.land()`:
+   every registered block is a `Leader` method.
 5. **`move` action to the formation midpoint.**
    - Params `[mid_x, mid_y, T]`; each drone targets `(mid_x ± D/2, mid_y)`.
    - The leader's `prepare` picks T from the longer of the two travel distances and the speed limit

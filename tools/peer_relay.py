@@ -20,10 +20,8 @@ TOPICS = {
     'ready': ('/pidrone/localization/ready', 'std_msgs/Bool'),
     'anchors': ('/pidrone/localization/anchors', 'pidrone_pkg/AnchorLayout'),
     'generation': ('/pidrone/localization/generation', 'std_msgs/UInt32'),
-    'mode': ('/pidrone/mode', 'pidrone_pkg/Mode'),
 }
 PEER_TOPIC = '/pidrone/coordination/peer'
-PREVIEW_TOPIC = '/pidrone/coordination/peer_preview'
 # Handshake messages pass to the other drone unchanged; the drones validate them.
 FORWARD = {
     '/pidrone/coordination/plan': ('/pidrone/coordination/peer_plan', 'pidrone_pkg/Plan'),
@@ -44,8 +42,7 @@ class Client:
         for key, (topic, kind) in TOPICS.items():
             await self.send({'op': 'subscribe', 'id': key, 'topic': topic, 'type': kind,
                              'queue_length': 1, 'throttle_rate': 100})
-        for topic in (PEER_TOPIC, PREVIEW_TOPIC):
-            await self.send({'op': 'advertise', 'topic': topic, 'type': 'pidrone_pkg/PeerState'})
+        await self.send({'op': 'advertise', 'topic': PEER_TOPIC, 'type': 'pidrone_pkg/PeerState'})
         for topic, (peer_topic, kind) in FORWARD.items():
             await self.send({'op': 'subscribe', 'topic': topic, 'type': kind, 'queue_length': 1})
             await self.send({'op': 'advertise', 'topic': peer_topic, 'type': kind})
@@ -123,16 +120,11 @@ def read_state(snapshot, now, received_now):
         raise ValueError('invalid anchor geometry')
     oldest = min((pose['header'], odom['header']), key=stamp)
     return {'header': dict(oldest, frame_id=frame), 'pose': pose['pose'], 'velocity': world,
-            'generation': data['generation']['data'], 'layout': layout, 'mode': data['mode']['mode']}
+            'generation': data['generation']['data'], 'layout': layout}
 
 
 def peer_messages(snapshots, now, received_now):
     states = [read_state(snapshot, now, received_now) for snapshot in snapshots]
-    modes = [state['mode'] for state in states]
-    if any(mode not in ('DISARMED', 'ARMED', 'FLYING') for mode in modes):
-        raise ValueError('both drones need a known flight mode')
-    topics = [PEER_TOPIC if mode == 'FLYING' and 'DISARMED' not in modes else PREVIEW_TOPIC
-              for mode in modes]
     if (states[0]['layout'] != states[1]['layout'] or
             states[0]['header']['frame_id'] != states[1]['header']['frame_id']):
         raise ValueError('drones must share the same surveyed anchor map')
@@ -142,7 +134,7 @@ def peer_messages(snapshots, now, received_now):
         messages.append({'header': peer['header'], 'pose': peer['pose'], 'velocity': peer['velocity'],
                          'drone_id': 'drone%d' % (2-recipient), 'recipient_id': 'drone%d' % (recipient+1),
                          'recipient_generation': states[recipient]['generation']})
-    return topics, messages
+    return messages
 
 
 async def relay(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:9090')):
@@ -173,14 +165,12 @@ async def relay(stop, endpoints=('ws://drone1.local:9090', 'ws://drone2.local:90
                 deadline = time.monotonic()
                 while not stop.is_set():
                     try:
-                        topics, messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
+                        messages = peer_messages([c.snapshot() for c in clients], time.time(), time.monotonic())
                         # Both sends start together; a stalled connection ends this pair.
                         await asyncio.wait_for(asyncio.gather(*(
-                            client.send({'op': 'publish', 'topic': topic, 'msg': message})
-                            for client, topic, message in zip(clients, topics, messages))), timeout=.1)
-                        status = ('Relaying preflight peer telemetry.' if all(t == PREVIEW_TOPIC for t in topics)
-                                  else 'Relaying flight peer telemetry.' if all(t == PEER_TOPIC for t in topics)
-                                  else 'Relaying takeoff-transition peer telemetry.')
+                            client.send({'op': 'publish', 'topic': PEER_TOPIC, 'msg': message})
+                            for client, message in zip(clients, messages))), timeout=.1)
+                        status = 'Relaying peer telemetry.'
                     except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
                         status = 'Peer relay paused: ' + str(error)
                     report(status)

@@ -242,7 +242,7 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['nav_msgs.msg'].Odometry = lambda: NS(header=NS(), child_frame_id='')
         sys.modules['pidrone_pkg.msg'].State = state
         sys.modules['pidrone_pkg.msg'].FlightReadiness = lambda: NS(
-            header=NS(stamp=Stamp(0), frame_id=''), mode='', paired=False, ready=False, reason='')
+            header=NS(stamp=Stamp(0), frame_id=''), mode='', ready=False, reason='')
         sys.modules['pidrone_pkg.msg'].Mode = sys.modules['pidrone_pkg.msg'].RC = NS
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS

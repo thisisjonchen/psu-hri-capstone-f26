@@ -252,10 +252,7 @@ class RoutineRunner {
     const args = this.args.value.trim();
     const targets = this.targets;
     if (this.busy || !script || !targets.length || !targets.every(terminal => terminal.ready)) return;
-    awaitSyncStart(targets.map(terminal => terminal.id));
-    const results = await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));
-    if (results.every(result => result.status === 'fulfilled')) confirmSyncStart();
-    else awaitSyncStart(null);
+    await this.run('Starting ' + script, targets, terminal => terminal.execute(script, args));
   }
 
   nodeAction(action) {

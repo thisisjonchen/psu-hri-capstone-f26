@@ -5,6 +5,7 @@ accepts it; both run it from that time for the same duration, then hold for the
 plan's hold_s and land unless the next plan starts first. Handshakes happen only
 while held: DISARMED on the ground, or FLYING with the X/Y lock. Any failure
 raises RuntimeError so the routine's `finally: drone.finish()` lands the drone.
+Blocks live in actions.py; routines `import actions` to register them.
 """
 import math
 import os
@@ -63,53 +64,6 @@ def register(cls):
     return cls
 
 
-@register
-class Takeoff(Action):
-    """Plan params [height m, action seconds]; the routine passes only [height].
-
-    Arm at the start, fly one second later, ramp to the height and be settled
-    by the shared end. The leader adds a settle pad to its own climb time.
-    """
-    name = 'takeoff'
-    MIN_HEIGHT, MAX_HEIGHT = 0.25, 1.0
-    SETTLE_PAD_S = 3.0
-    MAX_SECONDS = 60.0
-
-    def climb_seconds(self, drone, height):
-        if drone.ground_height is None:
-            raise ValueError('call ready() before takeoff')
-        return drone.ARM_SECONDS + max(0.0, height - drone.ground_height) / drone.takeoff_rate
-
-    def prepare(self, drone, params):
-        if len(params) != 1:
-            raise ValueError('takeoff takes [height]')
-        return [params[0], self.climb_seconds(drone, params[0]) + self.SETTLE_PAD_S]
-
-    def validate(self, drone, params):
-        if len(params) != 2 or any(math.isnan(v) or math.isinf(v) for v in params):
-            raise ValueError('takeoff params are [height, seconds]')
-        height, seconds = params
-        if not self.MIN_HEIGHT <= height <= self.MAX_HEIGHT:
-            raise ValueError('takeoff height must be {}-{} m'.format(self.MIN_HEIGHT, self.MAX_HEIGHT))
-        if drone.mode != 'DISARMED':
-            raise ValueError('takeoff starts disarmed on the ground')
-        needed = self.climb_seconds(drone, height) + drone.ALTITUDE_SETTLE_SECONDS
-        if not needed <= seconds <= self.MAX_SECONDS:
-            raise ValueError('takeoff needs {:.1f}-{:.0f} s, plan gives {:.1f} s'.format(
-                needed, self.MAX_SECONDS, seconds))
-        drone._check_battery()
-        if drone.voltage < drone.MIN_START_V:
-            raise ValueError('battery {:.1f} V is too low to start'.format(drone.voltage))
-        drone._hold_pose()            # EKF room estimate ready and fresh
-        drone._hold_pose(local=True)  # EKF local estimate ready and fresh
-
-    def duration(self, params):
-        return params[1]
-
-    def run(self, drone, start, end, params, check):
-        drone.takeoff_at(params[0], start, end, check)
-
-
 def valid_hold(hold_s):
     if math.isnan(hold_s) or not 0 <= hold_s <= MAX_HOLD_S:
         raise ValueError('Hold must be 0-{:.0f} s'.format(MAX_HOLD_S))
@@ -125,6 +79,8 @@ def identity(master_uri=None):
 
 class Handshake(object):
     def __init__(self, drone, role):
+        if not ACTIONS:
+            raise RuntimeError('No actions registered; import actions before creating Leader/Follower')
         self.drone_id = identity()
         if self.drone_id != role:
             raise RuntimeError('{} cannot run the {} handshake'.format(
@@ -251,9 +207,23 @@ class Handshake(object):
 
 
 class Leader(Handshake):
-    def __init__(self, drone):
+    """Each registered block is a method: pair.takeoff(0.5), pair.land().
+    lead_s and hold_s default to the constructor's and may be passed per call."""
+    def __init__(self, drone, lead_s=10.0, hold_s=30.0):
         Handshake.__init__(self, drone, LEADER)
+        self.lead_s, self.hold_s = lead_s, hold_s
         self.plan_pub = rospy.Publisher('/pidrone/coordination/plan', Plan, queue_size=1)
+
+    def __getattr__(self, name):
+        if name not in ACTIONS:
+            raise AttributeError(name)
+
+        def block(*params, **timing):
+            lead_s, hold_s = timing.pop('lead_s', self.lead_s), timing.pop('hold_s', self.hold_s)
+            if timing:
+                raise TypeError('{}() got unexpected arguments: {}'.format(name, ', '.join(timing)))
+            self.run(name, params, lead_s, hold_s)
+        return block
 
     def run(self, name, params, lead_s, hold_s):
         """Propose `name` to start lead_s from now, run it with the follower, then

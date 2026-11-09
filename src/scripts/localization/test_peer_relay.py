@@ -24,14 +24,12 @@ class PeerRelayTest(unittest.TestCase):
                      'child_frame_id': 'pidrone_body', 'twist': {'twist': {'linear': dict(x=.1, y=0)}}},
             'anchors': {'header': header, 'anchor_ids': ['1', '2', '3', '4'],
                         'positions': [dict(x=x, y=y, z=2) for x, y in ((0, 0), (3, 0), (3, 6), (0, 6))]},
-            'ready': {'data': True}, 'mode': {'mode': 'FLYING'}, 'generation': {'data': 0}}
+            'ready': {'data': True}, 'generation': {'data': 0}}
         return {key: (message, 10) for key, message in messages.items()}
 
     def test_peer_state_preserves_oldest_measurement_and_converts_velocity(self):
         snapshots = [self.snapshot(), self.snapshot()]
-        topics, messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
-        flight, preview = self.module['PEER_TOPIC'], self.module['PREVIEW_TOPIC']
-        self.assertEqual(topics, [flight, flight])
+        messages = self.module['peer_messages'](snapshots, 100.1, 10.1)
         for index, message in enumerate(messages):
             self.assertEqual(self.module['stamp'](message['header']), 99.95)
             self.assertEqual(message['header']['frame_id'], 'map')
@@ -39,23 +37,6 @@ class PeerRelayTest(unittest.TestCase):
             self.assertAlmostEqual(message['velocity']['y'], .1)
             self.assertEqual(message['recipient_id'], 'drone%d' % (index+1))
             self.assertEqual(message['drone_id'], 'drone%d' % (2-index))
-        for modes, expected in [
-                (('ARMED', 'ARMED'), [preview, preview]),
-                (('FLYING', 'ARMED'), [flight, preview]),
-                (('ARMED', 'FLYING'), [preview, flight]),
-                (('FLYING', 'FLYING'), [flight, flight]),
-                (('FLYING', 'DISARMED'), [preview, preview]),
-                (('DISARMED', 'FLYING'), [preview, preview]),
-                (('DISARMED', 'DISARMED'), [preview, preview])]:
-            with self.subTest(modes=modes):
-                for snapshot, mode in zip(snapshots, modes):
-                    snapshot['mode'][0]['mode'] = mode
-                topics, routed = self.module['peer_messages'](snapshots, 100.1, 10.1)
-                self.assertEqual(topics, expected)
-                self.assertEqual(routed, messages)
-        snapshots[0]['mode'][0]['mode'] = 'UNKNOWN'
-        with self.assertRaisesRegex(ValueError, 'known flight mode'):
-            self.module['peer_messages'](snapshots, 100.1, 10.1)
         # Receiving an old measurement again must not make it fresh.
         snapshots = [{k: (v[0], 11) for k, v in s.items()} for s in snapshots]
         with self.assertRaisesRegex(ValueError, 'timestamp'):
