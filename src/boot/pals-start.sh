@@ -54,21 +54,39 @@ wait_for_localization() {
 from __future__ import print_function
 import sys
 import threading
+import math
+import time
 import rospy
 from diagnostic_msgs.msg import DiagnosticArray
+from sensor_msgs.msg import Range
 from std_msgs.msg import Bool
 rospy.init_node('restart_readiness', anonymous=True)
 ready = threading.Event()
 reason = ['No localization diagnostics received; check the SE window']
+range_stamp = [None]
+def range_received(message):
+    value = message.range
+    if not math.isnan(value) and not math.isinf(value) and message.min_range <= value <= message.max_range:
+        range_stamp[0] = message.header.stamp.to_sec()
+def fresh_range():
+    return range_stamp[0] is not None and 0 <= rospy.get_time() - range_stamp[0] <= .5
 def diagnostic(message):
     for status in message.status:
         if status.name == 'fusion_localization':
             reason[0] = status.message
 rospy.Subscriber('/pidrone/localization/fusion_status', DiagnosticArray, diagnostic)
 rospy.Subscriber('/pidrone/localization/local_ready', Bool,
-                 lambda message: ready.set() if message.data else None)
-if not ready.wait(75):
-    print('Localization is not ready: ' + reason[0])
+                 lambda message: ready.set() if message.data else ready.clear())
+rospy.Subscriber('/pidrone/range', Range, range_received)
+for attempt in range(750):
+    if (ready.is_set() and fresh_range()) or rospy.is_shutdown():
+        break
+    if attempt >= 150 and not fresh_range():
+        break
+    time.sleep(.1)
+if rospy.is_shutdown() or not ready.is_set() or not fresh_range():
+    print(('Localization is not ready: ' + reason[0]) if fresh_range() else
+          'ToF has no fresh valid range; check the TOF terminal. Restart did not complete.')
     sys.exit(1)
 print('EKF initialized facing map +Y at the UWB position.')
 PY
@@ -96,12 +114,24 @@ check_gyro() {
 }
 
 stop_session() {
+    docker exec "$container" screen -S "$session" -p TOF -X stuff '^C' >/dev/null 2>&1 ||
+        { echo "Could not stop the TOF window; nodes were not restarted." >&2; return 1; }
+    docker exec "$container" bash -c '
+        for _ in $(seq 60); do
+            pgrep -f "[v]l53l1x_node|[t]of_node.py|roslaunch .*[/]tof.launch" >/dev/null
+            status=$?
+            [[ $status == 1 ]] && exit 0
+            [[ $status == 0 ]] || exit 1
+            sleep 0.25
+        done
+        echo "ToF did not stop; no replacement driver was started." >&2
+        exit 1' || return 1
     docker exec "$container" screen -S "$session" -X quit >/dev/null 2>&1 ||
         { echo "Could not stop the screen session; nodes were not restarted." >&2; return 1; }
     # Wait for serial owners as well as the master, in a single container call.
     docker exec "$container" bash -c '
         for _ in $(seq 60); do
-            pgrep -f "[r]osmaster|[f]light_controller_node.py|[u]wb_localization_node" >/dev/null
+            pgrep -f "[r]osmaster|[f]light_controller_node.py|[u]wb_localization_node|[v]l53l1x_node|[t]of_node.py" >/dev/null
             status=$?
             [[ $status == 1 ]] && exit 0
             [[ $status == 0 ]] || exit 1

@@ -164,7 +164,8 @@ class PansBLE:
                         rows[initiator['id']] = ranges
                         break
                 if initiator['id'] not in rows:
-                    raise ValueError('No complete good-quality initiator ranges; check anchor line of sight')
+                    raise ValueError('Could not measure all anchors. '
+                                     'Check power and clear paths between anchors, then try again.')
             finally:
                 await self.cleanup(lambda: client.stop_notify(LOCATION),
                                    lambda: client.write_gatt_char(DATA_MODE, previous, response=True))

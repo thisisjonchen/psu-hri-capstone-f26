@@ -2,6 +2,7 @@
 import copy
 import contextlib
 import io
+import logging
 import math
 import os
 import runpy
@@ -13,6 +14,10 @@ from unittest import mock
 from localization import test_fusion as fusion_helpers
 from localization.test_fusion import quaternion, twist
 from localization.test_ros_node import Pose, Stamp
+
+
+class RosConsoleHandler(logging.StreamHandler):
+    pass
 
 
 class RoutineControlTest(unittest.TestCase):
@@ -31,7 +36,11 @@ class RoutineControlTest(unittest.TestCase):
         sys.modules['std_msgs.msg'].Bool = lambda value: NS(data=value)
         self.nodes = ModuleType('rosnode')
         self.nodes.get_node_names = mock.Mock(return_value=[])
-        patch = mock.patch.dict(sys.modules, {'rosnode': self.nodes})
+        roslogging = ModuleType('rosgraph.roslogging')
+        roslogging.RosStreamHandler = RosConsoleHandler
+        patch = mock.patch.dict(sys.modules, {
+            'rosnode': self.nodes, 'rosgraph': ModuleType('rosgraph'),
+            'rosgraph.roslogging': roslogging})
         patch.start()
         self.addCleanup(patch.stop)
         script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'drone_controller.py')
@@ -46,6 +55,28 @@ class RoutineControlTest(unittest.TestCase):
         local = copy.deepcopy(self.fusion.messages['pidrone/localization/fused'][-1])
         local.header.frame_id = 'odom'
         self.drone._local_received(local)
+
+    def test_console_hides_only_empty_handshake_warning_and_preserves_saved_logs(self):
+        console_output, saved_output = io.StringIO(), io.StringIO()
+        console = RosConsoleHandler(console_output)
+        saved = logging.StreamHandler(saved_output)
+        rosout = logging.getLogger('rosout')
+        error = ('connection from sender terminated before handshake header received. '
+                 '0 bytes were received. Please check sender for additional details.')
+        prefix = 'Inbound TCP/IP connection failed: '
+        partial = error.replace('0 bytes', '12 bytes')
+        with mock.patch.object(rosout, 'handlers', [console, saved]), \
+                mock.patch.object(rosout, 'propagate', False), \
+                mock.patch.object(rosout, 'level', logging.DEBUG):
+            type(self.drone)()
+            rosout.warning(prefix + '%s', error)
+            rosout.warning(prefix + '%s', partial)
+            rosout.warning('Control link stale')
+            rosout.error(prefix + '%s', error)
+        self.assertEqual(console_output.getvalue().splitlines(),
+                         [prefix + partial, 'Control link stale', prefix + error])
+        self.assertEqual(saved_output.getvalue().splitlines(),
+                         [prefix + error, prefix + partial, 'Control link stale', prefix + error])
 
     def test_hold_uses_local_position_and_heading(self):
         drone = self.drone

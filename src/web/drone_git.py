@@ -42,14 +42,26 @@ def check_worktree(require_clean=True):
     changes = git('status', '--porcelain')
     if require_clean and changes:
         raise RuntimeError('Local changes: save or stash them in the terminal, then retry.\n' + changes)
+    container = command('docker', 'inspect', '--format', '{{.State.Running}}', 'pidrone_pkg')
+    if container.returncode or container.stdout.strip() not in ('true', 'false'):
+        raise RuntimeError('Could not check the drone container.')
+    if container.stdout.strip() == 'false':
+        return False
     routine = command('docker', 'exec', 'pidrone_pkg', 'pgrep', '-f', 'PALS/routines/[A-Za-z0-9_-]+[.]py')
     if routine.returncode != 1:
         raise RuntimeError('Stop the running routine first.' if routine.returncode == 0
-                           else 'Could not check onboard routines; connect the drone first.')
+                           else 'Could not check onboard routines.')
+    nodes = command('docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
+                    '[r]osmaster|[r]oslaunch|[f]light_controller_node.py|[p]id_controller.py')
+    if nodes.returncode == 1:
+        return False
+    if nodes.returncode != 0:
+        raise RuntimeError('Could not check onboard nodes.')
     mode = command('docker', 'exec', 'pidrone_pkg', 'bash', '-ic',
                    'timeout 4 rostopic echo -n1 /pidrone/mode')
     if mode.returncode or not re.search(r'^mode: [\"\']?DISARMED[\"\']?\s*$', mode.stdout, re.M):
-        raise RuntimeError('The drone must report DISARMED. Connect it while disarmed, then retry.')
+        raise RuntimeError('The running drone must report DISARMED before changing files.')
+    return True
 
 
 def target(branch):
@@ -76,10 +88,14 @@ def change(action, branch=None, revision=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('Another startup or maintenance action is running; try again when it finishes.')
-        check_worktree(require_clean=not clearing)
+        restart = check_worktree(require_clean=not clearing)
         if action == 'build':
             if git('rev-parse', 'HEAD') != revision or git('symbolic-ref', '--short', 'HEAD') != branch:
                 raise RuntimeError('The checkout changed before building; retry.')
+            # The build needs the container, but must not start flight nodes.
+            started = command('docker', 'start', 'pidrone_pkg')
+            if started.returncode:
+                raise RuntimeError('Could not start the build container: ' + started.stderr.strip())
             # Always run the incremental build: this also retries a previously failed build
             # when Git is already at the requested revision.
             result = command('docker', 'exec', 'pidrone_pkg', 'timeout', '--kill-after=10s', '600s',
@@ -88,7 +104,7 @@ def change(action, branch=None, revision=None):
             if result.returncode:
                 detail = (result.stdout + '\n' + result.stderr).strip()[-4000:]
                 raise RuntimeError('Build failed; nodes were not restarted.\n' + detail)
-            return state()
+            return dict(state(), restart=restart)
         if action == 'prepare-clear':
             return state()
         if action == 'clear':

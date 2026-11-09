@@ -344,7 +344,6 @@ void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
         // Average fixes from the current rest period for the starting room position.
         if (!rest_since_ || stamp<rest_since_) return;
         uwb_initial_.push_back({stamp,x,y,variance});
-        while (stamp-uwb_initial_.front().stamp>5000000000LL) uwb_initial_.pop_front();
         return;
     }
     if (!fault_.empty()) return;
@@ -357,6 +356,13 @@ bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,co
         // Average brief gyro noise without relaxing the limit on sustained rotation.
         const double end=(stamp-origin_ns_)/1.e9;
         if (!mean_rate(end-.2,end,rest_rate)) { clear_rest(); return false; }
+    } else {
+        // The same 0.2 s average at startup, before the filter keeps angular history.
+        startup_rates_.push_back({stamp,rate});
+        while (stamp-startup_rates_.front().first>200000000LL) startup_rates_.pop_front();
+        rest_rate=Vec(0.,0.,0.);
+        for (const auto& r:startup_rates_) rest_rate+=r.second;
+        rest_rate/=double(startup_rates_.size());
     }
     const double range_age=(stamp-range_.stamp)/1.e9;
     bool quiet=ground_rest_allowed()
@@ -398,11 +404,12 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
         initial_.push_back({force,rate,range_.value,ns});
         if ((ns-initial_.front().stamp)/1.e9<8.) return;
         double tag_x=0.,tag_y=0.,tag_variance=0.; int fixes=0;
-        for (const auto& f:uwb_initial_) if (f.stamp<=ns && ns-f.stamp<=4000000000LL) {
+        for (const auto& f:uwb_initial_) if (f.stamp<=ns) {
             tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
         }
-        // Keep waiting for UWB over the newest eight seconds of rest.
-        if (fixes<30) { initial_.erase(initial_.begin()); return; }
+        // Keep resting, however long it takes, until this rest period holds 40 fixes;
+        // tags set to 10 Hz have been measured delivering as few as 7 fixes per second.
+        if (fixes<40) { initial_.erase(initial_.begin()); return; }
         tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }

@@ -22,7 +22,7 @@ can lag behind the code; verify the actual launch configuration and data path.
 
 ## Working style
 
-- Make the smallest coherent change that addresses the request. Simplify or remove
+- Do not overengineer. Make the smallest coherent change that addresses the request. Simplify or remove
   redundant logic instead of adding layers, configuration switches, or fallback chains.
 - Keep shared behavior in the responsible class or node. Routines should primarily
   sequence actions, not duplicate control, calibration, or sensor-validation logic.

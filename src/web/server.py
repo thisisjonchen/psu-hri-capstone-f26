@@ -14,6 +14,7 @@ import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
 
+import paramiko
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 from websockets.sync.server import serve
@@ -177,7 +178,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 def terminal(websocket):
     """Bridge one browser terminal to a drone's screen session.
 
-    Text frames are JSON {"input": str} or {"cols": int, "rows": int}; output is binary.
+    Browser messages are JSON {"input": str} or {"cols": int, "rows": int}.
+    Server messages are binary drone output or text connection errors.
     """
     url = urlsplit(websocket.request.path)
     drone = url.path.rsplit('/', 1)[-1]
@@ -187,22 +189,39 @@ def terminal(websocket):
         client, channel = drones.open_terminal(drone, int(size['cols']), int(size['rows']), start,
                                               active=lambda: websocket.state is State.OPEN)
     except (ValueError, RuntimeError) as error:
+        logging.warning('Terminal connection to %s failed: %s', drone, error)
         try:
-            websocket.send('\r\n[%s]\r\n' % error)
+            websocket.send(str(error))
         except ConnectionClosed:
             pass
         return
+
+    def disconnected(error):
+        if websocket.state is not State.OPEN:
+            return
+        message = '%s: SSH terminal disconnected: %s' % (drone, error or 'connection closed')
+        logging.warning('%s', message)
+        try:
+            websocket.send(message)
+        except ConnectionClosed:
+            pass
 
     def output():
         try:
             while True:
                 data = channel.recv(4096)
                 if not data:
+                    transport = client.get_transport()
+                    if transport is None or not transport.is_active():
+                        disconnected(transport.get_exception() if transport else None)
                     break
                 websocket.send(data)
-        except (OSError, ConnectionClosed):
+        except (OSError, EOFError, paramiko.SSHException) as error:
+            disconnected(error)
+        except ConnectionClosed:
             pass
-        websocket.close()
+        finally:
+            websocket.close()
 
     threading.Thread(target=output, daemon=True).start()
     try:
@@ -212,6 +231,10 @@ def terminal(websocket):
                 channel.send(message['input'].encode('utf-8'))
             else:
                 channel.resize_pty(width=int(message['cols']), height=int(message['rows']))
+    except (OSError, EOFError, paramiko.SSHException) as error:
+        disconnected(error)
+    except ConnectionClosed:
+        pass
     finally:
         # Detaches screen; anything running on the drone keeps running.
         client.close()

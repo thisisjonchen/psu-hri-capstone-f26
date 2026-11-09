@@ -730,7 +730,9 @@ class DroneSession {
     this.fusedPose = message;
     this.fusedStamp = time;
     this.fusedReceivedAt = Date.now();
-    this.field('fusedPosition').textContent = 'X ' + p.x.toFixed(2) + ' · Y ' + p.y.toFixed(2) + ' · Z ' + p.z.toFixed(2) + ' m';
+    ['x', 'y', 'z'].forEach(axis => {
+      this.field('fused' + axis.toUpperCase()).textContent = p[axis].toFixed(2) + ' m';
+    });
     this.updateXY('fused', message.pose.pose, message.header.frame_id);
   }
 
@@ -779,7 +781,7 @@ class DroneSession {
     this.preflightReceivedAt = null;
     this.field('flightMode').title = 'Preflight unavailable';
     this.preflightReady = false;
-    ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedPosition'].forEach(name => {
+    ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedX', 'fusedY', 'fusedZ'].forEach(name => {
       this.field(name).textContent = '—';
       this.field(name).classList.remove('alert-success', 'alert-danger');
     });

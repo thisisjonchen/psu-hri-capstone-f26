@@ -1,4 +1,5 @@
 """PANS BLE payloads and four-anchor calibration; no ROS or Bluetooth dependency."""
+import logging
 import math
 import struct
 
@@ -158,7 +159,15 @@ def solve_layout(anchors, rows, min_quality=MIN_RANGE_QUALITY, max_rms=0.10, max
     if values[0] <= 0 or xy[2, 1] <= 0 or xy[3, 1] <= 0:
         raise ValueError('Invalid orientation; the remaining anchors must be on the +Y side of the baseline')
     if rms > max_rms or worst > max_error:
-        raise ValueError('Range fit is inconsistent (RMS %.3f m, max %.3f m)' % (rms, worst))
+        index = int(np.argmax(np.abs(error)))
+        i, j = pairs[index]
+        logging.warning(
+            'Anchor range fit: RMS %.3f m, limit %.3f m; max %.3f m, limit %.3f m. '
+            'Largest residual: %s to %s measured %.3f m, fitted %.3f m',
+            rms, max_rms, worst, max_error, anchors[i]['id'], anchors[j]['id'],
+            measured[index], measured[index] + error[index])
+        raise ValueError('Distances do not fit the selected layout. '
+                         'Check the corner assignments and measure again.')
     positions = [dict(a, x=float(xy[i, 0]), y=float(xy[i, 1]), z=0.0)
                  for i, a in enumerate(anchors)]
     return {'positions': positions, 'rms': rms, 'max_error': worst}

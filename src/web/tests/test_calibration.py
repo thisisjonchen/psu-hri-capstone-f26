@@ -69,6 +69,19 @@ class CalibrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,
                 r'0001 to 0002 = 5\.000 m, 0002 to 0001 = 4\.000 m'):
             solve_layout(BOARDS, inconsistent)
+        # Reciprocal agreement alone does not establish a consistent planar fit.
+        # This fails the RMS limit while staying below the individual-error limit.
+        inconsistent = copy.deepcopy(ROWS)
+        inconsistent['0001']['0003'] = inconsistent['0003']['0001'] = (5.65, 100)
+        with self.assertLogs(level='WARNING') as logs:
+            with self.assertRaisesRegex(ValueError, 'Check the corner assignments'):
+                solve_layout(BOARDS, inconsistent)
+        self.assertRegex(logs.output[0],
+                         r'RMS .*limit 0\.100 m; max .*limit 0\.200 m.*'
+                         r'0001 to 0003 measured 5\.650 m, fitted')
+        diagnostic = solve_layout(BOARDS, inconsistent, max_rms=0.15)
+        self.assertGreater(diagnostic['rms'], 0.10)
+        self.assertLess(diagnostic['max_error'], 0.20)
         order = (0, 1, 3, 2)
         layout = solve_layout([BOARDS[i] for i in order], ROWS)
         self.assertEqual([p['id'] for p in layout['positions']], [BOARDS[i]['id'] for i in order])
@@ -301,7 +314,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(active)
         clients['0001'].start_notify.side_effect = lambda uuid, callback: callback(None, payload(low_quality))
         ble.timeout = 0.01
-        with self.assertRaisesRegex(ValueError, 'No complete good-quality initiator ranges'):
+        with self.assertRaisesRegex(ValueError, 'Could not measure all anchors'):
             await ble._measure(BOARDS, lambda: None)
         self.assertFalse(active)
         self.assertEqual(set(modes.values()), {b'\x02'})

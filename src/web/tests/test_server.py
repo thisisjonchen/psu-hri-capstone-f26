@@ -12,7 +12,7 @@ from email.message import Message
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from server import DashboardHandler
+from server import DashboardHandler, State, terminal
 import drones
 import peer_relay
 
@@ -106,6 +106,43 @@ class ResponseTest(unittest.TestCase):
                     write.assert_called_once()
                     if stage == 'headers':
                         handler.wfile.write.assert_not_called()
+
+
+class TerminalBridgeTest(unittest.TestCase):
+    def test_ssh_disconnect_is_reported_and_bridge_closes_without_stopping_nodes(self):
+        for failure, active, state in (
+                (None, True, State.OPEN),
+                (None, False, State.OPEN),
+                (drones.paramiko.SSHException('transport failed'), False, State.OPEN),
+                (EOFError('connection closed'), False, State.OPEN),
+                (None, False, State.CLOSED)):
+            with self.subTest(failure=failure, active=active, state=state):
+                websocket, client, channel = mock.MagicMock(), mock.Mock(), mock.Mock()
+                websocket.request.path = '/terminal/drone1'
+                websocket.recv.return_value = '{"cols":80,"rows":24}'
+                websocket.state = state
+                websocket.__iter__.return_value = iter(())
+                channel.recv.side_effect = failure if failure else [b'output', b'']
+                client.get_transport.return_value.is_active.return_value = active
+                client.get_transport.return_value.get_exception.return_value = EOFError('connection closed')
+                with mock.patch.object(drones, 'open_terminal', return_value=(client, channel)), \
+                        mock.patch('server.threading.Thread') as thread, \
+                        mock.patch('server.logging.warning') as warning:
+                    thread.return_value.start.side_effect = lambda: thread.call_args.kwargs['target']()
+                    terminal(websocket)
+                messages = [call.args[0] for call in websocket.send.call_args_list]
+                reports = [message for message in messages if isinstance(message, str)]
+                if state is State.OPEN and not active:
+                    self.assertEqual(len(reports), 1)
+                    self.assertIn('drone1: SSH terminal disconnected:', reports[0])
+                    warning.assert_called_once()
+                else:
+                    self.assertEqual(reports, [])
+                    warning.assert_not_called()
+                websocket.close.assert_called_once()
+                client.close.assert_called_once()
+                channel.send.assert_not_called()
+                client.exec_command.assert_not_called()
 
 
 class PeerRelayLifecycleTest(unittest.TestCase):

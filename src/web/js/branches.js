@@ -23,8 +23,9 @@ class DroneBranches {
     this.render();
   }
 
-  get connected() {
-    return ['drone1', 'drone2'].filter(id => drones[id]?.connected);
+  get available() {
+    return ['drone1', 'drone2'].filter(id =>
+      Array.isArray(this.records[id]?.branches) && !this.records[id].error);
   }
 
   get targetNames() {
@@ -32,7 +33,7 @@ class DroneBranches {
   }
 
   get ready() {
-    return this.targets.length > 0 && this.targets.join() === this.connected.join() &&
+    return this.targets.length > 0 &&
       this.targets.every(id => Array.isArray(this.records[id]?.branches) && !this.records[id].error);
   }
 
@@ -40,8 +41,9 @@ class DroneBranches {
     this.rows.forEach((row, index) => {
       const id = 'drone' + (index + 1);
       const record = this.records[id];
-      row.textContent = record?.error || (!drones[id]?.connected ? 'Not connected' : record?.branch
-        ? record.branch + ' · ' + record.revision + (record.dirty ? ' · local changes' : '') : 'Not loaded');
+      row.textContent = record?.error || (record?.branch
+        ? record.branch + ' · ' + record.revision + (record.dirty ? ' · local changes' : '')
+        : this.busy ? 'Loading…' : 'Not loaded');
       row.dataset.error = record?.error ? 'true' : 'false';
     });
     this.select.disabled = this.busy || !this.ready;
@@ -54,7 +56,7 @@ class DroneBranches {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const query = options.method === 'POST' ? '' : '?' + this.targets.map(id => 'drone=' + encodeURIComponent(id)).join('&');
+      const query = options.method === 'POST' ? '' : '?drone=drone1&drone=drone2';
       const response = await fetch('/api/branches' + query, { ...options, signal: controller.signal });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || response.statusText);
@@ -70,14 +72,8 @@ class DroneBranches {
   async load() {
     if (this.busy) return;
     this.reloadPending = false;
-    this.targets = this.connected;
+    this.targets = [];
     this.records = {};
-    if (!this.targets.length) {
-      this.select.replaceChildren(new Option('Select a branch', ''));
-      this.message.textContent = 'Connect a drone.';
-      this.render();
-      return;
-    }
     this.busy = true;
     this.message.textContent = 'Loading branches…';
     this.render();
@@ -85,6 +81,7 @@ class DroneBranches {
       const previous = this.select.value;
       this.records = (await this.request()).drones;
       if (this.reloadPending) return;
+      this.targets = this.available;
       const records = this.targets.map(id => this.records[id]);
       const branches = this.ready ? records[0].branches.filter(name => records.every(record => record.branches.includes(name))) : [];
       this.select.replaceChildren(new Option('Select a branch', ''), ...branches.map(name => new Option(name, name)));
@@ -107,7 +104,7 @@ class DroneBranches {
     this.render();
     if (this.apply.disabled) return;
     if (!confirmRestart(this.targetNames + ' to ' + this.select.value,
-      'Switch and restart')) return;
+      'Switch')) return;
     return this.change('switch', this.select.value);
   }
 
@@ -141,18 +138,20 @@ class DroneBranches {
       this.message.textContent = result.phase === 'prepare' ? 'No files changed. Resolve the issue above, then reopen Branches.'
         : Object.values(result.drones).some(record => record.error) ? 'Action incomplete. Reopen Branches to verify.'
         : clearing ? 'Local changes cleared on ' + this.targetNames + '.'
-        : this.targetNames + ' updated and built.';
+        : this.targetNames + ' updated.';
       if (!clearing && result.phase === 'build' &&
           this.targets.every(id => result.drones[id] && !result.drones[id].error)) {
+        const restartTargets = this.targets.filter(id => result.drones[id].restart);
+        if (!restartTargets.length) return;
         this.message.textContent = 'Restarting…';
         routineRunner.busy = false;
-        const restarted = await routineRunner.restartTargets(this.targets);
+        const restarted = await routineRunner.restartTargets(restartTargets);
         restarted.forEach((result, index) => {
-          if (result.status === 'rejected') this.records[this.targets[index]].error = result.reason.message;
+          if (result.status === 'rejected') this.records[restartTargets[index]].error = result.reason.message;
         });
         this.message.textContent = restarted.some(result => result.status === 'rejected')
           ? 'Restart incomplete. Check terminal output.'
-          : this.targetNames + ' updated and restarted.';
+          : this.targetNames + ' updated.';
       }
     } catch (error) {
       this.records = {};

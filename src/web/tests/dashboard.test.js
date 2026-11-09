@@ -40,7 +40,7 @@ test('branch picker shows both revisions and switches both to a shared branch', 
   const snapshot = { drone1: { branch: 'dual-hover', revision: '111', branches: ['dual-hover', 'new', 'only-one'] },
     drone2: { branch: 'dual-hover', revision: '222', branches: ['dual-hover', 'new'] } };
   const app = branchPicker(options => options.method === 'POST' ? { phase: 'build', drones: {
-    drone1: { branch: 'new', revision: '333' }, drone2: { branch: 'new', revision: '333' }
+    drone1: { branch: 'new', revision: '333', restart: true }, drone2: { branch: 'new', revision: '333', restart: true }
   } } : { drones: snapshot }, message => { prompt = message; return confirmed; });
   app.picker.panel.open = true;
   await app.picker.panel.listeners.toggle();
@@ -52,7 +52,7 @@ test('branch picker shows both revisions and switches both to a shared branch', 
   await app.picker.switchSelected();
   assert.equal(app.requests.length, 1, 'cancel must not update or restart anything');
   assert.deepEqual(app.restarts, []);
-  assert.match(prompt, /Switch and restart Drone 1 and Drone 2 to new/);
+  assert.match(prompt, /Switch Drone 1 and Drone 2 to new/);
   assert.match(prompt, /props off.*disarmed.*floor.*facing map \+Y/);
   confirmed = true;
   const change = app.picker.switchSelected();
@@ -64,29 +64,35 @@ test('branch picker shows both revisions and switches both to a shared branch', 
   assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'new', drones: ['drone1', 'drone2'] });
   assert.equal(app.requests[1].headers['X-Routine-Request'], '1');
   assert.equal(app.elements.get('drone2-branch').textContent, 'new · 333');
-  assert.match(app.picker.message.textContent, /updated and restarted/);
+  assert.match(app.picker.message.textContent, /updated/);
   assert.deepEqual(app.restarts, [['drone1', 'drone2']]);
   assert.equal(app.runner.busy, false);
 });
 
-test('branch picker switches and clears only the single connected drone', async () => {
+test('branch picker switches and clears one reachable drone before Connect', async () => {
   for (const id of ['drone1', 'drone2']) {
-    let response = { drones: { [id]: { branch: 'old', revision: '111', branches: ['old', 'only-here'] } } };
+    const other = id === 'drone1' ? 'drone2' : 'drone1';
+    let response = { drones: {
+      [id]: { branch: 'old', revision: '111', branches: ['old', 'only-here'] },
+      [other]: { error: 'unreachable' }
+    } };
     let prompt = '';
-    const app = branchPicker(() => response, message => { prompt = message; return true; }, [id]);
+    const app = branchPicker(() => response, message => { prompt = message; return true; }, []);
     await app.picker.load();
-    assert.equal(app.requests[0].url, '/api/branches?drone=' + id);
+    assert.equal(app.requests[0].url, '/api/branches?drone=drone1&drone=drone2');
     assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'old', 'only-here']);
     assert.equal(app.picker.select.value, 'old');
-    const other = id === 'drone1' ? 'drone2' : 'drone1';
-    assert.equal(app.elements.get(other + '-branch').textContent, 'Not connected');
+    assert.equal(app.elements.get(other + '-branch').textContent, 'unreachable');
     app.picker.select.value = 'only-here';
-    response = { phase: 'build', drones: { [id]: { branch: 'only-here', revision: '222' } } };
+    const restart = id === 'drone2';
+    response = { phase: 'build', drones: { [id]: { branch: 'only-here', revision: '222', restart } } };
     await app.picker.switchSelected();
     assert.deepEqual(JSON.parse(app.requests[1].body), { action: 'switch', branch: 'only-here', drones: [id] });
     assert.match(app.picker.message.textContent, new RegExp('Drone ' + id.slice(-1) + ' updated'));
-    assert.deepEqual(app.restarts, [[id]]);
-    response = { drones: { [id]: { branch: 'only-here', revision: '222', branches: ['only-here'], dirty: true } } };
+    assert.deepEqual(app.restarts, restart ? [[id]] : [], 'only restart nodes that were already running');
+    assert.ok(Object.values(app.drones).every(drone => !drone.connected));
+    response = { drones: { [id]: { branch: 'only-here', revision: '222', branches: ['only-here'], dirty: true },
+      [other]: { error: 'unreachable' } } };
     await app.picker.load();
     response = { phase: 'clear', drones: { [id]: { dirty: false } } };
     await app.picker.clearSelected();
@@ -94,21 +100,29 @@ test('branch picker switches and clears only the single connected drone', async 
     assert.doesNotMatch(prompt, new RegExp('Drone ' + other.slice(-1)));
     assert.deepEqual(JSON.parse(app.requests[3].body), { action: 'clear', drones: [id] });
     assert.equal(app.picker.apply.disabled, false);
-    assert.deepEqual(app.restarts, [[id]], 'clearing local changes does not restart');
+    assert.deepEqual(app.restarts, restart ? [[id]] : [], 'clearing local changes does not restart');
   }
 });
 
-test('branch targets refresh automatically as drones connect and disconnect', async () => {
-  let response = { drones: { drone1: { branch: 'old', revision: '111', branches: ['old'] } } };
+test('branch actions follow SSH availability independently of dashboard connections', async () => {
+  let response = { drones: { drone1: { branch: 'old', revision: '111', branches: ['old'] },
+    drone2: { error: 'unreachable' } } };
   const app = branchPicker(() => response, () => true, []);
-  await app.picker.load();
-  assert.equal(app.requests.length, 0);
-  assert.equal(app.picker.apply.disabled, true);
+  app.picker.panel.open = true;
+  await app.picker.panel.listeners.toggle();
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.elements.get('drone1-branch').textContent, 'old · 111');
+  assert.equal(app.elements.get('drone2-branch').textContent, 'unreachable');
+  assert.equal(app.picker.apply.disabled, false);
   assert.equal(app.picker.clear.disabled, true);
-  assert.match(app.picker.message.textContent, /Connect a drone/);
+  assert.deepEqual(Array.from(app.picker.targets), ['drone1']);
+  assert.equal(app.requests.length, 1, 'viewing branches does not connect, update or restart drones');
+  assert.ok(Object.values(app.drones).every(drone => !drone.connected));
+  assert.deepEqual(app.restarts, []);
   app.drones.drone1.connected = true;
   await app.listeners['drone-connections-changed']();
-  assert.equal(app.requests[0].url, '/api/branches?drone=drone1');
+  assert.equal(app.requests[1].url, '/api/branches?drone=drone1&drone=drone2');
   assert.equal(app.picker.apply.disabled, false);
   response.drones.drone2 = { branch: 'old', revision: '111', branches: ['old'] };
   app.drones.drone2.connected = true;
@@ -117,19 +131,26 @@ test('branch targets refresh automatically as drones connect and disconnect', as
   await app.picker.switchSelected();
   assert.ok(app.requests.every(request => request.method !== 'POST'), 'wait for fresh branches before switching');
   await loading;
-  assert.equal(app.requests[1].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.requests[2].url, '/api/branches?drone=drone1&drone=drone2');
   assert.equal(app.picker.apply.disabled, false);
   app.drones.drone1.connected = false;
-  await app.picker.switchSelected();
-  assert.equal(app.requests.length, 2, 'recheck targets at the click before sending');
-  response = { drones: { drone2: { branch: 'old', revision: '111', branches: ['old'] } } };
+  app.picker.render();
+  assert.equal(app.picker.apply.disabled, false, 'a dashboard disconnect does not make SSH unavailable');
+  response = { drones: { drone1: { error: 'unreachable' },
+    drone2: { branch: 'old', revision: '111', branches: ['old'] } } };
   await app.listeners['drone-connections-changed']();
   assert.equal(app.picker.apply.disabled, false);
-  assert.equal(app.requests[2].url, '/api/branches?drone=drone2');
-  assert.equal(app.elements.get('drone1-branch').textContent, 'Not connected');
+  assert.equal(app.requests[3].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.elements.get('drone1-branch').textContent, 'unreachable');
   app.drones.drone2.connected = false;
   await app.listeners['drone-connections-changed']();
-  assert.equal(app.requests.length, 3, 'disconnecting the last drone needs no status request');
+  assert.equal(app.requests.length, 5);
+  assert.equal(app.elements.get('drone2-branch').textContent, 'old · 111');
+  assert.equal(app.picker.apply.disabled, false);
+  assert.equal(app.picker.clear.disabled, true);
+  assert.deepEqual(Array.from(app.picker.targets), ['drone2']);
+  response = { drones: { drone1: { error: 'unreachable' }, drone2: { error: 'unreachable' } } };
+  await app.picker.load();
   assert.equal(app.picker.apply.disabled, true);
   assert.equal(app.picker.clear.disabled, true);
   assert.deepEqual(app.picker.select.options.map(option => option.value), ['']);
@@ -138,7 +159,8 @@ test('branch targets refresh automatically as drones connect and disconnect', as
 test('connection changes during a branch load discard the stale response and reload once', async () => {
   let finishLoad;
   const app = branchPicker(() => app.requests.length === 1 ? new Promise(resolve => { finishLoad = resolve; })
-    : { drones: { drone2: { branch: 'current', revision: '222', branches: ['current'] } } }, () => true, ['drone1']);
+    : { drones: { drone1: { error: 'unreachable' },
+      drone2: { branch: 'current', revision: '222', branches: ['current'] } } }, () => true, ['drone1']);
   const loading = app.picker.load();
   app.drones.drone1.connected = false;
   await app.listeners['drone-connections-changed']();
@@ -148,8 +170,8 @@ test('connection changes during a branch load discard the stale response and rel
   finishLoad({ drones: { drone1: { branch: 'stale', revision: '111', branches: ['stale'] } } });
   await loading;
   assert.equal(app.requests.length, 2);
-  assert.equal(app.requests[1].url, '/api/branches?drone=drone2');
-  assert.equal(app.elements.get('drone1-branch').textContent, 'Not connected');
+  assert.equal(app.requests[1].url, '/api/branches?drone=drone1&drone=drone2');
+  assert.equal(app.elements.get('drone1-branch').textContent, 'unreachable');
   assert.equal(app.elements.get('drone2-branch').textContent, 'current · 222');
   assert.deepEqual(app.picker.select.options.map(option => option.value), ['', 'current']);
   assert.equal(app.picker.apply.disabled, false);
@@ -167,12 +189,12 @@ test('connection refresh waits for a switch without changing its confirmed targe
   await app.listeners['drone-connections-changed']();
   assert.equal(app.requests.length, 2, 'do not reload during a switch');
   assert.deepEqual(JSON.parse(app.requests[1].body).drones, ['drone1']);
-  finishSwitch({ phase: 'build', drones: { drone1: { branch: 'new', revision: '222' } } });
+  finishSwitch({ phase: 'build', drones: { drone1: { branch: 'new', revision: '222', restart: true } } });
   await switching;
   assert.deepEqual(app.restarts, [['drone1']]);
   assert.equal(app.requests[2].url, '/api/branches?drone=drone1&drone=drone2');
   assert.equal(app.elements.get('drone2-branch').textContent, 'new · 222');
-  assert.equal(app.picker.message.textContent, 'Drone 1 updated and restarted.');
+  assert.equal(app.picker.message.textContent, 'Drone 1 updated.');
   assert.equal(app.picker.apply.disabled, false);
 });
 
@@ -219,7 +241,7 @@ test('build failures prevent restart and restart failures remain visible', async
   response = snapshot;
   await app.picker.load();
   app.picker.select.value = 'new';
-  response = { phase: 'build', drones: { drone1: { branch: 'new', revision: '222' } } };
+  response = { phase: 'build', drones: { drone1: { branch: 'new', revision: '222', restart: true } } };
   app.runner.restartTargets = async ids => {
     assert.deepEqual(Array.from(ids), ['drone1']);
     app.drones.drone1.connected = false;
@@ -626,7 +648,7 @@ test('room targets require live fused localization and explicit send, stay isola
   app.fleetMap.sendTarget();
   assert.equal(a.publishers.roomTarget.messages.length, 1);
   assert.equal(a.fusedPose, null);
-  assert.equal(b.field('fusedPosition').textContent, '—');
+  assert.deepEqual(['X', 'Y', 'Z'].map(axis => b.field('fused' + axis).textContent), ['—', '—', '—']);
   app.receive(b, '/pidrone/localization/anchors', anchorsAt(101, [[0,0,2.25],[4,0,2.25],[4,6,2.25],[0,6,2.25]]));
   assert.equal(app.fleetMap.layoutUsable, false);
   assert.equal(b.publishers.cancelRoomTarget.messages.length, 1);
@@ -641,7 +663,7 @@ test('fusion gaps and resets retain display markers without live control data an
   app.receive(a, '/pidrone/localization/fusion_status', { status: [{ level: 1, message: 'UWB innovation rejected' }] });
   assert.equal(a.fusedPose, null);
   assert.equal(a.series.fused0.length, 0);
-  assert.equal(a.field('fusedPosition').textContent, 'X 0.50 · Y 1.00 · Z 0.40 m');
+  assert.deepEqual(['X', 'Y', 'Z'].map(axis => a.field('fused' + axis).textContent), ['0.50 m', '1.00 m', '0.40 m']);
   assert.equal(sharedMarker(app, 'drone1', 'fused0').borderColor, '#0072b2');
   assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
   assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
@@ -971,9 +993,19 @@ test('startup retries retain their deadline and cannot restart after timeout or 
 test('terminal lifecycle handles startup failure, detachment and restart reconnection', async () => {
   const app = dashboard();
   const output = [];
+  const badgeTimers = new Map();
+  let badgeNow = 0;
+  function advanceBadges(ms) {
+    badgeNow += ms;
+    for (const [callback, deadline] of badgeTimers) {
+      if (deadline <= badgeNow) { badgeTimers.delete(callback); callback(); }
+    }
+  }
   let statusPolls = 0;
   const context = vm.createContext({
     document: { addEventListener() {} }, drones: app.drones,
+    setTimeout(callback, delay) { badgeTimers.set(callback, badgeNow + delay); return callback; },
+    clearTimeout(callback) { badgeTimers.delete(callback); },
     fetch() { statusPolls++; throw new Error('unexpected status poll'); },
     Date: class extends Date { static now() { return 1000; } },
     location: { hostname: 'localhost', port: '8000' },
@@ -986,18 +1018,34 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/routines.js'), 'utf8'), context);
   const Terminal = vm.runInContext('RoutineTerminal', context);
   const pane = Object.create(Terminal.prototype);
-  const result = { textContent: '', hidden: true };
+  const result = { textContent: '', hidden: true, dataset: {} };
   Object.assign(pane, { root: { querySelector() { return result; } },
     id: 'drone1', socket: null, enabled: true, changed() {},
     term: { reset() {}, write(message) { output.push(message); }, cols: 80, rows: 24 }, fit: { fit() {} } });
   app.connectDrone('drone1');
-  pane.report('Failed: Warm reboot incomplete: Incomplete MSP reply.');
+  pane.report('Failed: Warm reboot incomplete: Incomplete MSP reply.', 'error');
+  assert.equal(output.length, 0, 'dashboard notices must not write to the terminal');
   pane.attach(true);
-  pane.socket.onmessage({ data: '\x1b[2J' });
+  pane.socket.onmessage({ data: new TextEncoder().encode('\x1b[2J').buffer });
   assert.equal(result.textContent, 'Failed: Warm reboot incomplete: Incomplete MSP reply.');
+  assert.equal(result.title, result.textContent, 'the badge exposes the full message on hover');
   assert.equal(result.hidden, false);
-  pane.report('Restarting nodes…');
+  assert.equal(result.dataset.state, 'error');
+  advanceBadges(4000);
+  pane.report('Restarting nodes…', 'progress');
   assert.equal(result.textContent, 'Restarting nodes…');
+  assert.equal(result.title, 'Restarting nodes…');
+  assert.equal(result.dataset.state, 'progress');
+  advanceBadges(4000);
+  assert.equal(result.hidden, false, 'the previous message timer must not hide a new message');
+  advanceBadges(3999);
+  assert.equal(result.hidden, false);
+  advanceBadges(1);
+  assert.equal(result.hidden, true, 'the badge disappears eight seconds after the latest message');
+  assert.equal(output.length, 1, 'only drone output reaches the terminal');
+  pane.report('Nodes restarted', 'success');
+  assert.equal(result.dataset.state, 'success');
+  assert.equal(result.hidden, false);
   const stalled = app.drones.drone1.ros;
   const deadline = app.drones.drone1.waitUntil;
   pane.started(true);
@@ -1022,7 +1070,11 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.ok(app.drones.drone1.ros);
   app.drones.drone1.disconnect();
   app.connectDrone('drone1');
+  pane.socket.onmessage({ data: 'drone1: SSH authentication failed' });
   pane.socket.onclose();
+  assert.equal(result.textContent, 'drone1: SSH authentication failed');
+  assert.equal(result.dataset.state, 'error', 'closing must preserve the specific connection error');
+  assert.equal(output.length, 1, 'connection errors are shown only in the badge');
   assert.equal(app.drones.drone1.ros, null);
   assert.equal(app.drones.drone1.waitUntil, 0);
   assert.equal(app.events.at(-1).type, 'drone-connect-failed');
@@ -1036,18 +1088,36 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.equal(old.readyState, 3);
   assert.equal(pane.socket.url, 'ws://localhost:8001/terminal/drone1?start=1');
   const count = output.length;
-  old.onmessage({ data: 'stale startup result' });
+  old.onmessage({ data: new TextEncoder().encode('stale startup result').buffer });
   assert.equal(output.length, count);
-  pane.socket.onmessage({ data: 'current terminal' });
-  assert.equal(output.at(-1), 'current terminal');
+  pane.socket.onmessage({ data: new TextEncoder().encode('current terminal').buffer });
+  assert.equal(Buffer.from(output.at(-1)).toString(), 'current terminal');
   Object.assign(pane, { scripts: [], nodes: true, running: false });
   assert.equal(pane.ready, true);
   pane.socket.close();
   assert.equal(pane.ready, false);
   pane.socket.onclose();
+  assert.equal(result.textContent, 'Terminal disconnected; reconnecting…');
+  assert.equal(result.dataset.state, 'progress');
+  assert.equal(Buffer.from(output.at(-1)).toString(), 'current terminal');
   assert.equal(drone.connected, true);
   assert.equal(drone.publishers.mode.messages.length, before);
 
+  await Terminal.prototype.poll.call(pane);
+  assert.equal(pane.socket, null, 'failed SSH status must not trigger another attachment');
+  context.fetch = async url => {
+    statusPolls++;
+    assert.equal(url, '/api/routine?drone=drone1');
+    return { ok: true, json: async () => ({ scripts: [], nodes: true, running: true }) };
+  };
+  await Terminal.prototype.poll.call(pane);
+  assert.equal(pane.socket.url, 'ws://localhost:8001/terminal/drone1',
+    'recovery attaches without pulling code or restarting nodes');
+  assert.equal(pane.running, true, 'reattaching must preserve the running routine');
+  assert.equal(drone.publishers.mode.messages.length, before, 'recovery sends no flight command');
+  const pollsBeforeRestart = statusPolls;
+
+  pane.running = false; // The routine finishes before the separate explicit-restart scenario.
   pane.attach();
   const oldTerminal = pane.socket, oldRos = drone.ros;
   let finishRestart;
@@ -1059,7 +1129,7 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   const restart = pane.restart();
   await assert.rejects(pane.restart(), /already in progress/);
   await Terminal.prototype.poll.call(pane);
-  assert.equal(statusPolls, 0, 'status polling pauses during restart');
+  assert.equal(statusPolls, pollsBeforeRestart, 'status polling pauses during restart');
   assert.equal(drone.connected, false);
   assert.equal(app.elements.get('drone1-connectionStatus').querySelector('[data-connection-label]').textContent, 'Restarting…');
   oldTerminal.onclose();
@@ -1123,6 +1193,15 @@ test('restart confirms the combined operation and blocks busy drones', async () 
   await runner.restartTargets(['drone2']);
   assert.deepEqual(restarts, ['drone2'], 'branch restart must only affect its captured targets');
   assert.throws(() => runner.restartTargets(['drone1']), /Restart could not start/);
+  const terminal = runner.terminals[1];
+  terminal.enabled = false;
+  terminal.nodes = false;
+  const requests = [];
+  terminal.post = async (...args) => { requests.push(args); return { output: 'Nodes restarted' }; };
+  await runner.restartTargets(['drone2']);
+  assert.deepEqual(requests.map(([path, body, timeout]) => [path, body.action, timeout]),
+    [['/api/nodes', 'restart', 240000]], 'SSH restart works without connecting the dashboard');
+  assert.equal(terminal.enabled, false);
 });
 
 test('a stalled restart response releases the runner without retrying the command', async () => {

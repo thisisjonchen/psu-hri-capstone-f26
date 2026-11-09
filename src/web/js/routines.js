@@ -26,6 +26,7 @@ class RoutineTerminal {
     this.polling = false;
     this.restarting = false;
     this.lastPollAt = 0;
+    this.reportTimer = null;
   }
 
   setEnabled(enabled, start = false) {
@@ -73,18 +74,24 @@ class RoutineTerminal {
     this.fit.fit();
     const socket = new WebSocket('ws://' + location.hostname + ':' + (Number(location.port) + 1) +
       '/terminal/' + this.id + (start ? '?start=1' : ''));
+    let connectionError = null;
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => socket.send(JSON.stringify({ cols: this.term.cols, rows: this.term.rows }));
     socket.onmessage = event => {
       if (this.socket !== socket || !this.enabled) return;
-      this.term.write(typeof event.data === 'string' ? event.data : new Uint8Array(event.data));
+      // The server sends connection errors as text; drone output is binary.
+      if (typeof event.data === 'string') {
+        connectionError = event.data.trim();
+        this.report(connectionError, 'error');
+      } else this.term.write(new Uint8Array(event.data));
     };
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
       const drone = drones[this.id];
       if (!drone.connected && drone.waitUntil) drone.failConnection('Connection error');
-      this.term.write('\r\n\x1b[2m[detached; anything running on ' + this.id + ' keeps running]\x1b[0m\r\n');
+      if (connectionError) this.report(connectionError, 'error');
+      else if (this.enabled && drone.connected) this.report('Terminal disconnected; reconnecting…', 'progress');
       this.changed();
     };
     this.socket = socket;
@@ -118,6 +125,9 @@ class RoutineTerminal {
       if (body.scripts) this.scripts = body.scripts;
       if (body.nodes !== undefined) this.nodes = body.nodes;
       this.running = body.running;
+      // Restore only the terminal after SSH recovers; never replay node startup
+      // or a routine command whose delivery may already have succeeded.
+      if (!this.socket && this.nodes && drones[this.id].connected) this.attach();
     } catch (_) {
       if (!this.enabled || this.socket !== socket || this.restarting) return;
       this.scripts = null;
@@ -134,12 +144,18 @@ class RoutineTerminal {
       drones[this.id].connected;
   }
 
-  report(message) {
+  report(message, state = 'info') {
     if (!message) return;
+    clearTimeout(this.reportTimer);
     const status = this.root.querySelector('[data-field="result"]');
     status.textContent = message;
+    status.title = message;
+    status.dataset.state = state;
     status.hidden = false;
-    if (this.term) this.term.write('\r\n[' + message + ']\r\n');
+    this.reportTimer = setTimeout(() => {
+      status.hidden = true;
+      this.reportTimer = null;
+    }, 8000);
   }
 
   async post(path, body, timeout = 0) {
@@ -216,7 +232,7 @@ class RoutineRunner {
     document.addEventListener('drone-connect-failed', event => {
       const pane = terminal(event.detail.id);
       pane.setEnabled(false);
-      pane.report(event.detail.message);
+      pane.report(event.detail.message, 'error');
       this.render();
     });
     setInterval(() => this.terminals.forEach(terminal => terminal.poll()), 2000);
@@ -247,12 +263,14 @@ class RoutineRunner {
 
   async run(label, targets, action) {
     this.busy = true;
-    targets.forEach(terminal => terminal.report(label + '…'));
+    targets.forEach(terminal => terminal.report(label + '…', 'progress'));
     this.render();
     const results = await Promise.allSettled(targets.map(action));
     this.busy = false;
     results.forEach((result, index) => {
-      targets[index].report(result.status === 'fulfilled' ? result.value : 'Failed: ' + result.reason.message);
+      const succeeded = result.status === 'fulfilled';
+      targets[index].report(succeeded ? result.value : 'Failed: ' + result.reason.message,
+        succeeded ? 'success' : 'error');
     });
     this.render();
     return results;
@@ -280,10 +298,11 @@ class RoutineRunner {
   restartTargets(ids) {
     const targets = ids.map(id => this.terminals.find(terminal => terminal.id === id));
     if (this.busy || !targets.length || targets.some(terminal =>
-      !terminal?.enabled || !terminal.nodes || terminal.running)) {
+      !terminal || (terminal.enabled && (!terminal.nodes || terminal.running)))) {
       throw new Error('Restart could not start. Check connections and stop running routines, then use Restart.');
     }
-    return this.run('Restarting', targets, terminal => terminal.restart());
+    return this.run('Restarting', targets, async terminal => terminal.enabled ? terminal.restart()
+      : (await terminal.post('/api/nodes', { action: 'restart' }, 240000)).output);
   }
 }
 

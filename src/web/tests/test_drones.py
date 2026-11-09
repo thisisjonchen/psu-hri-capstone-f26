@@ -81,14 +81,27 @@ class BranchTest(unittest.TestCase):
         self.repo.mkdir()
         self.cwd = self.repo
         self.mode = 'DISARMED'
+        self.container_running = True
+        self.nodes_running = True
+        self.routine_code = 1
+        self.hardware_calls = []
         self.build_code = 0
         self.build_calls = []
 
         def command(*args, **kwargs):
             if args[0] == 'git':
                 return subprocess.run(args, cwd=self.cwd, capture_output=True, text=True, timeout=10)
+            self.hardware_calls.append(args)
+            if args[:2] == ('docker', 'inspect'):
+                return subprocess.CompletedProcess(args, 1 if self.container_running is None else 0,
+                                                   str(self.container_running).lower(), '')
+            if args[:2] == ('docker', 'start'):
+                self.container_running = True
+                return subprocess.CompletedProcess(args, 0, '', '')
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'pgrep'):
-                return subprocess.CompletedProcess(args, 1, '', '')
+                code = self.routine_code if args[-1].startswith('PALS/routines/') else (
+                    2 if self.nodes_running is None else 0 if self.nodes_running else 1)
+                return subprocess.CompletedProcess(args, code, '', '')
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'timeout'):
                 self.build_calls.append((args, kwargs))
                 return subprocess.CompletedProcess(args, self.build_code, '', 'compile failed' if self.build_code else '')
@@ -144,11 +157,40 @@ class BranchTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Build failed; nodes were not restarted'):
             drone_git.change('build', branch, revision)
         self.build_code = 0
-        self.assertEqual(drone_git.change('build', branch, revision)['branch'], branch)
+        result = drone_git.change('build', branch, revision)
+        self.assertEqual(result['branch'], branch)
+        self.assertTrue(result['restart'])
         self.assertEqual(len(self.build_calls), 2, 'retry the build even when the revision is unchanged')
         args, kwargs = self.build_calls[-1]
         self.assertEqual(args[-1], 'cd ~/catkin_ws && catkin_make --pkg pidrone_pkg -j1')
         self.assertGreater(kwargs['timeout'], 600)
+
+    def test_stopped_drone_can_clear_switch_and_build_without_starting_nodes(self):
+        self.nodes_running = False
+        for running in (False, True):
+            self.container_running = running
+            (self.repo / 'node.py').write_text('local changes\n')
+            drone_git.change('prepare-clear')
+            result = drone_git.change('clear')
+            self.assertFalse(result['dirty'])
+        self.container_running = False
+        branch = 'coordination-stability'
+        revision = drone_git.change('prepare', branch)['target']
+        drone_git.change('switch', branch, revision)
+        result = drone_git.change('build', branch, revision)
+        self.assertEqual(result['branch'], branch)
+        self.assertFalse(result['restart'])
+        self.assertEqual(len(self.build_calls), 1)
+        self.assertEqual(self.hardware_calls.count(('docker', 'start', 'pidrone_pkg')), 1)
+        self.assertFalse(any('rostopic' in str(args) or 'pals-start' in str(args)
+                             for args in self.hardware_calls))
+        # An unavailable container/process check is not proof that nodes are stopped.
+        for container, nodes, routine in [(None, False, 1), (True, None, 1), (True, False, 0), (True, False, 2)]:
+            self.container_running, self.nodes_running, self.routine_code = container, nodes, routine
+            (self.repo / 'node.py').write_text('keep this work\n')
+            with self.assertRaises(RuntimeError):
+                drone_git.change('clear')
+            self.assertEqual((self.repo / 'node.py').read_text(), 'keep this work\n')
 
     def test_dirty_armed_and_diverged_repositories_keep_their_work_and_branch(self):
         (self.repo / 'node.py').write_text('local work\n')
@@ -349,6 +391,9 @@ docker() {
     case "$*" in
         *screen\ -ls*) echo '123.pidrone (Detached)' ;;
         */pidrone/mode*) echo "mode: $mode" ;;
+        *-p\ TOF\ -X\ stuff*) [[ "$failure" != tof_signal ]] ;;
+        *'[v]l53l1x_node'*'[/]tof.launch'*)
+            [[ "$failure" != tof_exit ]] || { echo 'mock ToF did not stop'; return 1; } ;;
         *-X\ quit*) [[ "$failure" != quit ]] ;;
         *'[r]osmaster'*) echo 'mock old serial process still running'; return 1 ;;
         *) echo "unexpected Docker call: $*"; return 1 ;;
@@ -366,6 +411,8 @@ source "$1" restart
         for mode, failure, message in [
                 ('ARMED', '', 'it must be DISARMED'), ('FLYING', '', 'it must be DISARMED'),
                 ('', '', 'it must be DISARMED'), ('DISARMED', 'reboot', 'mock warm reboot failed'),
+                ('DISARMED', 'tof_signal', 'Could not stop the TOF window'),
+                ('DISARMED', 'tof_exit', 'mock ToF did not stop'),
                 ('DISARMED', 'quit', 'Could not stop the screen session'),
                 ('DISARMED', 'process', 'mock old serial process still running'),
                 ('DISARMED', 'lock', 'restart was not queued')]:
@@ -384,6 +431,43 @@ source "$1" restart
                 self.assertIn(message, result.stdout + result.stderr)
                 if mode != 'DISARMED':
                     self.assertNotIn('mock warm reboot', result.stdout)
+
+    def test_restart_readiness_requires_fresh_tof_and_localization(self):
+        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
+        code = launcher.read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        for fault in (None, 'missing', 'stale', 'invalid', 'localization'):
+            with self.subTest(fault=fault):
+                now, subscribers = [100.0], {}
+
+                def sleep(seconds):
+                    now[0] += seconds
+                    subscribers['/pidrone/localization/local_ready'](
+                        SimpleNamespace(data=fault != 'localization'))
+                    if fault != 'missing':
+                        stamp = now[0] - (2 if fault == 'stale' else 0)
+                        subscribers['/pidrone/range'](SimpleNamespace(
+                            range=float('nan') if fault == 'invalid' else .05,
+                            min_range=0., max_range=4.,
+                            header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: stamp))))
+
+                modules = {
+                    'time': SimpleNamespace(sleep=sleep),
+                    'rospy': SimpleNamespace(init_node=lambda *a, **kw: None,
+                        get_time=lambda: now[0], is_shutdown=lambda: False,
+                        Subscriber=lambda topic, cls, callback: subscribers.update({topic: callback})),
+                    'diagnostic_msgs.msg': SimpleNamespace(DiagnosticArray=object),
+                    'sensor_msgs.msg': SimpleNamespace(Range=object),
+                    'std_msgs.msg': SimpleNamespace(Bool=object)}
+                with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report:
+                    if fault:
+                        with self.assertRaises(SystemExit) as error:
+                            exec(code, {})
+                        self.assertEqual(error.exception.code, 1)
+                        expected = 'Localization is not ready' if fault == 'localization' else 'ToF has no fresh valid range'
+                        self.assertIn(expected, report.call_args.args[0])
+                    else:
+                        exec(code, {})
+                        self.assertIn('EKF initialized', report.call_args.args[0])
 
     def test_gyro_check_requires_fresh_disarmed_telemetry_through_end_of_window(self):
         for fault in (None, 'imu', 'mode', 'armed'):
@@ -426,14 +510,17 @@ class ConnectTest(unittest.TestCase):
             self.assertEqual(key.read_bytes(), original)
 
     def test_failed_command_closes_cached_connection_without_retry(self):
-        client = mock.Mock()
-        client.exec_command.side_effect = OSError('connection lost')
-        with mock.patch.dict(drones._clients, {'drone1': client}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, 'SSH command failed'):
-                drones.run('drone1', 'command')
-            self.assertNotIn('drone1', drones._clients)
-        client.exec_command.assert_called_once()
-        client.close.assert_called_once()
+        for error in (OSError('connection lost'), EOFError('connection closed'),
+                      drones.paramiko.SSHException('session inactive')):
+            with self.subTest(error=type(error).__name__):
+                client = mock.Mock()
+                client.exec_command.side_effect = error
+                with mock.patch.dict(drones._clients, {'drone1': client}, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, 'SSH command failed'):
+                        drones.run('drone1', 'command')
+                    self.assertNotIn('drone1', drones._clients)
+                client.exec_command.assert_called_once()
+                client.close.assert_called_once()
 
     def test_connect_button_bootstraps_before_starting_nodes(self):
         for start in (True, False):
@@ -499,7 +586,9 @@ class SetupTest(unittest.TestCase):
                 mock.patch.object(drones, 'connect') as verify:
             self.assertTrue(pals.ssh_setup(['drone1', 'drone2']))
         existing.exec_command.assert_not_called()
+        existing.get_transport.return_value.set_keepalive.assert_called_once_with(15)
         password.exec_command.assert_called_once()
+        password.get_transport.return_value.set_keepalive.assert_called_once_with(15)
         self.assertNotIn('password', existing.connect.call_args.kwargs)
         self.assertEqual(password.connect.call_args.kwargs['password'], 'quackquack')
         verify.assert_called_once_with('drone2')
@@ -509,7 +598,7 @@ class SetupTest(unittest.TestCase):
 
     def test_connection_errors_do_not_try_password_or_block_other_drone(self):
         key = drones.paramiko.RSAKey.generate(1024)
-        for error in (OSError('offline'),
+        for error in (OSError('offline'), EOFError('connection closed'),
                       drones.paramiko.BadHostKeyException('drone1.local', key, key)):
             with self.subTest(error=type(error).__name__):
                 failed, working = mock.Mock(), mock.Mock()

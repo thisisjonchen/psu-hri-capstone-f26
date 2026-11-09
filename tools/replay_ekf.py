@@ -176,8 +176,9 @@ class Replay:
         elif topic == UWB_TOPIC:
             if self.fuse_uwb:
                 xy = np.array([message.pose.pose.position.x, message.pose.pose.position.y])
+                variance = max(message.pose.covariance[0], message.pose.covariance[7])
                 status = self.timeline.add_measurement((stamp_ns-self.origin_ns)/1e9-self.uwb_delay, 'uwb',
-                    lambda f, t, xy=xy: self._correct_uwb(f, xy, t))
+                    lambda f, t, xy=xy, variance=variance: self._correct_uwb(f, xy, variance, t))
                 self.counts[status] += 1
         elif topic == self.camera_topic:
             if self.camera is None:
@@ -200,9 +201,9 @@ class Replay:
                 self.counts[status] += 1
         return events
 
-    def _correct_uwb(self, ekf, xy, stamp):
+    def _correct_uwb(self, ekf, xy, variance, stamp):
         predicted = self.uwb.linearize(ekf.position, ekf.quaternion)[0]
-        accepted, reason = self.uwb.correct(ekf, xy, .02**2, stamp)
+        accepted, reason = self.uwb.correct(ekf, xy, variance, stamp)
         self.uwb_rows.append([stamp, xy[0], xy[1], predicted[0], predicted[1], accepted, reason])
         return accepted, reason
 

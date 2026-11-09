@@ -135,7 +135,8 @@ def connect(drone, timeout=5):
         client.connect(host(drone), username=USER, key_filename=str(KEY), timeout=timeout,
                        banner_timeout=timeout, auth_timeout=timeout,
                        allow_agent=False, look_for_keys=False)
-    except paramiko.SSHException as error:
+        client.get_transport().set_keepalive(15)
+    except (paramiko.SSHException, EOFError) as error:
         client.close()
         raise RuntimeError('%s: %s (run tools/pals.py ssh-setup)' % (drone, error))
     except OSError as error:
@@ -174,6 +175,7 @@ def setup_ssh(drone):
                     try:
                         client.connect(hostname, username=USER, allow_agent=False, look_for_keys=False,
                                        timeout=5, banner_timeout=5, auth_timeout=5, **auth)
+                        client.get_transport().set_keepalive(15)
                     except paramiko.AuthenticationException:
                         if 'key_filename' in auth:
                             client.close()
@@ -193,7 +195,7 @@ def setup_ssh(drone):
                     raise
                 client.close()
                 return connect(drone)
-        except (OSError, paramiko.SSHException) as error:
+        except (OSError, paramiko.SSHException, EOFError) as error:
             raise RuntimeError('%s: SSH setup failed: %s' % (drone, error)) from error
 
 
@@ -207,7 +209,7 @@ def run(drone, command, timeout=10):
         _, stdout, _ = client.exec_command(command, timeout=timeout)
         output = stdout.read().decode('utf-8', 'replace')
         return stdout.channel.recv_exit_status(), output
-    except (OSError, paramiko.SSHException) as error:
+    except (OSError, paramiko.SSHException, EOFError) as error:
         client.close()
         with _lock:
             if _clients.get(drone) is client:
@@ -306,6 +308,6 @@ def open_terminal(drone, cols, rows, start=False, active=lambda: True):
         return client, channel
     except Exception as error:
         client.close()
-        if isinstance(error, (OSError, paramiko.SSHException)):
+        if isinstance(error, (OSError, paramiko.SSHException, EOFError)):
             raise RuntimeError('%s: terminal connection failed: %s' % (drone, error)) from error
         raise

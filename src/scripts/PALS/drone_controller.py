@@ -1,17 +1,28 @@
 #!/usr/bin/env python
 
+import logging
 import math
 import time
 
 import rosnode
 import rospy
 import tf
+from rosgraph.roslogging import RosStreamHandler
 from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
+
+
+class _RoutineConsoleFilter(logging.Filter):
+    def filter(self, record):
+        return not (record.name == 'rosout' and record.levelno == logging.WARNING and
+                    record.getMessage() ==
+                    'Inbound TCP/IP connection failed: connection from sender terminated '
+                    'before handshake header received. 0 bytes were received. '
+                    'Please check sender for additional details.')
 
 
 class Drone(object):
@@ -26,6 +37,11 @@ class Drone(object):
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
     def __init__(self):
+        # Routines initialize rospy first. Quiet this exact console warning while
+        # retaining it in the node's log file and on /rosout for diagnosis.
+        for handler in logging.getLogger('rosout').handlers:
+            if isinstance(handler, RosStreamHandler):
+                handler.addFilter(_RoutineConsoleFilter())
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
         self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.30))

@@ -169,6 +169,9 @@ class AnchorCalibration:
                 self.preview_at = None
                 self.update('measuring', 'Measuring…', preview=None, token=None)
                 rows = ble.call('measure', self.check_cancelled, boards)
+                logging.info('Anchor calibration ranges [meters, quality], corner order '
+                             '[bottom left, bottom right, top right, top left] %s: %s',
+                             [board['id'] for board in boards], json.dumps(rows, sort_keys=True))
                 preview = solve_layout(boards, rows)
                 self.check_cancelled()
                 self.preview = preview
