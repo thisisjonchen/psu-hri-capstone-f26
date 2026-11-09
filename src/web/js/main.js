@@ -650,6 +650,8 @@ class DroneSession {
     this.id = id;
     this.host = id + '.local';
     this.detectionReceivedAt = null;
+    this.tagOverlayStamp = null;
+    this.tagOverlayReceivedAt = null;
     this.payloadReceivedAt = null;
     this.payloadStamp = null;
     this.fusedPose = null;
@@ -681,6 +683,7 @@ class DroneSession {
       [0, 1, 2].forEach(i => { this.series[key + i] = []; });
     });
     this.field('camera').addEventListener('error', () => {
+      this.clearTagOverlay();
       this.clearPayload('Payload camera unavailable');
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
@@ -694,7 +697,7 @@ class DroneSession {
   field(name) {
     if (name === 'camera') return document.getElementById(this.id + '-camera');
     if (name === 'detection') return document.getElementById(this.id + '-detection');
-    if (['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter'].includes(name)) return document.getElementById(this.id + '-' + name);
+    if (['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter', 'tagOverlay', 'tagOutline'].includes(name)) return document.getElementById(this.id + '-' + name);
     return this.root.querySelector('[data-field="' + name + '"]');
   }
   get connected() { return !!(this.ros && this.ros.isConnected); }
@@ -703,6 +706,7 @@ class DroneSession {
     const status = this.field('detection');
     status.textContent = text;
     status.dataset.state = state;
+    if (state !== 'detected') this.clearTagOverlay();
   }
 
   updateDetection(message) {
@@ -720,9 +724,41 @@ class DroneSession {
     this.setDetection(message.tag_ids.length ? message.tag_ids.map((id, i) =>
       message.zones[i] + ' · Tag ' + id).join(', ') : 'No AprilTag detected',
       message.tag_ids.length ? 'detected' : 'none');
+    this.updateTagOverlay(message);
+  }
+
+  clearTagOverlay() {
+    this.tagOverlayReceivedAt = null;
+    this.field('tagOverlay').setAttribute('visibility', 'hidden');
+  }
+
+  updateTagOverlay(message) {
+    const { corner_x: x, corner_y: y, image_width: width, image_height: height } = message;
+    const stamp = message.header && message.header.stamp;
+    const count = message.tag_ids.length * 4;
+    if (!count || !stamp || !Number.isInteger(stamp.secs) || stamp.secs <= 0 ||
+        !Number.isInteger(stamp.nsecs) || stamp.nsecs < 0 || stamp.nsecs >= 1e9 ||
+        ![width, height].every(n => Number.isInteger(n) && n > 0) ||
+        !Array.isArray(x) || !Array.isArray(y) || x.length !== count || y.length !== count ||
+        !x.every(n => Number.isFinite(n) && n >= 0 && n < width) ||
+        !y.every(n => Number.isFinite(n) && n >= 0 && n < height)) return this.clearTagOverlay();
+    const time = stamp.secs + stamp.nsecs / 1e9;
+    if (this.tagOverlayStamp !== null && time <= this.tagOverlayStamp) return;
+    this.tagOverlayStamp = time;
+    this.tagOverlayReceivedAt = Date.now();
+    const paths = [];
+    for (let i = 0; i < count; i += 4) {
+      paths.push('M ' + x[i] + ' ' + y[i] + ' L ' + x[i+1] + ' ' + y[i+1] +
+        ' L ' + x[i+2] + ' ' + y[i+2] + ' L ' + x[i+3] + ' ' + y[i+3] + ' Z');
+    }
+    this.field('tagOutline').setAttribute('d', paths.join(' '));
+    const overlay = this.field('tagOverlay');
+    overlay.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    overlay.setAttribute('visibility', this.field('camera').getAttribute('src') !== 'nocamera.svg' ? 'visible' : 'hidden');
   }
 
   refreshDetection() {
+    if (this.tagOverlayReceivedAt !== null && Date.now() - this.tagOverlayReceivedAt > 750) this.clearTagOverlay();
     if (this.detectionReceivedAt !== null && Date.now() - this.detectionReceivedAt > 1500) {
       this.detectionReceivedAt = null;
       this.setDetection('No tag data', 'offline');
@@ -859,6 +895,7 @@ class DroneSession {
   }
 
   resetTelemetry() {
+    this.tagOverlayStamp = null;
     this.xyFrames = {};
     this.xyReceivedAt = {};
     this.startTime = null;

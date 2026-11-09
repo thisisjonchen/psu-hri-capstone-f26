@@ -22,6 +22,8 @@ class TagDetection:
         self.zones = []
         self.center_x = []
         self.center_y = []
+        self.corner_x = []
+        self.corner_y = []
         self.image_width = 0
         self.image_height = 0
 
@@ -72,6 +74,10 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(self.messages[-1].zones, [zone])
             self.assertEqual(len(self.messages[-1].center_x), 1)
             self.assertEqual(len(self.messages[-1].center_y), 1)
+            corners = np.column_stack((self.messages[-1].corner_x, self.messages[-1].corner_y))
+            self.assertEqual(corners.shape, (4, 2))
+            np.testing.assert_allclose(corners.min(axis=0), (40, 80), atol=2)
+            np.testing.assert_allclose(corners.max(axis=0), (200, 240), atol=2)
             self.assertEqual((self.messages[-1].image_width, self.messages[-1].image_height), (240, 320))
         for tag in (2, 3, None):
             self.node.image_callback(self.frame(tag))
@@ -81,6 +87,8 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(self.messages[-1].zones, [])
             self.assertEqual(self.messages[-1].center_x, [])
             self.assertEqual(self.messages[-1].center_y, [])
+            self.assertEqual(self.messages[-1].corner_x, [])
+            self.assertEqual(self.messages[-1].corner_y, [])
 
     def test_missing_stale_and_invalid_images_publish_offline_without_stale_tags(self):
         self.node.step()

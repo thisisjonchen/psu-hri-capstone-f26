@@ -195,6 +195,10 @@ The floor AprilTag detector reports two `tag36h11` IDs, **0 (PAYLOAD)** and
 drones by tag ID. If a tag moves, an older saved position can still influence
 the average until that drone updates or clears its map.
 
+Camera feeds outline detected tags in cyan using their four image corners.
+Outlines expire when observations stop; they may lag the separate MJPEG stream.
+Rebuild catkin after deploying the updated `TagDetection.msg` corner fields.
+
 `params/payload_detection.yaml` contains the HSV thresholds and minimum image
 area. Tune these with actual images from the test area. The detector initially
 picks the largest qualifying yellow region and tracks nearby regions in later

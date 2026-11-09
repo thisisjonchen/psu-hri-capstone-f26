@@ -139,7 +139,8 @@ h2 { font-size: var(--type-heading); font-weight: 700; letter-spacing: -.02em; m
 .camera-content > .detection-status, .camera-content .detection-status strong { margin: 0; }
 .camera-frame { position: relative; width: 100%; aspect-ratio: 3 / 4; border-radius: var(--radius-control); overflow: hidden; background: var(--placeholder-background); display: grid; place-items: center; }
 .camera-frame img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
-.payload-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.payload-overlay, .tag-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.tag-overlay path { fill: none; stroke: #00e5ff; stroke-width: 3; vector-effect: non-scaling-stroke; }
 .payload-overlay rect { fill: none; stroke: #ffdf00; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .payload-overlay circle { fill: #ffdf00; stroke: #172337; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .camera-placeholder { display: none; }

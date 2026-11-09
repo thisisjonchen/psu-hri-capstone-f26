@@ -339,7 +339,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     elements.set(id, root);
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
-    for (const name of ['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter']) elements.set(id + '-' + name, element());
+    for (const name of ['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter', 'tagOverlay', 'tagOutline']) elements.set(id + '-' + name, element());
   }
   for (const id of ['fullscreen-toggle', 'separation-guard', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
@@ -1543,14 +1543,35 @@ test('ROS tag results stay isolated and include tag zero and multiple tags', () 
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/apriltag/detections';
-  app.receive(a, topic, tags([0, 1], ['PAYLOAD', 'DROP_OFF']));
+  const detected = { ...tags([0, 1], ['PAYLOAD', 'DROP_OFF']), ...stamp(100),
+    image_width: 240, image_height: 320,
+    corner_x: [10, 30, 30, 10, 50, 80, 80, 50], corner_y: [20, 20, 40, 40, 60, 60, 90, 90] };
+  app.receive(a, topic, detected);
+  assert.equal(a.field('tagOverlay').visibility, 'visible');
+  assert.equal(a.field('tagOverlay').viewBox, '0 0 240 320');
+  assert.equal(a.field('tagOutline').d, 'M 10 20 L 30 20 L 30 40 L 10 40 Z M 50 60 L 80 60 L 80 90 L 50 90 Z');
+  assert.equal(b.field('tagOverlay').visibility, 'hidden');
   app.receive(b, topic, tags([1], ['DROP_OFF']));
   assert.equal(a.field('detection').textContent, 'PAYLOAD · Tag 0, DROP_OFF · Tag 1');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
   app.receive(a, topic, tags([], []));
   assert.equal(a.field('detection').textContent, 'No AprilTag detected');
   assert.equal(a.field('detection').dataset.state, 'none');
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
+  app.receive(a, topic, { ...detected, ...stamp(101) });
+  app.advanceTime(800);
+  app.receive(a, topic, { ...detected, ...stamp(101) });
+  for (const callback of app.maintenanceTimers.values()) callback();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  app.receive(a, topic, { ...detected, ...stamp(102) });
+  app.receive(a, topic, { ...detected, ...stamp(103), corner_x: [NaN] });
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  app.receive(a, topic, { ...detected, ...stamp(104) });
+  a.field('camera').listeners.error();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  a.disconnect();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
 });
 
 test('camera loss, malformed results, and a silent ROS detector clear stale tags', () => {
