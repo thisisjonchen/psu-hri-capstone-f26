@@ -11,7 +11,7 @@ import rospy
 from sensor_msgs.msg import CompressedImage
 from pidrone_pkg.msg import TagDetection
 
-TAG_ZONES = {0: 'PICKUP', 1: 'DROP_OFF', 2: 'BORDER'}
+TAG_ZONES = {0: 'PAYLOAD', 1: 'DROP_OFF'}
 
 
 def make_detector():
@@ -63,11 +63,11 @@ class AprilTagNode(object):
                     if image is None:
                         raise ValueError('Invalid compressed camera frame')
                     detections = self.detector.detect(image)
-                    # Stable order; unknown IDs are still reported to consumers.
-                    ids = sorted(set(int(tag.tag_id) for tag in detections))
+                    centers = {int(tag.tag_id): tag.center for tag in detections
+                               if tag.tag_id in TAG_ZONES}
+                    ids = sorted(centers)
                     self.result.tag_ids = ids
-                    self.result.zones = [TAG_ZONES.get(tag_id, 'UNKNOWN') for tag_id in ids]
-                    centers = {int(tag.tag_id): tag.center for tag in detections}
+                    self.result.zones = [TAG_ZONES[tag_id] for tag_id in ids]
                     self.result.center_x = [float(centers[tag_id][0]) for tag_id in ids]
                     self.result.center_y = [float(centers[tag_id][1]) for tag_id in ids]
                     self.result.image_height, self.result.image_width = image.shape

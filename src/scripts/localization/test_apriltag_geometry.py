@@ -96,7 +96,7 @@ class AprilTagMappingTests(unittest.TestCase):
     def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
         self.set_pose(pose_stamp)
         message = NS(header=NS(stamp=Stamp(image_stamp)), camera_online=True,
-                     image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PICKUP'],
+                     image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PAYLOAD'],
                      center_x=[pixel[0]], center_y=[pixel[1]])
         self.node.detection_callback(message)
         return message

@@ -185,7 +185,8 @@ current map session and labels it as last seen. A room layout or localization
 generation change clears the saved point. The marker assumes the configured
 payload height.
 
-For floor AprilTags, the map averages the latest saved XY positions from both
+The floor AprilTag detector reports two `tag36h11` IDs, **0 (PAYLOAD)** and
+**1 (DROP_OFF)**. The map averages the latest saved XY positions from both
 drones by tag ID. If a tag moves, an older saved position can still influence
 the average until that drone updates or clears its map.
 

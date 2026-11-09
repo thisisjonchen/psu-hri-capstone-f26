@@ -61,10 +61,10 @@ class DetectorTests(unittest.TestCase):
         return SimpleNamespace(data=encoded.tobytes(), header=SimpleNamespace(
             stamp=SimpleNamespace(to_sec=lambda stamp=self.now: stamp)))
 
-    def test_real_camera_tags_publish_zones_and_clear_when_the_tag_leaves(self):
+    def test_real_camera_tags_publish_only_payload_and_drop_off(self):
         self.ros.Subscriber.assert_called_once()
         self.assertEqual(self.ros.Subscriber.call_args.args[0], '/raspicam_node/image/compressed')
-        for tag, zone in [(0, 'PICKUP'), (1, 'DROP_OFF'), (2, 'BORDER'), (3, 'UNKNOWN')]:
+        for tag, zone in [(0, 'PAYLOAD'), (1, 'DROP_OFF')]:
             self.node.image_callback(self.frame(tag))
             self.node.step()
             self.assertTrue(self.messages[-1].camera_online)
@@ -73,10 +73,14 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(len(self.messages[-1].center_x), 1)
             self.assertEqual(len(self.messages[-1].center_y), 1)
             self.assertEqual((self.messages[-1].image_width, self.messages[-1].image_height), (240, 320))
-        self.node.image_callback(self.frame())
-        self.node.step()
-        self.assertTrue(self.messages[-1].camera_online)
-        self.assertEqual(self.messages[-1].tag_ids, [])
+        for tag in (2, 3, None):
+            self.node.image_callback(self.frame(tag))
+            self.node.step()
+            self.assertTrue(self.messages[-1].camera_online)
+            self.assertEqual(self.messages[-1].tag_ids, [])
+            self.assertEqual(self.messages[-1].zones, [])
+            self.assertEqual(self.messages[-1].center_x, [])
+            self.assertEqual(self.messages[-1].center_y, [])
 
     def test_missing_stale_and_invalid_images_publish_offline_without_stale_tags(self):
         self.node.step()

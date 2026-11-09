@@ -863,7 +863,7 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   const oldRos = a.ros;
   const oldRange = a.subscribers.find(topic => topic.name === '/pidrone/range');
   const oldTags = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
-  oldTags.receive(tags([0], ['PICKUP']));
+  oldTags.receive(tags([0], ['PAYLOAD']));
   a.connect();
   assert.equal(a.ros, oldRos);
   assert.equal(app.timers.size, 2);
@@ -874,7 +874,7 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   assert.equal(a.field('detection').textContent, 'No tag data');
   app.connect('drone1');
   oldRange.receive({ ...stamp(500), range: 9 });
-  oldTags.receive(tags([0], ['PICKUP']));
+  oldTags.receive(tags([0], ['PAYLOAD']));
   assert.equal(a.field('detection').textContent, 'No tag data');
   oldRos.events.close();
   assert.equal(a.connected, true);
@@ -1543,9 +1543,9 @@ test('ROS tag results stay isolated and include tag zero and multiple tags', () 
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/apriltag/detections';
-  app.receive(a, topic, tags([0, 2], ['PICKUP', 'BORDER']));
+  app.receive(a, topic, tags([0, 1], ['PAYLOAD', 'DROP_OFF']));
   app.receive(b, topic, tags([1], ['DROP_OFF']));
-  assert.equal(a.field('detection').textContent, 'PICKUP · Tag 0, BORDER · Tag 2');
+  assert.equal(a.field('detection').textContent, 'PAYLOAD · Tag 0, DROP_OFF · Tag 1');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
   app.receive(a, topic, tags([], []));
   assert.equal(a.field('detection').textContent, 'No AprilTag detected');
@@ -1557,7 +1557,7 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/apriltag/detections';
-  const detected = tags([0], ['PICKUP']);
+  const detected = tags([0], ['PAYLOAD']);
   for (const message of [tags([], [], false), tags([-1], ['UNKNOWN']), tags([0], []), tags([0], ['']), {}]) {
     app.receive(a, topic, detected);
     app.receive(a, topic, message);
@@ -1891,7 +1891,7 @@ test('mapped AprilTags average positions by ID and clear reports on generation c
   const a = app.connect('drone1'), b = app.connect('drone2');
   const tagMap = (x, count, time = 100, y = 2) => ({
     header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
-    tag_ids: [0], zones: ['PICKUP'],
+    tag_ids: [0], zones: ['PAYLOAD'],
     positions: [{ x, y, z: 0 }], sample_counts: [count]
   });
   app.receive(a, '/pidrone/apriltag/map', tagMap(1, 4));
