@@ -303,6 +303,21 @@ class RoutineControlTest(unittest.TestCase):
         self.assertEqual([msg.data for msg in self.fusion.messages['/pidrone/position_control']],
                          [False])
 
+        # A routine may disarm higher; an out-of-range request keeps the default threshold.
+        def descend(seconds):
+            self.fusion.now += seconds
+            self.fusion.ros_now += seconds
+            drone.mode_at = drone.height_at = self.fusion.now
+            drone.height = max(.05, drone.height - .02)
+        self.ros.sleep = descend
+        for requested, expected in ((.15, .15), (.5, .10)):
+            drone.mode, drone.height = 'FLYING', .26
+            controller.current_mode = 'FLYING'
+            drone.land(disarm_height=requested)
+            self.assertEqual(drone.mode, 'DISARMED')
+            self.assertTrue(expected - .02 < drone.height <= expected + 1e-9,
+                            'disarmed at %.3f m for a %.2f m request' % (drone.height, requested))
+
         controller.landing_callback(NS(data=.05))
         self.assertIsNone(controller.altitude.landing_ground, 'ignore landing requests while disarmed')
         controller.current_mode = 'FLYING'
@@ -338,8 +353,11 @@ class RoutineControlTest(unittest.TestCase):
             drone.mode = 'FLYING'
             for hold_xy in (False, True):
                 drone.finish(hold_xy=hold_xy)
-                land.assert_called_once_with(hold_xy=hold_xy)
+                land.assert_called_once_with(hold_xy=hold_xy, disarm_height=None)
                 land.reset_mock()
+            drone.finish(hold_xy=True, disarm_height=.15)
+            land.assert_called_once_with(hold_xy=True, disarm_height=.15)
+            land.reset_mock()
             disarm.assert_not_called()
             sleep.assert_not_called()
 
@@ -353,7 +371,7 @@ class RoutineControlTest(unittest.TestCase):
 
             sleep.side_effect = manual_recovery
             drone.finish(hold_xy=True)
-            land.assert_called_once_with(hold_xy=True)
+            land.assert_called_once_with(hold_xy=True, disarm_height=None)
             self.assertEqual(sleep.call_args_list, [mock.call(.5), mock.call(.5)])
             disarm.assert_not_called()
             drone.heartbeat.shutdown.assert_not_called()
@@ -547,7 +565,7 @@ class RoutineControlTest(unittest.TestCase):
             drone.move_forward.side_effect = RuntimeError('movement failed')
             with self.assertRaisesRegex(RuntimeError, 'movement failed'):
                 main()
-            drone.land.assert_called_once_with(hold_xy=True)
+            drone.land.assert_called_once_with(hold_xy=True, disarm_height=None)
 
     def test_hover_height_precedes_timed_hold_and_preserves_landing_on_failure(self):
         script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'hover_routine.py')
@@ -574,7 +592,7 @@ class RoutineControlTest(unittest.TestCase):
                 expected = [mock.call.ready(), mock.call.takeoff(hold_xy=True, height=height)]
                 if not failed:
                     expected.append(mock.call.hover(10.))
-                expected.append(mock.call.land(hold_xy=True))
+                expected.append(mock.call.land(hold_xy=True, disarm_height=None))
                 self.assertEqual(drone.mock_calls, expected)
 
     def test_invalid_hover_height_is_rejected_before_initializing_flight(self):

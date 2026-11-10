@@ -34,6 +34,7 @@ class Drone(object):
     # Control Variables
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
+    MAX_DISARM_HEIGHT_M = 0.30 # Highest disarm height a routine may request (free drop)
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
     def __init__(self):
@@ -516,11 +517,11 @@ class Drone(object):
             raise ValueError('meters must be positive')
         self.move(y=-meters)
 
-    def finish(self, hold_xy=False):
+    def finish(self, hold_xy=False, disarm_height=None):
         """End a routine, keeping the heartbeat active if landing needs recovery."""
         if self.mode == 'FLYING':
             try:
-                self.land(hold_xy=hold_xy)
+                self.land(hold_xy=hold_xy, disarm_height=disarm_height)
             except Exception as error:
                 rospy.logerr('Landing needs manual recovery: %s', error)
                 # Keep the heartbeat active for manual landing.
@@ -529,8 +530,12 @@ class Drone(object):
         else:
             self.disarm()
 
-    def land(self, hold_xy=False):
-        """Descend and disarm at the ground threshold, optionally holding X/Y."""
+    def land(self, hold_xy=False, disarm_height=None):
+        """Descend and disarm at the ground threshold, optionally holding X/Y.
+
+        disarm_height raises that threshold (measured range, meters) up to
+        MAX_DISARM_HEIGHT_M; other values keep the default so landing still runs.
+        """
         if not hold_xy:
             self.unlock_xy()
         if self.ground_height is None:
@@ -543,7 +548,12 @@ class Drone(object):
             raise RuntimeError('Invalid preflight floor height')
         # Allow a slower-than-commanded descent before requiring manual recovery.
         deadline = time.time() + max(20.0, max(0.0, self.height - self.ground_height) / 0.05 + 5.0)
-        disarm_height = self.ground_height + self.LAND_DISARM_CLEARANCE_M
+        default_disarm = self.ground_height + self.LAND_DISARM_CLEARANCE_M
+        if disarm_height is not None and not (
+                not math.isnan(disarm_height) and default_disarm <= disarm_height <= self.MAX_DISARM_HEIGHT_M):
+            rospy.logwarn('Ignoring disarm height %s m; using %.3f m', disarm_height, default_disarm)
+            disarm_height = None
+        disarm_height = default_disarm if disarm_height is None else disarm_height
         self.landing_pub.publish(Float32(data=self.ground_height))
         self.target_height = self.ground_height
         rospy.loginfo('Landing toward preflight floor height %.3f m', self.ground_height)

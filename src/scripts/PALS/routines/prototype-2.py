@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Climb toward --height and, once within 0.5 m of it, move --forward meters (+Y) while the
 climb finishes; hover until --seconds after the start, then descend to 0.2032 m, move
-0.1 m forward and land."""
+0.1 m forward and land, disarming at 0.15 m."""
 
 import argparse
 import math
@@ -18,6 +18,7 @@ from drone_controller import Drone
 LANDING_STEP_HEIGHT_M = 0.2032 # 8 inches
 CONTINUE_BELOW_TARGET_M = 0.5 # Start moving forward this far below --height.
 LANDING_STEP_FORWARD_M = 0.1
+DISARM_HEIGHT_M = 0.15 # Disarm here while landing, instead of the default ~0.10 m.
 MAX_HEIGHT_M = 2.0 # Guards against a mistyped --height.
 FORWARD_SPEED_M_S = 0.15 # Drone.move_forward default
 
@@ -72,7 +73,7 @@ def main():
         drone.move_to_altitude(LANDING_STEP_HEIGHT_M)
         forward(drone, LANDING_STEP_FORWARD_M)
     finally:
-        drone.finish(hold_xy=True)
+        drone.finish(hold_xy=True, disarm_height=DISARM_HEIGHT_M)
 
 
 if __name__ == '__main__':
