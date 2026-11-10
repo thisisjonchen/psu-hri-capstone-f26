@@ -51,23 +51,20 @@ class AprilTagGeometryTests(unittest.TestCase):
 class AprilTagMappingTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
-        self.maps, self.payload_points = [], []
+        self.maps = []
         ros = ModuleType('rospy')
         # Exercise the mapper's default 45 degree camera mounting.
-        params = {'~payload_plane_z': .25}
+        params = {}
         ros.get_param = lambda name, default: params.get(name, default)
         ros.Time = NS(now=lambda: Stamp(self.now))
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
-        reports = {'/pidrone/apriltag/map': self.maps,
-                   '/pidrone/payload/map_point': self.payload_points}
+        reports = {'/pidrone/apriltag/map': self.maps}
         ros.Publisher = lambda topic, *args, **kwargs: NS(
             publish=lambda msg: reports[topic].append(copy.deepcopy(msg)))
         modules = {'rospy': ros}
         for package, messages in [
                 ('geometry_msgs', {'Point': NS, 'PoseWithCovarianceStamped': Pose}),
-                ('pidrone_pkg', {'PayloadDetection': NS,
-                    'PayloadMapPoint': lambda: NS(header=NS(), point=NS(), valid=False),
-                    'TagDetection': NS, 'TagMap': lambda: NS(
+                ('pidrone_pkg', {'TagDetection': NS, 'TagMap': lambda: NS(
                     header=NS(), tag_ids=[], zones=[], positions=[], sample_counts=[])}),
                 ('sensor_msgs', {'CameraInfo': NS}),
                 ('std_msgs', {'Bool': NS, 'UInt32': NS})]:
@@ -100,35 +97,6 @@ class AprilTagMappingTests(unittest.TestCase):
                      center_x=[pixel[0]], center_y=[pixel[1]])
         self.node.detection_callback(message)
         return message
-
-    def test_payload_projects_at_configured_height_and_invalidates_without_fresh_input(self):
-        self.set_pose(99.85)
-        self.set_pose(99.98)
-        detection = NS(header=NS(stamp=Stamp(99.9), frame_id='camera'), camera_online=True,
-                       detected=True, image_width=320, image_height=240, center_x=190, center_y=120)
-        self.node.payload_callback(detection)
-        result, = self.payload_points
-        self.assertTrue(result.valid)
-        self.assertEqual((result.header.frame_id, result.header.stamp.to_sec(), result.generation),
-                         ('map', 99.9, 1))
-        np.testing.assert_allclose((result.point.x, result.point.y, result.point.z),
-                                   (1 + .075*math.sqrt(2), 2.75, .25), atol=1e-7)
-        self.node.payload_callback(detection)
-        self.assertEqual(len(self.payload_points), 1)
-
-        self.now = 100.4
-        detection.header.stamp = Stamp(100.38)
-        self.node.payload_callback(detection)  # The fused pose has expired.
-        self.assertFalse(self.payload_points[-1].valid)
-        self.assertEqual(self.payload_points[-1].header.stamp.to_sec(), 99.9)
-        self.set_pose(100.36)
-        self.set_pose(self.now)
-        self.node.payload_callback(detection)
-        self.assertTrue(self.payload_points[-1].valid)
-        detection.detected = False  # Height gate can withdraw the same frame.
-        self.node.payload_callback(detection)
-        self.assertFalse(self.payload_points[-1].valid)
-        self.assertEqual(self.maps[-1].tag_ids, [])
 
     def test_delayed_detections_publish_coordinates_once_per_image(self):
         # Use the image-time midpoint during translation and yaw, even with

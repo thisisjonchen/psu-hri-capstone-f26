@@ -160,32 +160,9 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ```
 7. You are now ready to go. Continue from **Step 2** in **Standard Operation + Control**.
 
-## Yellow Payload Detection
+## AprilTag Detection and Mapping
 
-The onboard `payload_detection` node starts with the normal dashboard connection.
-It reads `/raspicam_node/image/compressed` and publishes
-`/pidrone/payload/detection` (`pidrone_pkg/PayloadDetection`). Each drone's camera
-panel shows a yellow bounding box and center dot, with separate payload and tag
-status. The detector reports image coordinates.
-
-Yellow detection runs only when `/pidrone/state` reports a fresh EKF height of
-at least 10 cm above the floor. Fusion publishes this state with fresh ToF data.
-A low, missing, or stale height clears the detection while the camera feed
-stays available.
-
-The onboard AprilTag mapper projects the yellow center onto a fixed height and
-publishes `/pidrone/payload/map_point`. Set `payload_plane_z` in
-`params/apriltag_mapping.yaml` to the height of the visible yellow surface in
-the map when the payload is resting on the floor. The default 0.0 assumes that
-surface is at floor level. The mapper uses the same camera calibration, mounting
-and fresh fused pose as the floor tags. The yellow diamond shows the average XY
-of both usable estimates or the single usable estimate when only one is available.
-When neither estimate is usable, the dashboard retains the last point for the
-current map session and labels it as last seen. A room layout or localization
-generation change clears the saved point. The marker assumes the configured
-payload height.
-
-Tag and payload mapping interpolate fused position and attitude at the image
+Tag mapping interpolates fused position and attitude at the image
 timestamp. Images need an exact-time pose or fresh poses on both sides; frames
 without that history are skipped. `max_image_pose_skew` bounds image and pose age.
 This aligns reported timestamps; it does not correct sensor timestamp bias.
@@ -201,24 +178,6 @@ pose estimation for those IDs. Measure each printed black square edge to edge,
 excluding its white margin. Unconfigured tags use floor projection.
 Outlines expire when observations stop; they may lag the separate MJPEG stream.
 Rebuild catkin after deploying the updated `TagDetection.msg` corner fields.
-
-`params/payload_detection.yaml` contains the HSV thresholds and minimum image
-area. Tune these with actual images from the test area. The detector initially
-picks the largest qualifying yellow region and tracks nearby regions in later
-frames. Other yellow objects can be mistaken for the payload. Observations retain
-the source image timestamp, and the box can lag the separately streamed video.
-
-After these changes are copied to a drone, rebuild the catkin workspace to
-generate the ROS messages before starting nodes. To start the detector separately
-with an existing camera, fusion node, and ROS master, run:
-
-```sh
-roslaunch pidrone_pkg payload_detection.launch
-```
-
-After the EKF initializes on the floor, check visibility while disarmed with
-the drone on a stable support at least 10 cm above the floor and a clear ToF
-path to the floor.
 
 ## Camera Out of Focus
 

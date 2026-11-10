@@ -339,7 +339,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     elements.set(id, root);
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
-    for (const name of ['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter', 'tagOverlay', 'tagOutline']) elements.set(id + '-' + name, element());
+    for (const name of ['tagOverlay', 'tagOutline']) elements.set(id + '-' + name, element());
   }
   for (const id of ['fullscreen-toggle', 'separation-guard', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
@@ -1592,58 +1592,6 @@ test('camera loss, malformed results, and a silent ROS detector clear stale tags
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
 });
 
-test('payload boxes use image coordinates, stay isolated and expire without new observations', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  const topic = '/pidrone/payload/detection';
-  const detected = { ...stamp(100), camera_online: true, detected: true,
-    image_width: 240, image_height: 320, bbox_x: 30, bbox_y: 60, bbox_width: 80, bbox_height: 90,
-    center_x: 70, center_y: 105, area: 6800 };
-  app.receive(a, topic, detected);
-  assert.equal(a.field('payloadStatus').textContent, 'Yellow payload detected');
-  assert.equal(a.field('payloadOverlay').visibility, 'visible');
-  assert.equal(a.field('payloadOverlay').viewBox, '0 0 240 320');
-  assert.equal(a.field('payloadBox').x, 30);
-  assert.equal(a.field('payloadBox').height, 90);
-  assert.equal(a.field('payloadCenter').cx, 70);
-  assert.equal(b.field('payloadOverlay').visibility, 'hidden');
-  assert.equal(a.field('detection').textContent, 'No tag data');
-  app.receive(a, topic, { ...detected, detected: false });
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  app.receive(a, topic, detected);
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  app.advanceTime(800);
-  app.receive(a, topic, detected); // Repeated source stamp cannot renew freshness.
-  app.receive(b, topic, { ...detected, ...stamp(101) });
-  for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  assert.equal(a.field('payloadStatus').textContent, 'No payload data');
-  assert.equal(b.field('payloadOverlay').visibility, 'visible');
-  app.receive(a, topic, { ...detected, ...stamp(102), detected: false });
-  assert.equal(a.field('payloadStatus').textContent, 'No yellow payload detected');
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  app.receive(a, topic, { ...detected, ...stamp(103) });
-  app.receive(a, topic, { ...detected, camera_online: false });
-  assert.equal(a.field('payloadStatus').textContent, 'Payload camera unavailable');
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  for (const invalid of [{ detected: undefined }, { bbox_x: -1 }, { center_x: NaN }, { bbox_width: 300 },
-    { header: { stamp: { secs: 104, nsecs: 1e9 } } }]) {
-    app.receive(a, topic, { ...detected, ...stamp(104), ...invalid });
-    assert.equal(a.field('payloadStatus').textContent, 'No payload data');
-  }
-  app.receive(a, topic, { ...detected, ...stamp(105) });
-  const oldPayload = a.subscribers.find(t => t.name === topic);
-  a.disconnect();
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  a.connect(); a.ros.open();
-  oldPayload.receive({ ...detected, ...stamp(106) });
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-  app.receive(a, topic, detected); // Reconnect resets the source-stamp watermark.
-  assert.equal(a.field('payloadOverlay').visibility, 'visible');
-  a.field('camera').listeners.error();
-  assert.equal(a.field('payloadOverlay').visibility, 'hidden');
-});
-
 test('scan, assignment, measurement and saving work independently of drones', async () => {
   const app = dashboard({ discover: false });
   app.elements.get('calibration-toggle').listeners.click();
@@ -1942,60 +1890,6 @@ test('mapped AprilTags average positions by ID and clear reports on generation c
   assert.equal(app.fleetMap.mappedTags()[0].x, 1.5);
   b.disconnect();
   assert.equal(app.fleetMap.mappedTags().length, 0);
-});
-
-test('payload map averages fresh estimates, retains the last point and clears it on room reset', () => {
-  const app = dashboard();
-  const a = app.connect('drone1'), b = app.connect('drone2');
-  const topic = '/pidrone/payload/map_point';
-  const generation = '/pidrone/localization/generation';
-  const dataset = app.fleetMap.chart.data.datasets.find(d => d.key === 'payload');
-  const point = (time, x, overrides = {}) => ({
-    header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
-    generation: 1, valid: true, point: { x, y: 2, z: .25 }, ...overrides
-  });
-  app.receive(a, generation, { data: 1 });
-  app.receive(b, generation, { data: 1 });
-  app.receive(a, topic, point(100, 1));
-  assert.equal(dataset.data[0].x, 1);
-  app.advanceTime(5);
-  // Both observations are fresh even though the drones have independent ROS clocks.
-  app.receive(b, topic, point(98, 1.5, { point: { x: 1.5, y: 3, z: .25 } }));
-  assert.equal(dataset.data.length, 1);
-  assert.deepEqual([dataset.data[0].x, dataset.data[0].y], [1.25, 2.5]);
-  app.receive(b, topic, point(98, 1.2, { valid: false }));
-  assert.equal(dataset.data[0].x, 1);
-  app.receive(b, topic, point(98, 1.2));
-  assert.equal(dataset.data[0].x, 1);
-
-  app.receive(b, topic, point(99, 1.5));
-  app.advanceTime(746);
-  app.receive(a, topic, point(100, 1));
-  for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(dataset.data[0].x, 1.5);
-  app.advanceTime(5);
-  for (const callback of app.maintenanceTimers.values()) callback();
-  assert.equal(dataset.data[0].x, 1.5);
-  assert.equal(dataset.label, 'Payload (last seen)');
-  assert.match(app.elements.get('map-stream-status').textContent, /Payload last seen at \(1\.50, 2\.00\) m/);
-  app.receive(b, topic, point(101, 1.3));
-  assert.equal(dataset.data[0].x, 1.3);
-  assert.equal(dataset.label, 'Payload (ground estimate)');
-  app.receive(b, topic, point(101, 1.3, { valid: false }));
-  assert.equal(dataset.data[0].x, 1.3);
-  assert.equal(dataset.label, 'Payload (last seen)');
-  app.receive(b, generation, { data: 2 });
-  app.receive(b, '/pidrone/localization/anchors', anchorsAt(102));
-  app.receive(b, topic, point(102, 1.3)); // Old room generation.
-  assert.equal(dataset.data.length, 0);
-  app.receive(b, topic, point(102, 1.4, { generation: 2 }));
-  assert.equal(dataset.data[0].x, 1.4);
-  b.disconnect();
-  assert.equal(dataset.data[0].x, 1.4);
-  assert.equal(dataset.label, 'Payload (last seen)');
-  app.receive(a, '/pidrone/localization/anchors', anchorsAt(103,
-    [[0, 0, 2.25], [4, 0, 2.25], [4, 6, 2.25], [0, 6, 2.25]]));
-  assert.equal(dataset.data.length, 0);
 });
 
 test('routine execution synchronizes start for one or two drones', async () => {

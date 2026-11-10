@@ -29,8 +29,6 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
-    this.payloadReports = {};
-    this.lastPayload = null;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
       [0, 1, 2].map(i => ({
@@ -40,9 +38,6 @@ class FleetMap {
       }))));
     datasets.push({ key: 'apriltags', label: 'Mapped floor AprilTags', data: [], showLine: false,
       backgroundColor: '#198a71', borderColor: '#198a71', pointStyle: 'rectRot',
-      pointRadius: 7, pointHoverRadius: 9, fill: false });
-    datasets.push({ key: 'payload', label: 'Payload (ground estimate)', data: [], showLine: false,
-      backgroundColor: '#ffdf00', borderColor: '#574900', pointStyle: 'rectRot',
       pointRadius: 7, pointHoverRadius: 9, fill: false });
     datasets.push({ key: 'anchors', label: 'UWB anchors', data: [], borderColor: '#58677b',
       backgroundColor: '#58677b', pointStyle: 'rect', pointRadius: 5, borderDash: [4, 4],
@@ -207,8 +202,6 @@ class FleetMap {
           }));
           this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
           this.tagReports = {};
-          this.payloadReports = {};
-          this.lastPayload = null;
         }
         this.room = candidate;
         this.targets = {};
@@ -333,36 +326,6 @@ class FleetMap {
     });
     return Array.from(groups.values()).sort((a, b) => a.id - b.id)
       .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x / tag.count, y: tag.y / tag.count }));
-  }
-
-  updatePayloadPoint(id, message) {
-    const header = message.header || {};
-    const stamp = header.stamp && header.stamp.secs + header.stamp.nsecs / 1e9;
-    const frame = roomFrame(header.frame_id);
-    const previous = this.payloadReports[id];
-    const point = message.point;
-    if (!frame || !Number.isFinite(stamp) || stamp <= 0 ||
-        !Number.isInteger(message.generation) || message.generation !== drones[id].fusionGeneration ||
-        typeof message.valid !== 'boolean' ||
-        (message.valid && (!point || ![point.x, point.y, point.z].every(Number.isFinite))) ||
-        (previous && (stamp < previous.stamp || (stamp === previous.stamp && message.valid)))) return;
-    // Invalidations can carry the same source stamp as the point they clear.
-    this.payloadReports[id] = { frame, stamp, point: message.valid ? point : null, receivedAt: Date.now() };
-    this.render();
-  }
-
-  mappedPayload() {
-    if (!this.room || !this.layoutUsable) return [];
-    const now = Date.now();
-    let x = 0, y = 0, count = 0;
-    for (const [id, report] of Object.entries(this.payloadReports)) {
-      if (!report.point || !drones[id].connected || report.frame !== this.room.frame ||
-          now - report.receivedAt > 750 || !this.hasMatchingReport(id)) continue;
-      x += report.point.x;
-      y += report.point.y;
-      count++;
-    }
-    return count ? [{ x: x / count, y: y / count }] : [];
   }
 
   drawTagLabels(chart) {
@@ -577,16 +540,9 @@ class FleetMap {
     });
     document.getElementById('target-send').disabled = !this.canSendTarget(selected);
     document.getElementById('target-stop').disabled = !selected || !drones[selected].connected;
-    let lastSeenPayload = null;
     this.chart.data.datasets.forEach(dataset => {
       if (dataset.key === 'apriltags') {
         dataset.data = this.mappedTags().map(tag => ({ x: tag.x, y: tag.y }));
-      } else if (dataset.key === 'payload') {
-        const [livePayload] = this.mappedPayload();
-        if (livePayload) this.lastPayload = livePayload;
-        else lastSeenPayload = this.lastPayload;
-        dataset.data = this.lastPayload ? [this.lastPayload] : [];
-        dataset.label = lastSeenPayload ? 'Payload (last seen)' : 'Payload (ground estimate)';
       } else if (dataset.key === 'anchors') {
         dataset.data = this.room ? [...this.room.anchors, this.room.anchors[0]] : [];
       } else if (dataset.key === 'target') {
@@ -625,8 +581,6 @@ class FleetMap {
         return x < xTicks.min || x > xTicks.max || y < yTicks.min || y > yTicks.max;
       }).map(dataset => dataset.label);
     document.getElementById('map-stream-status').textContent = [
-      lastSeenPayload ? 'Payload last seen at (' + lastSeenPayload.x.toFixed(2) + ', ' +
-        lastSeenPayload.y.toFixed(2) + ') m' : '',
       omitted.length ? 'Hidden until aligned to ' + this.room.frame + ': ' + omitted.join(', ') : '',
       outside.length ? 'Outside current view: ' + outside.join(', ') : ''
     ].filter(Boolean).join('. ');
@@ -639,7 +593,6 @@ class FleetMap {
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     delete this.tagReports[id];
-    delete this.payloadReports[id];
     this.refreshAnchors();
   }
 }
@@ -652,8 +605,6 @@ class DroneSession {
     this.detectionReceivedAt = null;
     this.tagOverlayStamp = null;
     this.tagOverlayReceivedAt = null;
-    this.payloadReceivedAt = null;
-    this.payloadStamp = null;
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
@@ -684,7 +635,6 @@ class DroneSession {
     });
     this.field('camera').addEventListener('error', () => {
       this.clearTagOverlay();
-      this.clearPayload('Payload camera unavailable');
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
         this.field('batteryFill').setAttribute('width', 0);
@@ -697,7 +647,7 @@ class DroneSession {
   field(name) {
     if (name === 'camera') return document.getElementById(this.id + '-camera');
     if (name === 'detection') return document.getElementById(this.id + '-detection');
-    if (['payloadStatus', 'payloadOverlay', 'payloadBox', 'payloadCenter', 'tagOverlay', 'tagOutline'].includes(name)) return document.getElementById(this.id + '-' + name);
+    if (['tagOverlay', 'tagOutline'].includes(name)) return document.getElementById(this.id + '-' + name);
     return this.root.querySelector('[data-field="' + name + '"]');
   }
   get connected() { return !!(this.ros && this.ros.isConnected); }
@@ -763,52 +713,6 @@ class DroneSession {
       this.detectionReceivedAt = null;
       this.setDetection('No tag data', 'offline');
     }
-    if (this.payloadReceivedAt !== null && Date.now() - this.payloadReceivedAt > 750) this.clearPayload();
-  }
-
-  clearPayload(text = 'No payload data') {
-    this.payloadReceivedAt = null;
-    this.field('payloadOverlay').setAttribute('visibility', 'hidden');
-    this.field('payloadStatus').textContent = text;
-    this.field('payloadStatus').dataset.state = 'offline';
-  }
-
-  updatePayload(message) {
-    const stamp = message.header && message.header.stamp;
-    if (!stamp || !Number.isInteger(stamp.secs) || stamp.secs <= 0 ||
-        !Number.isInteger(stamp.nsecs) || stamp.nsecs < 0 || stamp.nsecs >= 1e9 ||
-        typeof message.camera_online !== 'boolean' || typeof message.detected !== 'boolean') return this.clearPayload();
-    if (!message.camera_online) return this.clearPayload('Payload camera unavailable');
-    const { image_width: width, image_height: height, bbox_x: x, bbox_y: y,
-      bbox_width: w, bbox_height: h, center_x: cx, center_y: cy, area } = message;
-    if (![width, height].every(n => Number.isInteger(n) && n > 0) ||
-        (message.detected && (![x, y, w, h].every(Number.isInteger) ||
-          ![cx, cy, area].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 ||
-          x + w > width || y + h > height || cx < x || cx >= x + w || cy < y || cy >= y + h ||
-          area <= 0 || area > w * h))) return this.clearPayload();
-    const time = stamp.secs + stamp.nsecs / 1e9;
-    const status = this.field('payloadStatus');
-    // Cached reports must not keep a frozen camera observation alive.
-    if (this.payloadStamp !== null && time < this.payloadStamp) return;
-    if (time === this.payloadStamp) {
-      // A detector can withdraw a previous detection when the height gate closes.
-      if (message.detected || status.dataset.state !== 'detected') return;
-    } else {
-      this.payloadReceivedAt = Date.now();
-    }
-    this.payloadStamp = time;
-    status.textContent = message.detected ? 'Yellow payload detected' : 'No yellow payload detected';
-    status.dataset.state = message.detected ? 'detected' : 'none';
-    const overlay = this.field('payloadOverlay');
-    overlay.setAttribute('visibility', message.detected && this.field('camera').getAttribute('src') !== 'nocamera.svg' ? 'visible' : 'hidden');
-    if (!message.detected) return;
-    // Match the video's object-fit:contain layout, including letterboxing.
-    // ROS observations and the MJPEG video arrive independently: display aid only.
-    overlay.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
-    const box = this.field('payloadBox');
-    Object.entries({ x, y, width: w, height: h }).forEach(([name, value]) => box.setAttribute(name, value));
-    this.field('payloadCenter').setAttribute('cx', cx);
-    this.field('payloadCenter').setAttribute('cy', cy);
   }
 
   refreshLocalization() {
@@ -905,8 +809,6 @@ class DroneSession {
     this.rangeStamp = null;
     this.detectionReceivedAt = null;
     this.setDetection('No tag data', 'offline');
-    this.payloadStamp = null;
-    this.clearPayload();
     this.fusedStamp = null;
     this.fusionGeneration = null;
     this.clearFusion();
@@ -1033,8 +935,6 @@ class DroneSession {
     };
     subscribe('/pidrone/apriltag/detections', 'pidrone_pkg/TagDetection', message => this.updateDetection(message),
       { throttle_rate: 500, queue_length: 1 });
-    subscribe('/pidrone/payload/detection', 'pidrone_pkg/PayloadDetection', message => this.updatePayload(message));
-    subscribe('/pidrone/payload/map_point', 'pidrone_pkg/PayloadMapPoint', message => fleetMap.updatePayloadPoint(this.id, message));
     subscribe('/pidrone/apriltag/map', 'pidrone_pkg/TagMap', message => fleetMap.updateTagMap(this.id, message));
     subscribe('/pidrone/localization/fused', 'geometry_msgs/PoseWithCovarianceStamped', message => this.updateFusion(message),
       { throttle_rate: 200, queue_length: 1 });
@@ -1049,8 +949,6 @@ class DroneSession {
         delete fleetMap.anchorStamps[this.id];
         delete fleetMap.anchorReports[this.id];
         delete fleetMap.tagReports[this.id];
-        delete fleetMap.payloadReports[this.id];
-        fleetMap.lastPayload = null;
         fleetMap.refreshAnchors();
       }
       this.fusionGeneration = message.data;

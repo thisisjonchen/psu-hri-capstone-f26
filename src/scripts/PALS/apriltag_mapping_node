@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Project floor tags and grounded yellow payload detections into the UWB map.
+"""Project floor AprilTags into the UWB map.
 
 This is independent of flight control. All mapping is on the same ROS master
 as the drone's existing AprilTag detector, UWB localization, and fusion node.
@@ -12,7 +12,7 @@ from collections import deque
 import numpy as np
 import rospy
 from geometry_msgs.msg import Point, PoseWithCovarianceStamped
-from pidrone_pkg.msg import PayloadDetection, PayloadMapPoint, TagDetection, TagMap
+from pidrone_pkg.msg import TagDetection, TagMap
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, UInt32
 
@@ -28,7 +28,6 @@ class AprilTagMappingNode(object):
                           rospy.get_param('~tag_sizes_m', {}).items()}
         if any(not np.isfinite(size) or size <= 0 for size in self.tag_sizes.values()):
             raise ValueError('Tag sizes must be positive meters')
-        self.payload_plane_z = float(rospy.get_param('~payload_plane_z', self.plane_z))
         self.max_distance = float(rospy.get_param('~max_tag_distance', 3.0))
         self.max_skew = float(rospy.get_param('~max_image_pose_skew', 0.35))
         self.max_jump = float(rospy.get_param('~max_tag_jump', 0.35))
@@ -40,7 +39,7 @@ class AprilTagMappingNode(object):
             float(rospy.get_param('~camera_azimuth_deg', 0.0)),
             float(rospy.get_param('~camera_image_roll_deg', 0.0)))
         if (self.camera_offset.shape != (3,) or not np.all(np.isfinite(self.camera_offset))
-                or not np.isfinite(self.plane_z) or not np.isfinite(self.payload_plane_z)
+                or not np.isfinite(self.plane_z)
                 or not 0 < self.max_skew <= 1
                 or not 0 < self.max_jump or not 0 < self.max_distance
                 or not 1 <= self.min_samples <= 100):
@@ -51,15 +50,11 @@ class AprilTagMappingNode(object):
         self.camera_info = None
         self.generation = None
         self.last_detection_stamp = None
-        self.last_payload_stamp = None
-        self.payload_point = None
         self.tags = {}  # id -> recent observations and last confirmed position
         self.publisher = rospy.Publisher('/pidrone/apriltag/map', TagMap, queue_size=1, latch=True)
-        self.payload_publisher = rospy.Publisher('/pidrone/payload/map_point', PayloadMapPoint, queue_size=1)
         self.publish_map()
         rospy.Subscriber(rospy.get_param('~detection_topic', '/pidrone/apriltag/detections'),
                          TagDetection, self.detection_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/payload/detection', PayloadDetection, self.payload_callback, queue_size=1)
         rospy.Subscriber(rospy.get_param('~pose_topic', '/pidrone/localization/fused'),
                          PoseWithCovarianceStamped, self.pose_callback, queue_size=2)
         rospy.Subscriber(rospy.get_param('~camera_info_topic', '/raspicam_node/camera_info'),
@@ -90,7 +85,6 @@ class AprilTagMappingNode(object):
     def generation_callback(self, msg):
         with self.lock:
             if self.generation is not None and self.generation != msg.data:
-                self.clear_payload()
                 self.tags.clear()
                 self.pose = None
                 self.poses.clear()
@@ -105,7 +99,6 @@ class AprilTagMappingNode(object):
             if not self.ready:
                 self.pose = None
                 self.poses.clear()
-                self.clear_payload()
 
     def pose_callback(self, msg):
         with self.lock:
@@ -135,7 +128,6 @@ class AprilTagMappingNode(object):
                     not all(np.isfinite(v) for v in list(msg.K) + list(msg.D)) or
                     msg.K[0] <= 0 or msg.K[4] <= 0):
                 self.camera_info = None
-                self.clear_payload()
                 rospy.logwarn_throttle(5, 'Invalid camera_info: model=%s, size=%dx%d, K=%s, D=%s; AprilTag map paused',
                                        msg.distortion_model, msg.width, msg.height, msg.K, msg.D)
                 return
@@ -197,52 +189,6 @@ class AprilTagMappingNode(object):
                                  rotation, self.camera_offset, self.rotation,
                                  plane_z=plane_z, max_distance=self.max_distance,
                                  distortion_model=info.distortion_model)
-
-    def clear_payload(self):
-        if self.payload_point is None:
-            return
-        msg = PayloadMapPoint()
-        msg.header = self.payload_point.header
-        msg.generation = self.payload_point.generation
-        self.payload_point = None
-        self.payload_publisher.publish(msg)
-
-    def payload_callback(self, message):
-        with self.lock:
-            if (self.generation is None or not self.ready or self.pose is None or
-                    self.camera_info is None or not message.camera_online or
-                    not self._fresh(message)):
-                self.clear_payload()
-                return
-            pose = self.projection_pose(message)
-            if pose is None:
-                self.clear_payload()
-                return
-            observation_time = self._stamp(message)
-            if (self.last_payload_stamp is not None and
-                    (observation_time < self.last_payload_stamp or
-                     (observation_time == self.last_payload_stamp and message.detected))):
-                return
-            self.last_payload_stamp = observation_time
-            info = self.camera_info
-            if (not message.detected or message.header.frame_id != info.header.frame_id or
-                    not (0 <= message.center_x < info.width and 0 <= message.center_y < info.height)):
-                self.clear_payload()
-                return
-            try:
-                position = self.project((message.center_x, message.center_y), self.payload_plane_z, pose)
-            except ValueError as error:
-                rospy.logwarn_throttle(5, 'Payload geometry rejected: {}'.format(error))
-                self.clear_payload()
-                return
-            msg = PayloadMapPoint()
-            msg.header.stamp = message.header.stamp
-            msg.header.frame_id = self.frame
-            msg.generation = self.generation
-            msg.valid = True
-            msg.point.x, msg.point.y, msg.point.z = [float(v) for v in position]
-            self.payload_point = msg
-            self.payload_publisher.publish(msg)
 
     def detection_callback(self, message):
         with self.lock:
