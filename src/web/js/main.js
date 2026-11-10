@@ -613,6 +613,7 @@ class DroneSession {
     this.modeReceivedAt = null;
     this.coordinationReceivedAt = null;
     this.preflightReceivedAt = null;
+    this.preflightStamp = null;
     this.preflightReady = false;
     this.routineReadyAt = null;
     this.root = document.getElementById(id);
@@ -736,6 +737,7 @@ class DroneSession {
     if (this.preflightReceivedAt !== null &&
         (Date.now() < this.preflightReceivedAt || Date.now() - this.preflightReceivedAt > 500)) {
       this.preflightReceivedAt = null;
+      this.preflightReady = false;
       this.field('flightMode').title = 'Preflight unavailable';
     }
     if (this.coordinationReceivedAt !== null &&
@@ -815,6 +817,7 @@ class DroneSession {
     this.coordinationReceivedAt = null;
     this.setCoordination('unavailable');
     this.preflightReceivedAt = null;
+    this.preflightStamp = null;
     this.field('flightMode').title = 'Preflight unavailable';
     this.preflightReady = false;
     ['battery', 'flightMode', 'height', 'speed', 'verticalSpeed', 'fusedX', 'fusedY', 'fusedZ'].forEach(name => {
@@ -991,14 +994,20 @@ class DroneSession {
     });
     subscribe('/pidrone/coordination/preflight', 'pidrone_pkg/FlightReadiness', message => {
       if (typeof message.reason !== 'string' || message.mode !== this.field('flightMode').textContent) return;
-      const now = Date.now();
       const stamp = message.header && message.header.stamp;
-      const time = stamp && (stamp.secs + stamp.nsecs / 1e9) * 1000;
-      const current = message.paired === coordinationPaired && Number.isFinite(time) &&
-        time > 0 && time <= now && now - time <= 500;
-      // Repeated reports must not make old sensor data look fresh.
-      this.preflightReceivedAt = message.ready === true && current ? time : now;
-      this.preflightReady = message.ready === true && current;
+      const time = stamp && stamp.secs + stamp.nsecs / 1e9;
+      // Age is measured by arrival on this computer, so drone and laptop clocks may differ.
+      // Only a report with a newer drone timestamp grants or refreshes readiness; a
+      // repeated report can still refuse, so old sensor data never looks fresh.
+      const newer = Number.isFinite(time) && time > 0 &&
+        (this.preflightStamp === null || time > this.preflightStamp);
+      if (newer) {
+        this.preflightStamp = time;
+        this.preflightReceivedAt = Date.now();
+      }
+      this.preflightReady = message.ready === true && message.paired === coordinationPaired &&
+        (newer || this.preflightReady);
+      const current = this.preflightReady;
       const status = this.field('flightMode');
       if (message.mode === 'FLYING') {
         status.title = 'In flight';
@@ -1260,7 +1269,8 @@ function publishCoordinationSelection() {
   if (disarmed) {
     coordinationPaired = separationGuardEnabled && connected.length === 2 && connected.every(drone =>
       drone.fusedPose && drone.fusionReadyAt !== null && drone.fusedReceivedAt !== null &&
-      [drone.fusionReadyAt, drone.fusedReceivedAt, drone.fusedStamp * 1000].every(stamp =>
+      // Arrival times only: updateFusion already requires each pose stamp to advance.
+      [drone.fusionReadyAt, drone.fusedReceivedAt].every(stamp =>
         Number.isFinite(stamp) && now - stamp >= 0 && now - stamp <= 500));
   }
   if (previous !== coordinationPaired) connected.forEach(drone => {

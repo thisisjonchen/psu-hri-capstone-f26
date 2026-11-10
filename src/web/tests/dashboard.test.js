@@ -492,11 +492,11 @@ test('automatic pairing requires fresh room positions and stays latched after ar
   readyRoom(app, a, 1.1);
   readyRoom(app, b, 1.1);
   assert.equal(last(a, 'coordination').data, true);
-  app.advanceTime(1);
+  app.advanceTime(501);
   app.receive(a, '/pidrone/localization/ready', { data: true });
   app.receive(b, '/pidrone/localization/ready', { data: true });
   app.maintenanceTimers.forEach(callback => callback());
-  assert.equal(last(a, 'coordination').data, false, 'fresh readiness cannot renew an old position stamp');
+  assert.equal(last(a, 'coordination').data, false, 'fresh readiness cannot renew an old position');
   readyRoom(app, a, 1.601);
   readyRoom(app, b, 1.601);
   app.receive(a, '/pidrone/mode', { mode: 'ARMED' });
@@ -562,7 +562,7 @@ test('separation toggle defaults off, applies to both drones, and locks outside 
   assert.equal(a.publishers.mode.messages.length, 0, 'guard changes never issue flight commands');
 });
 
-test('flight-state tooltip shows preflight refusal and expires grants at the source timestamp', () => {
+test('flight-state tooltip shows preflight refusal and expires grants after arrival', () => {
   const app = dashboard();
   const toggle = app.elements.get('separation-guard');
   toggle.checked = true;
@@ -573,17 +573,23 @@ test('flight-state tooltip shows preflight refusal and expires grants at the sou
   const report = { ...stamp(1), mode: 'DISARMED', paired: true, ready: false, reason: 'uncertainty_too_large' };
   app.receive(a, '/pidrone/coordination/preflight', report);
   assert.match(a.field('flightMode').title, /blocked · uncertainty too large/);
-  report.ready = true;
-  report.reason = 'ready';
-  app.receive(a, '/pidrone/coordination/preflight', report);
+  const grant = { ...report, ready: true, reason: 'ready' };
+  app.receive(a, '/pidrone/coordination/preflight', grant);
+  assert.equal(a.field('flightMode').title, 'Preflight unavailable', 'a repeated stamp cannot grant');
+  Object.assign(grant, stamp(2));
+  app.receive(a, '/pidrone/coordination/preflight', grant);
   assert.match(a.field('flightMode').title, /ready · paired/);
   app.advanceTime(400);
-  app.receive(a, '/pidrone/coordination/preflight', report);
+  app.receive(a, '/pidrone/coordination/preflight', grant);
   app.advanceTime(101);
   app.maintenanceTimers.forEach(callback => callback());
+  assert.equal(a.field('flightMode').title, 'Preflight unavailable', 'a repeat does not extend a grant');
+  app.receive(a, '/pidrone/coordination/preflight', grant);
   assert.equal(a.field('flightMode').title, 'Preflight unavailable');
-  app.receive(a, '/pidrone/coordination/preflight', report);
-  assert.equal(a.field('flightMode').title, 'Preflight unavailable');
+  // Freshness follows arrival, so a drone clock far from this computer's still grants.
+  for (const drone of [a, b]) readyRoom(app, drone, 1e9);
+  app.receive(a, '/pidrone/coordination/preflight', { ...grant, ...stamp(1e9) });
+  assert.match(a.field('flightMode').title, /ready · paired/);
   a.disconnect();
   assert.equal(a.field('flightMode').title, 'Preflight unavailable');
 });
@@ -755,16 +761,16 @@ test('synchronized start waits for both routines and fresh preflight grants', ()
   assert.deepEqual(starts(), [0, 0], 'routine readiness alone cannot release either drone');
   const report = { ...stamp(1.6), mode: 'DISARMED', paired: true, ready: true, reason: 'ready' };
   app.receive(a, '/pidrone/coordination/preflight', {
-    ...report, ...stamp(0), ready: false, reason: 'flight_setup_unavailable'
+    ...report, ...stamp(1), ready: false, reason: 'flight_setup_unavailable'
   });
   app.receive(b, '/pidrone/coordination/preflight', report);
   assert.deepEqual(starts(), [0, 0], 'one blocked drone must hold both routines');
   assert.match(app.elements.get('commandFeedback').textContent, /drone1: Preflight blocked.*flight setup unavailable/);
   app.receive(a, '/pidrone/coordination/preflight', { ...report, ...stamp(1) });
-  assert.deepEqual(starts(), [0, 0], 'a stale source timestamp cannot grant a start');
+  assert.deepEqual(starts(), [0, 0], 'a repeated source timestamp cannot grant a start');
   app.receive(a, '/pidrone/coordination/preflight', { ...report, paired: false });
   assert.deepEqual(starts(), [0, 0], 'a grant for a different flight setup cannot release the run');
-  app.receive(a, '/pidrone/coordination/preflight', report);
+  app.receive(a, '/pidrone/coordination/preflight', { ...report, ...stamp(1.7) });
   assert.deepEqual(starts(), [1, 1]);
   for (const drone of [a, b]) assert.equal(last(drone, 'coordination').data, true);
   app.receive(a, '/pidrone/routine/ready', {});
