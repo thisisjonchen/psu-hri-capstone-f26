@@ -1,10 +1,12 @@
 #!/usr/bin/env python
-"""Climb straight to 1 m, hold, descend to 0.25 m, move 0.3556 m forward (+Y), then land."""
+"""Climb to --height, move --forward meters (+Y), hover until --seconds after the start,
+then descend to 0.2032 m, move 0.1 m forward and land."""
 
 import argparse
 import math
 import os
 import sys
+import time
 
 import rospy
 
@@ -12,19 +14,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from drone_controller import Drone
 
 
-CLIMB_HEIGHT_M = 1.0
-DESCEND_HEIGHT_M = 0.25
-FORWARD_M = 0.3556 # 14 inches
+LANDING_STEP_HEIGHT_M = 0.2032 # 8 inches
+LANDING_STEP_FORWARD_M = 0.1
+MAX_HEIGHT_M = 2.0 # Guards against a mistyped --height.
+FORWARD_SPEED_M_S = 0.15 # Drone.move_forward default
+
+
+def forward(drone, meters):
+    drone.unlock_xy()
+    rospy.loginfo('Moving forward %.4f m', meters)
+    drone.move_forward(meters, timeout=max(15.0, meters / FORWARD_SPEED_M_S + 10.0))
+    drone.lock_xy()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fly', action='store_true', help='run the flight')
-    parser.add_argument('--seconds', type=float, default=5.0,
-                        help='hold duration at 1 m in seconds (default: 5)')
+    parser.add_argument('--height', type=float, required=True,
+                        help='hover height in meters, above 0.2032 and at most 2.0')
+    parser.add_argument('--forward', type=float, required=True,
+                        help='forward distance at that height in meters (more than 0.06)')
+    parser.add_argument('--seconds', type=float, required=True,
+                        help='time from the synchronized start until landing begins, in seconds')
     args = parser.parse_args()
-    if math.isnan(args.seconds) or math.isinf(args.seconds) or args.seconds <= 0:
-        parser.error('--seconds must be finite and positive')
+    if any(math.isnan(v) or math.isinf(v) for v in (args.height, args.forward, args.seconds)):
+        parser.error('arguments must be finite')
+    if not LANDING_STEP_HEIGHT_M < args.height <= MAX_HEIGHT_M:
+        parser.error('--height must be above 0.2032 m and at most 2.0 m')
+    if args.forward <= 0.06:
+        parser.error('--forward must be greater than the 0.06 m arrival tolerance')
+    if args.seconds <= 0:
+        parser.error('--seconds must be positive')
     if not args.fly:
         parser.print_help()
         return
@@ -34,15 +54,17 @@ def main():
     drone.ready()
     try:
         # One takeoff ramp to the final height, without stopping at the default 0.25 m.
-        drone.takeoff(hold_xy=True, height=CLIMB_HEIGHT_M)
-        rospy.loginfo('Holding %.2f m for %.2f seconds', CLIMB_HEIGHT_M, args.seconds)
-        drone.hover(args.seconds)
-        rospy.loginfo('Descending to %.2f m', DESCEND_HEIGHT_M)
-        drone.move_to_altitude(DESCEND_HEIGHT_M)
-        drone.unlock_xy()
-        rospy.loginfo('Moving forward %.4f m', FORWARD_M)
-        drone.move_forward(FORWARD_M)
-        drone.lock_xy()
+        drone.takeoff(hold_xy=True, height=args.height)
+        forward(drone, args.forward)
+        remaining = drone.start_at + args.seconds - time.time()
+        if remaining > 0:
+            rospy.loginfo('Hovering %.1f s until %.1f s after the start', remaining, args.seconds)
+            drone.hover(remaining)
+        else:
+            rospy.logwarn('Climb and move took %.1f s past --seconds; landing now', -remaining)
+        rospy.loginfo('Descending to %.4f m', LANDING_STEP_HEIGHT_M)
+        drone.move_to_altitude(LANDING_STEP_HEIGHT_M)
+        forward(drone, LANDING_STEP_FORWARD_M)
     finally:
         drone.finish(hold_xy=True)
 
