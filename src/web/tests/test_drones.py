@@ -53,15 +53,13 @@ class ExecuteTest(unittest.TestCase):
         self.running = 0
         with self.assertRaisesRegex(RuntimeError, 'already running'):
             drones.execute('drone1', 'hover_routine.py', '--fly')
-        with self.assertRaisesRegex(RuntimeError, 'routine is running'):
-            drones.node_action('drone1', 'restart')
         self.assertFalse(any('stuff' in command or 'pals-start' in command for command in self.commands))
 
     def test_restart_reports_combined_launcher_result_and_failure(self):
         for code, result in [(0, 'Nodes restarted and localized. Gyro mean: 0.001 deg/s.'),
                              (1, 'Warm reboot incomplete: Incomplete MSP reply.')]:
             with self.subTest(code=code), mock.patch.object(
-                    drones, 'run', side_effect=[(1, ''), (code, 'shell banner\n' + result + '\n')]) as run:
+                    drones, 'run', return_value=(code, 'shell banner\n' + result + '\n')) as run:
                 if code:
                     with self.assertRaisesRegex(RuntimeError, 'Warm reboot incomplete'):
                         drones.node_action('drone1', 'restart')
@@ -381,93 +379,100 @@ class RestartTest(unittest.TestCase):
                     self.assertEqual(serial.Serial.call_count, 1, 'never verify the old or a different USB device')
 
     @unittest.skipUnless(shutil.which('bash'), 'requires bash')
-    def test_failed_restart_stages_do_not_launch_replacement_nodes(self):
+    def test_restart_starts_replacements_only_after_cleanup_and_fc_reboot(self):
         launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
-        # All hardware commands are shell functions; the helper is never executed.
         stubs = r'''
 flock() { [[ "$failure" != lock ]]; }
 docker() {
     printf '%s\n' "$*" >> "$calls"
     case "$*" in
         'start pidrone_pkg') return 0 ;;
-        *screen\ -ls*) echo '123.pidrone (Detached)' ;;
-        */pidrone/mode*) echo "mode: $mode" ;;
-        *-p\ TOF\ -X\ stuff*) [[ "$failure" != tof_signal ]] ;;
-        'exec pidrone_pkg pgrep -f '* ) return 0 ;;
-        *'[v]l53l1x_node'*'[/]tof.launch'*)
-            [[ "$failure" != tof_exit ]] || { echo 'mock ToF did not stop'; return 1; } ;;
-        *-X\ quit*) [[ "$failure" != quit ]] ;;
-        *'[r]osmaster'*) echo 'mock old serial process still running'; return 1 ;;
-        *) echo "unexpected Docker call: $*"; return 1 ;;
-    esac
-}
-sudo() {
-    [[ "$*" == *' reboot' ]] || return 2
-    [[ "$failure" != reboot ]] || { echo 'mock warm reboot failed'; return 1; }
-}
-mode=$2
-calls=$3
-failure=$4
-source "$1" restart
-'''
-        for mode, failure, message in [
-                ('ARMED', '', 'it must be DISARMED'), ('FLYING', '', 'it must be DISARMED'),
-                ('', 'reboot', 'mock warm reboot failed'), ('DISARMED', 'reboot', 'mock warm reboot failed'),
-                ('DISARMED', 'tof_signal', 'Could not stop the TOF window'),
-                ('DISARMED', 'tof_exit', 'mock ToF did not stop'),
-                ('DISARMED', 'quit', 'Could not stop the screen session'),
-                ('DISARMED', 'process', 'mock old serial process still running'),
-                ('DISARMED', 'lock', 'restart was not queued')]:
-            with self.subTest(mode=mode, failure=failure), TemporaryDirectory() as directory:
-                calls = Path(directory) / 'commands'
-                calls.touch()
-                result = subprocess.run([shutil.which('bash'), '-c', stubs,
-                                         str(launcher), str(launcher), mode, str(calls), failure],
-                                        capture_output=True, text=True)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn('unexpected Docker call', result.stdout)
-                commands = calls.read_text()
-                if failure not in ('quit', 'process'):
-                    self.assertNotIn('-X quit', commands)
-                self.assertNotIn('exec -d pidrone_pkg', commands)
-                self.assertIn(message, result.stdout + result.stderr)
-                if mode in ('ARMED', 'FLYING'):
-                    self.assertNotIn('mock warm reboot', result.stdout)
-
-    @unittest.skipUnless(shutil.which('bash'), 'requires bash')
-    def test_restart_without_nodes_reaches_replacement_launch(self):
-        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
-        stubs = r'''
-flock() { return 0; }
-docker() {
-    printf '%s\n' "$*" >> "$calls"
-    case "$*" in
-        'start pidrone_pkg') return 0 ;;
         *screen\ -ls*) return 1 ;;
-        */pidrone/mode*) return 1 ;;
         'exec pidrone_pkg pgrep '*) return 1 ;;
-        *'for _ in $(seq 60)'*) return 0 ;;
         'exec -d pidrone_pkg '*) echo 'mock replacement launch reached'; return 1 ;;
         *) echo "unexpected Docker call: $*"; return 1 ;;
     esac
 }
-sudo() { echo 'mock FC reboot verified'; }
+sudo() {
+    [[ "$*" == *' restart' ]] || return 2
+    echo 'cleanup and FC verification' >> "$calls"
+    [[ "$failure" != reboot ]] || { echo 'mock FC verification failed'; return 1; }
+}
 calls=$2
+failure=$3
 source "$1" restart
 '''
-        with TemporaryDirectory() as directory:
-            calls = Path(directory) / 'commands'
-            result = subprocess.run([shutil.which('bash'), '-c', stubs,
-                                     str(launcher), str(launcher), str(calls)],
-                                    capture_output=True, text=True)
-            self.assertIn('mock replacement launch reached', result.stdout)
-            self.assertNotIn('unexpected Docker call', result.stdout)
-            self.assertNotIn('-X stuff', calls.read_text())
-            self.assertNotIn('-X quit', calls.read_text())
+        for failure in ('', 'reboot', 'lock'):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                calls = Path(directory) / 'commands'
+                calls.touch()
+                result = subprocess.run([shutil.which('bash'), '-c', stubs,
+                                         str(launcher), str(launcher), str(calls), failure],
+                                        capture_output=True, text=True)
+                self.assertNotIn('unexpected Docker call', result.stdout)
+                commands = calls.read_text()
+                if failure:
+                    self.assertNotIn('exec -d pidrone_pkg', commands)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('mock FC verification failed' if failure == 'reboot' else
+                                  'restart was not queued', result.stdout + result.stderr)
+                else:
+                    self.assertIn('mock replacement launch reached', result.stdout)
+                    self.assertLess(commands.index('cleanup and FC verification'),
+                                    commands.index('exec -d pidrone_pkg'))
+
+    def test_full_shutdown_recovers_stuck_nodes_but_requires_disarmed_and_stopped_container(self):
+        cases = [(None, None), ('missing', None), ('hung', None), ('timeout', None),
+                 ('armed', 'reports DISARMED'), ('unknown', 'reports DISARMED'),
+                 ('fc_query', 'Could not check the FC'), ('owned', 'owned'),
+                 ('fc_armed', 'armed'), ('stop_failed', 'Could not stop the drone container'),
+                 ('still_running', 'not confirmed stopped')]
+        for fault, error in cases:
+            with self.subTest(fault=fault):
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(command)
+                    status, output = 0, ''
+                    if 'pgrep' in command:
+                        status = 2 if fault == 'fc_query' else int(fault in ('missing', 'owned', 'fc_armed'))
+                    elif '-ic' in command:
+                        output = 'mode: ARMED' if fault == 'armed' else 'mode: "DISARMED"'
+                        status = 124 if fault == 'unknown' else 0
+                    elif '-c' in command:
+                        if fault == 'timeout':
+                            raise subprocess.TimeoutExpired(command, 20)
+                        status = int(fault == 'hung')
+                    elif command[1] == 'stop':
+                        status = int(fault == 'stop_failed')
+                    elif command[1] == 'inspect':
+                        output = 'true' if fault == 'still_running' else 'false'
+                    else:
+                        self.fail('Unexpected command: %r' % command)
+                    return SimpleNamespace(returncode=status, stdout=output)
+                serial = SimpleNamespace(Serial=mock.MagicMock())
+                with mock.patch.object(warm_reboot_fc, 'run', side_effect=run), \
+                        mock.patch.dict(sys.modules, {'serial': serial}), \
+                        mock.patch.object(warm_reboot_fc, 'port_unused',
+                                          side_effect=RuntimeError('owned') if fault == 'owned' else None), \
+                        mock.patch.object(warm_reboot_fc, 'check_disarmed',
+                                          side_effect=RuntimeError('armed') if fault == 'fc_armed' else None) as check:
+                    if error:
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            warm_reboot_fc.stop_all_nodes('/dev/serial/by-id/test')
+                    else:
+                        warm_reboot_fc.stop_all_nodes('/dev/serial/by-id/test')
+                    if fault in ('armed', 'unknown', 'fc_query', 'owned', 'fc_armed'):
+                        self.assertFalse(any('-c' in c or c[1] == 'stop' for c in calls))
+                    elif fault != 'stop_failed':
+                        self.assertEqual(calls[-2:], [
+                            ['docker', 'stop', '--time', '5', 'pidrone_pkg'],
+                            ['docker', 'inspect', '--format', '{{.State.Running}}', 'pidrone_pkg']])
+                    if fault == 'missing':
+                        check.assert_called_once()
 
     def test_warm_reboot_with_stopped_nodes_still_verifies_fc(self):
-        for localization_status in (1, 2):
-            with self.subTest(localization_status=localization_status), TemporaryDirectory() as directory:
+        for restart, localization_status in ((False, 1), (False, 2), (True, 1), (True, 2)):
+            with self.subTest(restart=restart, status=localization_status), TemporaryDirectory() as directory:
                 home = Path(directory)
                 (home / 'catkin_ws').mkdir()
                 (home / 'catkin_ws/pals.ports').write_text(
@@ -490,16 +495,25 @@ source "$1" restart
                         mock.patch.object(warm_reboot_fc, 'stop_fc', return_value=False), \
                         mock.patch.object(warm_reboot_fc, 'run', return_value=SimpleNamespace(
                             returncode=localization_status, stdout='process check')) as run, \
+                        mock.patch.object(warm_reboot_fc, 'stop_all_nodes',
+                                          side_effect=RuntimeError('container stop failed')
+                                          if localization_status == 2 else None) as stop_all, \
                         mock.patch.object(warm_reboot_fc, 'reboot_controller') as reboot:
+                    order = mock.Mock()
+                    order.attach_mock(stop_all, 'stop')
+                    order.attach_mock(reboot, 'reboot')
                     if localization_status == 2:
-                        with self.assertRaisesRegex(RuntimeError, 'Could not check localization'):
-                            warm_reboot_fc.warm_reboot()
+                        with self.assertRaisesRegex(RuntimeError, 'container stop failed' if restart else
+                                                    'Could not check localization'):
+                            warm_reboot_fc.warm_reboot(restart=restart)
                         reboot.assert_not_called()
                     else:
-                        warm_reboot_fc.warm_reboot()
+                        warm_reboot_fc.warm_reboot(restart=restart)
                         reboot.assert_called_once_with(port)
+                        if restart:
+                            self.assertEqual(order.mock_calls, [mock.call.stop(port), mock.call.reboot(port)])
                         self.assertIn('PALS_FC_PORT=/dev/ttyACM2', environment.read_text())
-                    self.assertEqual(run.call_count, 1)
+                    self.assertEqual(run.call_count, 0 if restart else 1)
 
     def test_restart_readiness_requires_fresh_tof_and_localization(self):
         launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'

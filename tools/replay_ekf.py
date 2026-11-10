@@ -74,8 +74,10 @@ class Replay:
         if not 0 <= self.camera_delay <= float(profile.get('fusion_delay_s', .25)):
             raise ValueError('Camera delay must fit within the fusion delay')
         self.uwb_delay = float(profile.get('uwb_delay_s', 0.))
-        if not 0 <= self.uwb_delay <= float(profile.get('fusion_delay_s', .25)):
-            raise ValueError('UWB delay must fit within the fusion delay')
+        if not np.isfinite(self.uwb_delay) or self.uwb_delay < 0:
+            raise ValueError('UWB delay must be finite and nonnegative')
+        if fuse_uwb and self.uwb_delay > float(profile.get('fusion_delay_s', .25)):
+            raise ValueError('UWB delay must fit within the fusion delay when fusing UWB')
         self.stationary_intervals = []
         for interval in profile.get('stationary_intervals_s', []):
             start, end = _array(interval, (2,))

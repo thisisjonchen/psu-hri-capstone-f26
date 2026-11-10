@@ -1163,7 +1163,7 @@ test('terminal lifecycle handles startup failure, detachment and restart reconne
   assert.equal(app.elements.get('drone1-connectionStatus').title, 'Nodes failed to restart');
 });
 
-test('restart confirms the combined operation and blocks busy drones', async () => {
+test('restart recovers stale routine state but blocks concurrent dashboard actions', async () => {
   let confirmed = false, prompt, restarts = [];
   const context = vm.createContext({ document: { addEventListener() {} },
     window: { confirm(message) { prompt = message; return confirmed; } } });
@@ -1182,10 +1182,11 @@ test('restart confirms the combined operation and blocks busy drones', async () 
   assert.match(prompt, /props off/);
   assert.match(prompt, /disarmed.*floor.*facing map \+Y/);
   confirmed = true;
-  runner.terminals[0].running = true;
+  runner.busy = true;
   await runner.restart();
   assert.deepEqual(restarts, []);
-  runner.terminals[0].running = false;
+  runner.busy = false;
+  runner.terminals[0].running = true;
   runner.terminals.forEach(terminal => { terminal.nodes = false; });
   Object.assign(runner, { select: { value: '', options: [] }, button: {}, restartButton: {} });
   runner.render();
@@ -1196,7 +1197,9 @@ test('restart confirms the combined operation and blocks busy drones', async () 
   runner.terminals[0].running = true;
   await runner.restartTargets(['drone2']);
   assert.deepEqual(restarts, ['drone2'], 'branch restart must only affect its captured targets');
-  assert.throws(() => runner.restartTargets(['drone1']), /Restart could not start/);
+  await runner.restartTargets(['drone1']);
+  assert.deepEqual(restarts, ['drone2', 'drone1'], 'onboard disarmed check decides whether stale routines can be stopped');
+  assert.throws(() => runner.restartTargets(['missing']), /Restart could not start/);
   const terminal = runner.terminals[1];
   terminal.enabled = false;
   terminal.nodes = false;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Warm FC reboot on the Pi host, called under pals-start.sh's maintenance lock."""
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -109,7 +110,49 @@ def reboot_controller(port):
              'keep the drone still and check its USB connection.')
 
 
-def warm_reboot():
+def stop_all_nodes(port):
+    running = run(['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f', '[f]light_controller_node.py'])
+    require(running.returncode in (0, 1), 'Could not check the FC process: ' + running.stdout)
+    if running.returncode == 0:
+        mode = run(['docker', 'exec', 'pidrone_pkg', 'bash', '-ic',
+                    'timeout 5 rostopic echo -n1 /pidrone/mode'])
+        require(mode.returncode == 0 and re.search(r'^mode: [\"\']?DISARMED[\"\']?\s*$', mode.stdout, re.M),
+                'Cannot restart until the running FC reports DISARMED.')
+    else:
+        import serial
+        port_unused(port)
+        with serial.Serial(str(port), 115200, timeout=0.1, write_timeout=3, exclusive=True) as connection:
+            check_disarmed(connection)
+
+    # Keep the master available while nodes release sensors and serial ports.
+    try:
+        graceful = run(['docker', 'exec', 'pidrone_pkg', 'bash', '-c', r'''
+            ulimit -Sn 1024 || exit 1
+            for window in routine PID SE Vision TOF rosbridge web_vid_serv AprilTags UWB TagMap FC; do
+                screen -S pidrone -p "$window" -X stuff '^C' >/dev/null 2>&1 || :
+            done
+            for _ in $(seq 40); do
+                pgrep -f '[r]oslaunch .*\.launch|[f]light_controller_node.py|[p]id_controller.py|[f]usion_localization_node|[e]kf_localization_node|[r]aspicam_node|[v]l53l1x_node|[t]of_node.py|[u]wb_localization_node|[w]eb_video_server|[a]priltag|PALS/[r]outines/' >/dev/null
+                status=$?
+                [[ $status == 1 ]] && exit 0
+                [[ $status == 0 ]] || exit 1
+                sleep 0.25
+            done
+            exit 1
+        '''], timeout=20)
+        clean = graceful.returncode == 0
+    except subprocess.TimeoutExpired:
+        clean = False
+    if not clean:
+        print('Some nodes did not exit cleanly; stopping the container.')
+    stopped = run(['docker', 'stop', '--time', '5', 'pidrone_pkg'])
+    require(stopped.returncode == 0, 'Could not stop the drone container: ' + stopped.stdout)
+    state = run(['docker', 'inspect', '--format', '{{.State.Running}}', 'pidrone_pkg'])
+    require(state.returncode == 0 and state.stdout.strip() == 'false',
+            'Drone container is not confirmed stopped; replacement nodes were not started.')
+
+
+def warm_reboot(restart=False):
     require(os.geteuid() == 0, 'Run through pals-start.sh restart.')
     home = Path('/home/duckie')
     pins = home / 'catkin_ws/pals.ports'
@@ -118,20 +161,24 @@ def warm_reboot():
     require(port.parent == Path('/dev/serial/by-id') and 'SPEEDYBEEF405V3' in port.name
             and port.exists(), 'Pinned SpeedyBee flight controller is unavailable.')
     environment = home / 'catkin_ws/pals.env'
-    require(environment.is_file(), 'Missing resolved serial-port configuration.')
-    stop_fc()
-    localization = ['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
-                    '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']
-    running = run(localization)
-    require(running.returncode in (0, 1), 'Could not check localization: ' + running.stdout)
-    if running.returncode == 0:
-        result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'SE',
-                      '-X', 'stuff', '\x03'])
-        require(result.returncode == 0, 'Could not stop localization: ' + result.stdout)
-        wait_for(lambda: run(localization).returncode == 1, 'Localization did not stop.')
+    if restart:
+        stop_all_nodes(port)
+    else:
+        require(environment.is_file(), 'Missing resolved serial-port configuration.')
+        stop_fc()
+        localization = ['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
+                        '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']
+        running = run(localization)
+        require(running.returncode in (0, 1), 'Could not check localization: ' + running.stdout)
+        if running.returncode == 0:
+            result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'SE',
+                          '-X', 'stuff', '\x03'])
+            require(result.returncode == 0, 'Could not stop localization: ' + result.stdout)
+            wait_for(lambda: run(localization).returncode == 1, 'Localization did not stop.')
     reboot_controller(port)
     # USB enumeration can change the tty name after a reboot.
-    lines = [line for line in environment.read_text().splitlines() if not line.startswith('PALS_FC_PORT=')]
+    lines = environment.read_text().splitlines() if environment.is_file() else []
+    lines = [line for line in lines if not line.startswith('PALS_FC_PORT=')]
     lines.append('PALS_FC_PORT=' + str(port.resolve()))
     environment.write_text('\n'.join(lines) + '\n')
     # The launcher starts FC communication once, with the rest of the nodes.
@@ -147,10 +194,10 @@ def check_gyro():
 
 if __name__ == '__main__':
     try:
-        require(len(sys.argv) == 2 and sys.argv[1] in ('reboot', 'check'),
-                'Usage: warm_reboot_fc.py reboot|check (called by pals-start.sh).')
-        if sys.argv[1] == 'reboot':
-            warm_reboot()
+        require(len(sys.argv) == 2 and sys.argv[1] in ('restart', 'reboot', 'check'),
+                'Usage: warm_reboot_fc.py restart|reboot|check (called by pals-start.sh).')
+        if sys.argv[1] in ('restart', 'reboot'):
+            warm_reboot(restart=sys.argv[1] == 'restart')
         else:
             check_gyro()
     except Exception as error:

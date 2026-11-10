@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Adapt room-frame EKF output for the controller and validate the anchor layout.
 
-The EKF fuses UWB into horizontal position and owns the startup +Y heading.
+The EKF initializes room XY from UWB and owns the startup +Y heading.
 Here, XY corrections reach the controller at a limited speed; velocity passes
 through unchanged. ToF freshness remains part of controller readiness.
 """

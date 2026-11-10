@@ -246,8 +246,6 @@ def node_action(drone, action):
     host(drone)
     if action != 'restart':
         raise ValueError('Unknown node action: %r' % (action,))
-    if routine_running(drone):
-        raise RuntimeError('a routine is running; stop it first')
     code, output = run(drone, START + ' restart 2>&1', timeout=240)
     # Interactive container shells print banners first; the script ends with its result.
     lines = output.strip().splitlines() or ['no output']

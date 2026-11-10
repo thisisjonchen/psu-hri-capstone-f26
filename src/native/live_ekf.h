@@ -85,7 +85,6 @@ struct Snapshot {
     double delay = 0.;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
     double takeoff_deadline = -1.e100;
-    int uwb_rejections = 0;
     std::string fault;
     bool range_ready(double now) const;
     bool ready(double now, const Filter& estimate, std::string& reason) const;
@@ -122,7 +121,6 @@ private:
         bool ground_rest = false;
         std::string sensor;
         Vec rate;
-        cv::Vec2d xy;
         cv::Mat previous, image;
         std::shared_ptr<Camera> camera;
     };
@@ -140,7 +138,6 @@ private:
     std::map<std::pair<double, std::string>, Measurement> measurements_;
     std::vector<Initial> initial_;
     std::deque<Fix> uwb_initial_;
-    int uwb_rejections_ = 0;
     std::int64_t origin_ns_ = 0, last_imu_ns_ = 0, rest_since_ = 0;
     double last_imu_ = 0., closed_through_ = -1.e-9, mode_at_ = -1.e100;
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;

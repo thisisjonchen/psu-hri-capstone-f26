@@ -191,7 +191,6 @@ private:
     }
     void watchdog(const ros::WallTimerEvent&) {
         const auto s=snapshot(); std::string reason;
-        if (s.uwb_rejections>=20) ROS_WARN_THROTTLE(5.,"EKF: %d consecutive UWB fixes rejected",s.uwb_rejections);
         const bool ready=s.ready(ros::Time::now().toSec(),last_published_ ? last_output_ : s.filter,reason);
         publish_ready(!failed_ && ready,reason);
     }

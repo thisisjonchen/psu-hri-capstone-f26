@@ -140,6 +140,36 @@ TEST(EkfOutput, ProjectionUsesSharedRangeGeometryAndPreservesImuFailure) {
     EXPECT_EQ(seed.covariance,actual.covariance);
 }
 
+TEST(EkfOutput, UwbInitializesRoomPositionWithoutChangingMotionAfterStartup) {
+    pals::Profile profile{};
+    profile.acceleration_scale=profile.gyro_scale=1.;
+    profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
+    profile.range_beam=pals::Vec(0.,0.,-1.);
+    profile.delay=.15; profile.uwb_delay=.3;
+    pals::LiveEKF filter(profile);
+    auto tick=[](pals::LiveEKF& f,int i) {
+        const auto ns=1000000000LL+i*10000000LL;
+        f.mode("DISARMED",i*.01);
+        f.range(ns,.05,0.,4.);
+        f.imu(ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},i*.01);
+    };
+    for (int i=1;i<=900;++i) {
+        tick(filter,i);
+        if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.4,-.2,.01);
+    }
+    ASSERT_TRUE(filter.snapshot().initialized);
+    EXPECT_NEAR(filter.filter().position()[0],.4,1.e-9);
+    EXPECT_NEAR(filter.filter().position()[1],-.2,1.e-9);
+    auto baseline=filter;
+    for (int i=901;i<=1100;++i) {
+        if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.48,-.12,.01);
+        tick(filter,i); tick(baseline,i);
+    }
+    EXPECT_TRUE(filter.snapshot().fault.empty());
+    EXPECT_EQ(filter.filter().state,baseline.filter().state);
+    EXPECT_EQ(filter.filter().covariance,baseline.filter().covariance);
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc,argv);
     return RUN_ALL_TESTS();

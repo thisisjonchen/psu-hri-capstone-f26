@@ -200,6 +200,7 @@ class RoutineTerminal {
       this.restarting = false;
     }
     this.nodes = true;
+    this.running = false;
     this.scripts = null;
     if (this.enabled && telemetry.waitUntil === deadline) {
       if (!this.socket) this.attach();
@@ -256,8 +257,7 @@ class RoutineRunner {
       this.select.value = scripts.includes(selected) ? selected : '';
     }
     this.button.disabled = this.busy || !this.select.value || !targets.length || !targets.every(terminal => terminal.ready);
-    this.restartButton.disabled = this.busy || !targets.length ||
-      targets.some(terminal => terminal.running);
+    this.restartButton.disabled = this.busy || !targets.length;
   }
 
   async run(label, targets, action) {
@@ -289,16 +289,15 @@ class RoutineRunner {
   restart() {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
-    if (this.busy || !targets.length || targets.some(terminal => terminal.running)) return;
+    if (this.busy || !targets.length) return;
     if (!confirmRestart(names)) return;
     return this.restartTargets(targets.map(terminal => terminal.id));
   }
 
   restartTargets(ids) {
     const targets = ids.map(id => this.terminals.find(terminal => terminal.id === id));
-    if (this.busy || !targets.length || targets.some(terminal =>
-      !terminal || terminal.running)) {
-      throw new Error('Restart could not start. Check connections and stop running routines, then use Restart.');
+    if (this.busy || !targets.length || targets.some(terminal => !terminal)) {
+      throw new Error('Restart could not start. Check selected drones and wait for the current action to finish.');
     }
     return this.run('Restarting', targets, async terminal => terminal.enabled ? terminal.restart()
       : (await terminal.post('/api/nodes', { action: 'restart' }, 240000)).output);

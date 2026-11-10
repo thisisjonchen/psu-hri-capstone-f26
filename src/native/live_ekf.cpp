@@ -67,8 +67,8 @@ void Profile::validate() const {
     require(std::isfinite(delay) && delay>=0. && delay<=.4,"Live fusion delay must be in [0, 0.4]");
     require(std::isfinite(camera_delay) && camera_delay>=0. && camera_delay<=delay,
             "Camera delay must fit within the fusion delay");
-    require(std::isfinite(uwb_delay) && uwb_delay>=0. && uwb_delay<=delay,
-            "UWB delay must fit within the fusion delay");
+    require(std::isfinite(uwb_delay) && uwb_delay>=0.,
+            "Startup UWB delay must be finite and nonnegative");
 }
 void Filter::initialize(double x, double y, double xy_variance, double height, const Quaternion& q,
                         const Vec& ba, const Vec& bg) {
@@ -338,18 +338,14 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     queue(m);
 }
 void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
+    if (origin_ns_ || !fault_.empty()) return;
     stamp-=std::llround(profile_.uwb_delay*1.e9);
     if (stamp<=0 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
-    if (!origin_ns_) {
-        // Average fixes from the current rest period for the starting room position.
-        if (!rest_since_ || stamp<rest_since_) return;
-        uwb_initial_.push_back({stamp,x,y,variance});
-        return;
-    }
-    if (!fault_.empty()) return;
-    Measurement m; m.stamp=(stamp-origin_ns_)/1.e9; m.sensor="uwb"; m.xy=cv::Vec2d(x,y); m.value=variance;
-    queue(m);
+    // UWB supplies the initial room position; camera/IMU/ToF maintain motion afterward.
+    if (!rest_since_ || stamp<rest_since_) return;
+    uwb_initial_.push_back({stamp,x,y,variance});
 }
+
 bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,const Vec& rate) {
     Vec rest_rate=rate;
     if (origin_ns_) {
@@ -497,19 +493,6 @@ bool LiveEKF::correct(const Measurement& m) {
         Vec rate; if (!mean_rate(m.value,m.end,rate)) return false;
         try { return correct_camera(m,rate); } catch (const cv::Exception&) { return false; }
     }
-    if (m.sensor=="uwb") {
-        // UWB corrects horizontal position only, never velocity, attitude or biases.
-        const Rotation r=rotation(filter_.quaternion());
-        const Vec tag=filter_.position()+r*profile_.uwb_offset;
-        const Rotation a=r*skew(profile_.uwb_offset);
-        cv::Mat h=cv::Mat::zeros(2,15,CV_64F);
-        h.at<double>(0,0)=h.at<double>(1,1)=1.;
-        for (int i=0;i<2;++i) for (int j=0;j<3;++j) h.at<double>(i,6+j)=-a(i,j);
-        const bool accepted=filter_.correct((cv::Mat_<double>(2,1)<<m.xy[0]-tag[0],m.xy[1]-tag[1]),
-                                            h,cv::Mat::eye(2,2,CV_64F)*m.value,9.21,true);
-        uwb_rejections_=accepted ? 0 : uwb_rejections_+1;
-        return accepted;
-    }
     cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
         if (filter_.correct_range(m.value,profile_,&range_trace_.innovation)) return true;
@@ -611,7 +594,7 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
     s.range_trace=range_trace_;
-    s.reference_valid=reference_valid_; s.fault=fault_; s.uwb_rejections=uwb_rejections_;
+    s.reference_valid=reference_valid_; s.fault=fault_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));

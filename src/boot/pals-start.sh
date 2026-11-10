@@ -113,43 +113,6 @@ check_gyro() {
     result=$(python3 "$worker" check 2>&1) || { echo "$result"; return 1; }
 }
 
-stop_session() {
-    docker exec "$container" pgrep -f '[v]l53l1x_node|[t]of_node.py|roslaunch .*[/]tof.launch' >/dev/null 2>&1
-    local tof_status=$?
-    [[ $tof_status == 0 || $tof_status == 1 ]] || { echo "Could not check the ToF process." >&2; return 1; }
-    if [[ $tof_status == 0 ]]; then
-        docker exec "$container" screen -S "$session" -p TOF -X stuff '^C' >/dev/null 2>&1 ||
-        { echo "Could not stop the TOF window; nodes were not restarted." >&2; return 1; }
-    fi
-    docker exec "$container" bash -c '
-        for _ in $(seq 60); do
-            pgrep -f "[v]l53l1x_node|[t]of_node.py|roslaunch .*[/]tof.launch" >/dev/null
-            status=$?
-            [[ $status == 1 ]] && exit 0
-            [[ $status == 0 ]] || exit 1
-            sleep 0.25
-        done
-        echo "ToF did not stop; no replacement driver was started." >&2
-        exit 1' || return 1
-    if session_running; then
-        docker exec "$container" screen -S "$session" -X quit >/dev/null 2>&1 ||
-            { echo "Could not stop the screen session; nodes were not restarted." >&2; return 1; }
-    fi
-    # Wait for serial owners as well as the master, in a single container call.
-    docker exec "$container" bash -c '
-        for _ in $(seq 60); do
-            pgrep -f "[r]osmaster|[f]light_controller_node.py|[u]wb_localization_node|[v]l53l1x_node|[t]of_node.py" >/dev/null
-            status=$?
-            [[ $status == 1 ]] && exit 0
-            [[ $status == 0 ]] || exit 1
-            sleep 0.25
-        done
-        echo "Old ROS or serial processes did not stop; check the onboard processes before retrying." >&2
-        exit 1' || return 1
-    session_running && { echo "Old screen session is still running; nodes were not restarted." >&2; return 1; }
-    return 0
-}
-
 case "${1:-}" in
     status) session_running; exit ;;
     start) ;;
@@ -175,16 +138,8 @@ case "${1:-}" in
         ;;
     restart)
         docker start "$container" >/dev/null || exit 1
-        mode=$(drone_mode)
-        if [[ -n "$mode" && "$mode" != DISARMED ]]; then
-            echo "Refusing to restart: drone mode is ${mode:-unknown}; it must be DISARMED."
-            exit 1
-        fi
-        # Catch a missing or misassigned UWB device before stopping working nodes.
-        resolve_ports || exit 1
-        echo "Rebooting the warm FC, then restarting all nodes and checking gyro readings."
-        warm_reboot || exit 1
-        stop_session || exit 1
+        echo "Stopping all nodes, rebooting the FC, and restarting."
+        result=$(sudo -n python3 "$worker" restart 2>&1) || { echo "$result"; exit 1; }
         ;;
     *) echo "Usage: $0 start|restart|align|warm-reboot|status" >&2; exit 2 ;;
 esac
