@@ -119,13 +119,16 @@ def warm_reboot():
             and port.exists(), 'Pinned SpeedyBee flight controller is unavailable.')
     environment = home / 'catkin_ws/pals.env'
     require(environment.is_file(), 'Missing resolved serial-port configuration.')
-    require(stop_fc(), 'Start the FC node before requesting a warm reboot.')
-    result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'SE',
-                  '-X', 'stuff', '\x03'])
-    require(result.returncode == 0, 'Could not stop localization: ' + result.stdout)
-    wait_for(lambda: run(['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
-                          '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']).returncode == 1,
-             'Localization did not stop.')
+    stop_fc()
+    localization = ['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
+                    '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']
+    running = run(localization)
+    require(running.returncode in (0, 1), 'Could not check localization: ' + running.stdout)
+    if running.returncode == 0:
+        result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'SE',
+                      '-X', 'stuff', '\x03'])
+        require(result.returncode == 0, 'Could not stop localization: ' + result.stdout)
+        wait_for(lambda: run(localization).returncode == 1, 'Localization did not stop.')
     reboot_controller(port)
     # USB enumeration can change the tty name after a reboot.
     lines = [line for line in environment.read_text().splitlines() if not line.startswith('PALS_FC_PORT=')]

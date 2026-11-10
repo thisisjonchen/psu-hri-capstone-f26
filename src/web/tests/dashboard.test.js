@@ -1186,6 +1186,10 @@ test('restart confirms the combined operation and blocks busy drones', async () 
   await runner.restart();
   assert.deepEqual(restarts, []);
   runner.terminals[0].running = false;
+  runner.terminals.forEach(terminal => { terminal.nodes = false; });
+  Object.assign(runner, { select: { value: '', options: [] }, button: {}, restartButton: {} });
+  runner.render();
+  assert.equal(runner.restartButton.disabled, false, 'missing nodes or script lists do not block restart');
   await runner.restart();
   assert.deepEqual(restarts, ['drone1', 'drone2']);
   restarts = [];

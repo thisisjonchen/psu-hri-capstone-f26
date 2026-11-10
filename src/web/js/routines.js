@@ -255,10 +255,9 @@ class RoutineRunner {
       this.select.replaceChildren(...options);
       this.select.value = scripts.includes(selected) ? selected : '';
     }
-    const loaded = targets.length > 0 && targets.every(terminal => terminal.scripts);
     this.button.disabled = this.busy || !this.select.value || !targets.length || !targets.every(terminal => terminal.ready);
-    this.restartButton.disabled = this.busy || !loaded ||
-      !targets.every(terminal => terminal.nodes && !terminal.running);
+    this.restartButton.disabled = this.busy || !targets.length ||
+      targets.some(terminal => terminal.running);
   }
 
   async run(label, targets, action) {
@@ -290,7 +289,7 @@ class RoutineRunner {
   restart() {
     const targets = this.active;
     const names = targets.map(terminal => terminal.id).join(' and ');
-    if (this.busy || !targets.length || !targets.every(terminal => terminal.nodes && !terminal.running)) return;
+    if (this.busy || !targets.length || targets.some(terminal => terminal.running)) return;
     if (!confirmRestart(names)) return;
     return this.restartTargets(targets.map(terminal => terminal.id));
   }
@@ -298,7 +297,7 @@ class RoutineRunner {
   restartTargets(ids) {
     const targets = ids.map(id => this.terminals.find(terminal => terminal.id === id));
     if (this.busy || !targets.length || targets.some(terminal =>
-      !terminal || (terminal.enabled && (!terminal.nodes || terminal.running)))) {
+      !terminal || terminal.running)) {
       throw new Error('Restart could not start. Check connections and stop running routines, then use Restart.');
     }
     return this.run('Restarting', targets, async terminal => terminal.enabled ? terminal.restart()

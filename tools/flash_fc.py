@@ -166,7 +166,8 @@ def port_unused(port):
 
 def stop_fc():
     running = run(['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f', '[f]light_controller_node.py'])
-    if running.returncode:
+    require(running.returncode in (0, 1), 'Could not check the FC process: ' + running.stdout)
+    if running.returncode == 1:
         return False
     mode = run(['docker', 'exec', 'pidrone_pkg', 'bash', '-ic',
                 'timeout 5 rostopic echo -n1 /pidrone/mode'])

@@ -389,9 +389,11 @@ flock() { [[ "$failure" != lock ]]; }
 docker() {
     printf '%s\n' "$*" >> "$calls"
     case "$*" in
+        'start pidrone_pkg') return 0 ;;
         *screen\ -ls*) echo '123.pidrone (Detached)' ;;
         */pidrone/mode*) echo "mode: $mode" ;;
         *-p\ TOF\ -X\ stuff*) [[ "$failure" != tof_signal ]] ;;
+        'exec pidrone_pkg pgrep -f '* ) return 0 ;;
         *'[v]l53l1x_node'*'[/]tof.launch'*)
             [[ "$failure" != tof_exit ]] || { echo 'mock ToF did not stop'; return 1; } ;;
         *-X\ quit*) [[ "$failure" != quit ]] ;;
@@ -410,7 +412,7 @@ source "$1" restart
 '''
         for mode, failure, message in [
                 ('ARMED', '', 'it must be DISARMED'), ('FLYING', '', 'it must be DISARMED'),
-                ('', '', 'it must be DISARMED'), ('DISARMED', 'reboot', 'mock warm reboot failed'),
+                ('', 'reboot', 'mock warm reboot failed'), ('DISARMED', 'reboot', 'mock warm reboot failed'),
                 ('DISARMED', 'tof_signal', 'Could not stop the TOF window'),
                 ('DISARMED', 'tof_exit', 'mock ToF did not stop'),
                 ('DISARMED', 'quit', 'Could not stop the screen session'),
@@ -427,10 +429,77 @@ source "$1" restart
                 commands = calls.read_text()
                 if failure not in ('quit', 'process'):
                     self.assertNotIn('-X quit', commands)
-                self.assertNotIn('start pidrone_pkg', commands)
+                self.assertNotIn('exec -d pidrone_pkg', commands)
                 self.assertIn(message, result.stdout + result.stderr)
-                if mode != 'DISARMED':
+                if mode in ('ARMED', 'FLYING'):
                     self.assertNotIn('mock warm reboot', result.stdout)
+
+    @unittest.skipUnless(shutil.which('bash'), 'requires bash')
+    def test_restart_without_nodes_reaches_replacement_launch(self):
+        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
+        stubs = r'''
+flock() { return 0; }
+docker() {
+    printf '%s\n' "$*" >> "$calls"
+    case "$*" in
+        'start pidrone_pkg') return 0 ;;
+        *screen\ -ls*) return 1 ;;
+        */pidrone/mode*) return 1 ;;
+        'exec pidrone_pkg pgrep '*) return 1 ;;
+        *'for _ in $(seq 60)'*) return 0 ;;
+        'exec -d pidrone_pkg '*) echo 'mock replacement launch reached'; return 1 ;;
+        *) echo "unexpected Docker call: $*"; return 1 ;;
+    esac
+}
+sudo() { echo 'mock FC reboot verified'; }
+calls=$2
+source "$1" restart
+'''
+        with TemporaryDirectory() as directory:
+            calls = Path(directory) / 'commands'
+            result = subprocess.run([shutil.which('bash'), '-c', stubs,
+                                     str(launcher), str(launcher), str(calls)],
+                                    capture_output=True, text=True)
+            self.assertIn('mock replacement launch reached', result.stdout)
+            self.assertNotIn('unexpected Docker call', result.stdout)
+            self.assertNotIn('-X stuff', calls.read_text())
+            self.assertNotIn('-X quit', calls.read_text())
+
+    def test_warm_reboot_with_stopped_nodes_still_verifies_fc(self):
+        for localization_status in (1, 2):
+            with self.subTest(localization_status=localization_status), TemporaryDirectory() as directory:
+                home = Path(directory)
+                (home / 'catkin_ws').mkdir()
+                (home / 'catkin_ws/pals.ports').write_text(
+                    'PALS_FC_ID=/dev/serial/by-id/SPEEDYBEEF405V3-test\n')
+                environment = home / 'catkin_ws/pals.env'
+                environment.write_text('PALS_FC_PORT=/dev/ttyACM0\nPALS_UWB_PORT=/dev/ttyACM1\n')
+                port = mock.Mock()
+                port.parent = Path('/dev/serial/by-id')
+                port.name = 'SPEEDYBEEF405V3-test'
+                port.exists.return_value = True
+                port.resolve.return_value = '/dev/ttyACM2'
+                def path(value):
+                    if value == '/home/duckie':
+                        return home
+                    if value == '/dev/serial/by-id/SPEEDYBEEF405V3-test':
+                        return port
+                    return Path(value)
+                with mock.patch.object(warm_reboot_fc, 'Path', side_effect=path), \
+                        mock.patch.object(warm_reboot_fc.os, 'geteuid', return_value=0), \
+                        mock.patch.object(warm_reboot_fc, 'stop_fc', return_value=False), \
+                        mock.patch.object(warm_reboot_fc, 'run', return_value=SimpleNamespace(
+                            returncode=localization_status, stdout='process check')) as run, \
+                        mock.patch.object(warm_reboot_fc, 'reboot_controller') as reboot:
+                    if localization_status == 2:
+                        with self.assertRaisesRegex(RuntimeError, 'Could not check localization'):
+                            warm_reboot_fc.warm_reboot()
+                        reboot.assert_not_called()
+                    else:
+                        warm_reboot_fc.warm_reboot()
+                        reboot.assert_called_once_with(port)
+                        self.assertIn('PALS_FC_PORT=/dev/ttyACM2', environment.read_text())
+                    self.assertEqual(run.call_count, 1)
 
     def test_restart_readiness_requires_fresh_tof_and_localization(self):
         launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
