@@ -429,13 +429,15 @@ class RoutineControlTest(unittest.TestCase):
         drone.wait_for_start = mock.Mock()
         self.globals['Mode'] = lambda name: NS(mode=name)
         drone.mode_pub.publish = drone._mode_received
-        for delay, height in ((1.0, None), (None, None), (None, .6)):
-            with self.subTest(continue_after=delay, height=height):
+        for delay, height, above in ((1.0, None, None), (None, None, None), (None, .6, None),
+                                     (None, 1.2, .8)):
+            with self.subTest(continue_after=delay, height=height, continue_above=above):
                 target = .25 if height is None else height
                 drone.mode, drone.height, drone.ground_height = 'DISARMED', .05, .05
                 drone.voltage = 16.
                 drone.battery_at = drone.mode_at = drone.height_at = self.fusion.now
-                heights = iter([.10] * 20 if delay else [.19, .21, .32] + [target] * 15)
+                heights = iter([.10] * 20 if delay else [.3, .6, .79, .81, .9] if above
+                               else [.19, .21, .32] + [target] * 15)
                 observed = []
                 flying_seconds = [0.]
 
@@ -452,12 +454,14 @@ class RoutineControlTest(unittest.TestCase):
                         observed.append(drone.height)
 
                 self.ros.sleep = tick
-                drone.takeoff(hold_xy=True, continue_after=delay, height=height)
+                drone.takeoff(hold_xy=True, continue_after=delay, height=height, continue_above=above)
                 self.assertEqual(drone.target_height, target)
                 self.assertEqual(self.fusion.messages['/pidrone/desired/takeoff_height'][-1].data, target)
                 self.assertEqual(drone.mode, 'FLYING')
                 self.assertEqual(drone.xy_anchor, (1, 2))
-                if delay is not None:
+                if above is not None:
+                    self.assertEqual(drone.height, .81, 'continue at the first height past the threshold')
+                elif delay is not None:
                     self.assertAlmostEqual(flying_seconds[0], 1.0)
                     self.assertEqual(drone.height, .10, 'do not wait for the old 0.20 m threshold')
                 else:

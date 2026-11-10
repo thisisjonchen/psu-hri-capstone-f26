@@ -312,14 +312,20 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, continue_after=None, height=None):
-        """Take off; optionally continue after a timed climb instead of settling."""
+    def takeoff(self, hold_xy=False, continue_after=None, height=None, continue_above=None):
+        """Take off; optionally continue after a timed climb, or once the measured
+        height reaches continue_above, instead of settling. The climb toward
+        height carries on either way."""
         height = self.takeoff_height if height is None else height
         if math.isnan(height) or math.isinf(height) or height <= 0:
             raise ValueError('Takeoff height must be finite and positive')
         if continue_after is not None and (math.isnan(continue_after) or
                 math.isinf(continue_after) or not 0 < continue_after < 10):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
+        if continue_above is not None and (continue_after is not None or math.isnan(continue_above)
+                or math.isinf(continue_above) or not 0 < continue_above <= height):
+            raise ValueError('Continue height must be positive, at most the takeoff height, '
+                             'and not combined with a continue delay')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self.wait_for_start(hold_xy=hold_xy)
@@ -357,6 +363,13 @@ class Drone(object):
                     return
                 rospy.sleep(min(0.1, remaining))
                 continue
+            if continue_above is not None:
+                if self.height >= continue_above:
+                    rospy.loginfo('Takeoff reached %.2f m (continue at %.2f m, target %.2f m)',
+                                  self.height, continue_above, height)
+                    return
+                rospy.sleep(0.1)
+                continue
             now = time.time()
             settled_since = self._settled_since(height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
@@ -366,6 +379,9 @@ class Drone(object):
             rospy.sleep(0.1)
         if continue_after is not None:
             raise RuntimeError('Timed takeoff exceeded 10 seconds')
+        if continue_above is not None:
+            raise RuntimeError('Takeoff did not reach {:.2f} m within {:.1f} seconds'.format(
+                continue_above, timeout))
         raise RuntimeError('Takeoff altitude did not settle within {:.1f} seconds'.format(timeout))
 
     def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,
