@@ -17,6 +17,7 @@ class AnchorCalibration {
     this.awaitingStatus = false;
     this.saveToken = null;
     this.editorToken = null;
+    this.previewSignature = null;
     this.closeTimer = null;
     document.getElementById('calibration-toggle').addEventListener('click', () => {
       this.setOpen(document.getElementById('calibration-panel').hidden);
@@ -174,6 +175,53 @@ class AnchorCalibration {
       ? positions : null;
   }
 
+  drawPositionPreview(positions) {
+    const signature = JSON.stringify(positions);
+    if (signature === this.previewSignature) return;
+    this.previewSignature = signature;
+    const svg = document.getElementById('calibration-position-map');
+    svg.replaceChildren();
+    const draw = (tag, attributes, text) => {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, value));
+      if (text !== undefined) node.textContent = text;
+      svg.appendChild(node);
+      return node;
+    };
+    if (!positions) {
+      draw('text', { x: 180, y: 120, 'text-anchor': 'middle' }, 'Enter X and Y to preview');
+      return;
+    }
+    const left = 48, top = 20, width = 288, height = 180;
+    const xs = positions.map(p => p.x), ys = positions.map(p => p.y);
+    const dx = Math.max(...xs) - Math.min(...xs), dy = Math.max(...ys) - Math.min(...ys);
+    const cx = (Math.max(...xs) + Math.min(...xs)) / 2, cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+    const margin = Math.max(0.15, Math.max(dx, dy) * 0.2);
+    const scale = Math.max((dx + 2 * margin) / width, (dy + 2 * margin) / height);
+    const xMin = cx - width * scale / 2, yMin = cy - height * scale / 2;
+    const x = value => left + (value - xMin) / scale;
+    const y = value => top + height - (value - yMin) / scale;
+    for (let i = 0; i <= 4; i++) {
+      const px = left + width * i / 4, py = top + height - height * i / 4;
+      draw('line', { class: 'preview-grid', x1: px, x2: px, y1: top, y2: top + height });
+      draw('line', { class: 'preview-grid', x1: left, x2: left + width, y1: py, y2: py });
+      draw('text', { x: px, y: top + height + 16, 'text-anchor': 'middle' }, Number((xMin + width * scale * i / 4).toFixed(2)));
+      draw('text', { x: left - 8, y: py + 4, 'text-anchor': 'end' }, Number((yMin + height * scale * i / 4).toFixed(2)));
+    }
+    draw('text', { x: left + width / 2, y: 234, 'text-anchor': 'middle' }, 'X (m)');
+    draw('text', { transform: 'translate(12 110) rotate(-90)', 'text-anchor': 'middle' }, 'Y (m)');
+    draw('polygon', { class: 'preview-outline', points: positions.map(p => x(p.x) + ',' + y(p.y)).join(' ') });
+    positions.forEach(p => {
+      const dot = draw('circle', { cx: x(p.x), cy: y(p.y), r: 5, 'data-anchor': p.id });
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      title.textContent = anchorLabel(p.id) + ': ' + p.x + ', ' + p.y + ' m';
+      dot.appendChild(title);
+      draw('text', { class: 'preview-label', x: x(p.x) + (p.x <= cx ? -8 : 8),
+        y: y(p.y) + (p.y <= cy ? 16 : -10), 'text-anchor': p.x <= cx ? 'end' : 'start' },
+      anchorNames[p.id.toUpperCase()] || p.id.toUpperCase());
+    });
+  }
+
   async request(action) {
     this.refresh();
     if (this.pendingAction || !this.fresh()) return;
@@ -202,7 +250,7 @@ class AnchorCalibration {
       if (!response.ok) throw new Error((await response.json()).error || 'Calibration request failed');
     } catch (error) {
       this.requestError = error.name === 'TimeoutError'
-        ? 'Request timed out. Checking the server; the operation may still be running.' : error.message;
+        ? 'Request timed out; the operation may still be running.' : error.message;
     } finally {
       this.pendingAction = null;
       // Wait for status after acceptance or an uncertain timeout before enabling another action.
@@ -220,7 +268,7 @@ class AnchorCalibration {
       this.editorToken = state.token;
       const corners = ['Bottom left', 'Bottom right', 'Top right', 'Top left'];
       state.preview.positions.forEach((p, i) => {
-        document.getElementById('calibration-label-' + i).textContent = corners[i] + ' · ' + anchorLabel(p.id);
+        document.getElementById('calibration-label-' + i).textContent = corners[i];
         document.getElementById('calibration-anchor-' + i).value = p.ble;
         ['x', 'y'].forEach(axis => {
           document.getElementById('calibration-' + axis + '-' + i).value = p[axis].toFixed(3);
@@ -243,7 +291,7 @@ class AnchorCalibration {
     const labels = { scan: 'Scanning…', measure: 'Measuring…', edit: 'Preparing…', apply: 'Saving…', cancel: 'Cancelling…' };
     const stages = { scanning: 'scan', measuring: 'measure', saving: 'apply' };
     const active = this.pendingAction || (state && state.busy && stages[state.stage]);
-    const defaults = { scan: '1. Scan', measure: '2. Measure', edit: 'Adjust saved layout', apply: '3. Save', cancel: 'Cancel' };
+    const defaults = { scan: 'Scan', measure: 'Measure', edit: 'Adjust', apply: 'Save', cancel: 'Cancel' };
     Object.keys(defaults).forEach(action => {
       document.getElementById('calibration-' + action).textContent = active === action ? labels[action] : defaults[action];
     });
@@ -251,12 +299,15 @@ class AnchorCalibration {
     const issue = state && state.boards.filter(board => board.active).length >= 4 ? this.selectionIssue() : '';
     selectionStatus.hidden = !issue;
     selectionStatus.textContent = issue || '';
-    document.getElementById('calibration-status').textContent = this.requestError || (!fresh
-      ? (this.awaitingStatus ? 'Checking calibration status...'
-        : state && (state.preview || state.dirty) ? 'Reconnect the laptop calibration server to finish or cancel calibration.'
+    const status = document.getElementById('calibration-status');
+    status.textContent = this.requestError || (!fresh
+      ? (this.awaitingStatus ? 'Checking status…'
+        : state && (state.preview || state.dirty) ? 'Reconnect the calibration server to finish or cancel.'
         : 'Calibration server offline.')
       : this.pendingAction ? labels[this.pendingAction] : state.message);
+    status.hidden = !status.textContent;
     const preview = document.getElementById('calibration-preview');
     preview.hidden = !fresh || !state.preview;
+    this.drawPositionPreview(fresh && this.matchesPreview() ? this.editedPositions() : null);
   }
 }

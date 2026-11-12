@@ -1,0 +1,21 @@
+acceleration_m_s2_per_count: 0.00478515625
+gyro_rad_s_per_count: 0.0010652644360316954
+acceleration_offset_msp_counts: [0.0, 0.0, 0.0]
+rotation_body_msp: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+# Provisional geometry: optical axis 45 degrees below horizontal; offsets from IMU.
+range_offset_body: [0.0, 0.0, 0.0]
+range_beam_body: [0.0, 0.0, -1.0]
+rotation_body_camera:
+  - [0.0, -0.7071067811865475, 0.7071067811865476]
+  - [-1.0, 0.0, 0.0]
+  - [0.0, -0.7071067811865476, -0.7071067811865475]
+camera_offset_body: [0.0, 0.0, 0.0]
+# UWB tag 3.8 cm left of the IMU.
+uwb_offset_body: [0.0, 0.038, 0.0]
+# Output is projected from this horizon to the latest IMU sample.
+fusion_delay_s: 0.15
+# JPEG callback delay relative to the IMU timestamps.
+camera_delay_s: 0.04
+# Assumed UWB fix delay, used only for startup initialization.
+uwb_delay_s: 0.3

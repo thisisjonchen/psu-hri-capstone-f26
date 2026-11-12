@@ -8,6 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   geometry_msgs
+  sensor_msgs
+  nav_msgs
   std_msgs
   message_generation
 )
@@ -53,11 +55,13 @@ add_message_files(
   State.msg
   StateGroundTruth.msg
   TagDetection.msg
-  TagCorners.msg
   TagMap.msg
-  TagWaypointMap.msg
   AnchorLayout.msg
   PeerState.msg
+  FlightReadiness.msg
+  MspImu.msg
+  IntegratedImu.msg
+  EkfVerticalTrace.msg
 
 )
 
@@ -131,6 +135,8 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
+add_subdirectory(native)
+
 ## Declare a C++ library
 # add_library(pidrone_pkg
 #   src/${PROJECT_NAME}/pidrone_pkg.cpp
@@ -166,8 +172,8 @@ catkin_install_python(PROGRAMS
   scripts/PALS/apriltag_mapping_node
   scripts/PALS/uwb_localization_node
   scripts/PALS/fusion_localization_node
-  scripts/optical_flow_node.py
   scripts/tof_node.py
+  scripts/rosbridge_websocket.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 install(DIRECTORY launch params

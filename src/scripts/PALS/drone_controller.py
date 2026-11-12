@@ -1,18 +1,28 @@
 #!/usr/bin/env python
 
-import json
+import logging
 import math
 import time
 
 import rosnode
 import rospy
 import tf
+from rosgraph.roslogging import RosStreamHandler
 from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
+
+
+class _RoutineConsoleFilter(logging.Filter):
+    def filter(self, record):
+        return not (record.name == 'rosout' and record.levelno == logging.WARNING and
+                    record.getMessage() ==
+                    'Inbound TCP/IP connection failed: connection from sender terminated '
+                    'before handshake header received. 0 bytes were received. '
+                    'Please check sender for additional details.')
 
 
 class Drone(object):
@@ -23,15 +33,18 @@ class Drone(object):
 
     # Control Variables
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
-    LAND_STEP_M = 0.05 # Target height decrease per landing step (meters)
-    LAND_STEP_SECONDS = 1.0 # Time between landing steps (seconds)
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
     def __init__(self):
+        # Routines initialize rospy first. Quiet this exact console warning while
+        # retaining it in the node's log file and on /rosout for diagnosis.
+        for handler in logging.getLogger('rosout').handlers:
+            if isinstance(handler, RosStreamHandler):
+                handler.addFilter(_RoutineConsoleFilter())
         self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
         self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
-        self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.20))
+        self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.30))
         self.xy_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
         if any(math.isnan(v) or math.isinf(v) or v <= 0
                for v in (self.xy_hold_gain, self.xy_speed_limit)):
@@ -52,18 +65,14 @@ class Drone(object):
         self.mode_pub = rospy.Publisher('/pidrone/desired/mode', Mode, queue_size=1)
         self.twist_pub = rospy.Publisher('/pidrone/desired/twist', Twist, queue_size=1)
         self.pose_pub = rospy.Publisher('/pidrone/desired/pose', Pose, queue_size=1)
+        self.landing_pub = rospy.Publisher('/pidrone/desired/land', Float32, queue_size=1)
+        self.takeoff_pub = rospy.Publisher('/pidrone/desired/takeoff_height', Float32, queue_size=1)
         self.position_mode_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
         self.heartbeat_pub = rospy.Publisher(
             '/pidrone/heartbeat/web_interface', Empty, queue_size=1)
-        # The dashboard releases every drone of one Execute together once all are ready.
+        # The dashboard starts the selected drones together once all are ready.
         self.start_at = None
-        self.routine_run = None
-        self.routine_plan = None
-        self.stage_release = None
-        self.waiting_for_start = False
         self.ready_pub = rospy.Publisher('/pidrone/routine/ready', Empty, queue_size=1)
-        self.stage_ready_pub = rospy.Publisher('/pidrone/routine/stage_ready', String, queue_size=1)
-        rospy.Subscriber('/pidrone/routine/stage_release', String, self._stage_received)
         rospy.Subscriber('/pidrone/routine/start', Empty, self._start_received)
         rospy.Subscriber('/pidrone/mode', Mode, self._mode_received)
         rospy.Subscriber('/pidrone/range', Range, self._range_received)
@@ -73,24 +82,22 @@ class Drone(object):
                          self._local_received, queue_size=1)
         rospy.Subscriber('/pidrone/battery', Battery, self._battery_received)
         self.heartbeat = rospy.Timer(
-            rospy.Duration(0.5), lambda _: self.heartbeat_pub.publish(Empty()))
+            rospy.Duration(0.5), self._heartbeat)
+        rospy.on_shutdown(self.heartbeat.shutdown)
+
+    def _heartbeat(self, event):
+        if rospy.is_shutdown():
+            return
+        try:
+            self.heartbeat_pub.publish(Empty())
+        except rospy.ROSException:
+            # Shutdown can close the publisher after the check above. Do not
+            # obscure the original routine error with a timer-thread traceback.
+            if not rospy.is_shutdown():
+                raise
 
     def _start_received(self, msg):
         self.start_at = time.time()
-
-    def _stage_received(self, msg):
-        try:
-            release = json.loads(msg.data)
-            run, stage = release['run'], release['stage']
-            if not isinstance(run, (str, type(u''))) or not run:
-                return
-        except (ValueError, TypeError, KeyError):
-            return
-        if stage == 'start' and self.waiting_for_start and self.mode == 'DISARMED':
-            self.routine_run = run
-            self.routine_plan = release.get('plan')
-        elif run == self.routine_run:
-            self.stage_release = (run, stage)
 
     def _mode_received(self, msg):
         self.mode = msg.mode
@@ -183,7 +190,7 @@ class Drone(object):
         if '/state_estimator' in rosnode.get_node_names():
             raise RuntimeError('Stop the legacy /state_estimator first; only fusion should publish /pidrone/state')
         deadline = time.time() + 90.0 # 90 second timeout for all ROS nodes to get ready
-        publishers = (self.mode_pub, self.twist_pub, self.pose_pub,
+        publishers = (self.mode_pub, self.twist_pub, self.pose_pub, self.landing_pub, self.takeoff_pub,
                       self.position_mode_pub, self.heartbeat_pub)
         reason = 'Waiting for flight nodes'
         reported_reason = None
@@ -215,17 +222,8 @@ class Drone(object):
             time.sleep(0.1)
         raise RuntimeError('Readiness timed out: ' + reason)
 
-    def wait_for_start(self, timeout=START_TIMEOUT_S, hold_xy=False, require_run=False):
-        self.routine_run = self.stage_release = None
-        self.routine_plan = None
-        self.waiting_for_start = True
-        try:
-            self._wait_for_start(timeout, hold_xy, require_run)
-        finally:
-            self.waiting_for_start = False
-
-    def _wait_for_start(self, timeout, hold_xy, require_run):
-        """Post ready until the dashboard's start arrives; never take off alone."""
+    def wait_for_start(self, timeout=START_TIMEOUT_S, hold_xy=False):
+        """Report readiness and wait for the dashboard to release this run."""
         rospy.loginfo('Waiting for synchronized start (up to %.0f s)', timeout)
         self.start_at = None
         started = time.time()
@@ -241,8 +239,7 @@ class Drone(object):
                 raise RuntimeError('Battery voltage is too low for synchronized start')
             if hold_xy:
                 self._hold_pose(local=True)
-            if (self.start_at is not None and self.start_at >= started and
-                    (not require_run or self.routine_run is not None)):
+            if self.start_at is not None and self.start_at >= started:
                 rospy.loginfo('Synchronized start received')
                 return
             if time.time() - last_ready >= 0.2:
@@ -250,30 +247,6 @@ class Drone(object):
                 last_ready = time.time()
             time.sleep(0.02)
         raise RuntimeError('No synchronized start within {:.0f} s; not taking off'.format(timeout))
-
-    def wait_for_stage(self, stage, timeout=30.0, check=None):
-        """Hold X/Y until every Execute participant reaches this flight stage."""
-        if self.routine_run is None or self.xy_anchor is None:
-            raise RuntimeError('Stage synchronization requires a dashboard start and X/Y hold')
-        request = json.dumps({'run': self.routine_run, 'stage': stage})
-        deadline = time.time() + timeout
-        last_ready = 0
-        while time.time() < deadline:
-            if rospy.is_shutdown():
-                raise RuntimeError('ROS shut down while waiting for ' + stage)
-            if check is not None:
-                check()
-            self._check_flight('synchronized ' + stage)
-            self.twist_pub.publish(self._xy_hold_command())
-            # Keep holding through supported gaps, but do not report ready on old fixes.
-            if self._hold_pose(required=False, local=True) is not None:
-                if self.stage_release == (self.routine_run, stage):
-                    return
-                if time.time() - last_ready >= 0.2:
-                    self.stage_ready_pub.publish(String(data=request))
-                    last_ready = time.time()
-            time.sleep(0.02)
-        raise RuntimeError('Timed out waiting for synchronized ' + stage)
 
     def _set_mode(self, name):
         deadline = time.time() + 5.0
@@ -339,15 +312,17 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, synchronized_stages=False, preflight=None, check=None,
-                continue_after=None):
+    def takeoff(self, hold_xy=False, continue_after=None, height=None):
         """Take off; optionally continue after a timed climb instead of settling."""
+        height = self.takeoff_height if height is None else height
+        if math.isnan(height) or math.isinf(height) or height <= 0:
+            raise ValueError('Takeoff height must be finite and positive')
         if continue_after is not None and (math.isnan(continue_after) or
                 math.isinf(continue_after) or not 0 < continue_after < 10):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
-        self.wait_for_start(hold_xy=hold_xy, require_run=synchronized_stages)
+        self.wait_for_start(hold_xy=hold_xy)
         self._check_sensors()
         self._check_battery()
         if abs(self.height - self.ground_height) > 0.02:
@@ -355,25 +330,22 @@ class Drone(object):
         if self.voltage < self.MIN_START_V:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
-        if preflight is not None:
-            preflight()
+        timeout = 10.0 if continue_after is not None else 20.0
+        self.takeoff_pub.publish(Float32(data=height))
+        rospy.loginfo('Taking off to %.2f m', height)
         self._set_mode('ARMED')
-        self.target_height = self.takeoff_height
+        self.target_height = height
         rospy.sleep(1.0)
         self._check_sensors()
         self._check_battery()
         self.twist_pub.publish(self._xy_hold_command())
         if hold_xy:
             self.lock_xy()
-        if check is not None:
-            check()
         self._set_mode('FLYING')
         started = time.time()
-        deadline = started + 10.0
+        deadline = started + timeout
         settled_since = None
         while time.time() < deadline:
-            if check is not None:
-                check()
             self._check_flight('takeoff')
             if hold_xy:
                 self.twist_pub.publish(self._xy_hold_command())
@@ -386,16 +358,15 @@ class Drone(object):
                 rospy.sleep(min(0.1, remaining))
                 continue
             now = time.time()
-            settled_since = self._settled_since(self.takeoff_height, 0.05, settled_since, now)
+            settled_since = self._settled_since(height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
-                self.target_height = self.takeoff_height
-                rospy.loginfo('Takeoff altitude held for %.1f seconds; continuing routine',
-                              self.ALTITUDE_SETTLE_SECONDS)
+                rospy.loginfo('Takeoff altitude %.2f m held for %.1f seconds; continuing routine',
+                              height, self.ALTITUDE_SETTLE_SECONDS)
                 return
             rospy.sleep(0.1)
         if continue_after is not None:
             raise RuntimeError('Timed takeoff exceeded 10 seconds')
-        raise RuntimeError('Takeoff altitude did not settle within 10 seconds')
+        raise RuntimeError('Takeoff altitude did not settle within {:.1f} seconds'.format(timeout))
 
     def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,
              room_target=None, check=None):
@@ -548,10 +519,18 @@ class Drone(object):
             self.unlock_xy()
         if self.ground_height is None:
             raise RuntimeError('Ground height was not measured before takeoff')
-        steps = math.ceil(max(0.0, self.height - self.ground_height) / self.LAND_STEP_M)
-        deadline = time.time() + max(20.0, (steps + 1) * self.LAND_STEP_SECONDS + 5.0)
+        if self.mode == 'DISARMED':
+            self.unlock_xy()
+            return
+        self._check_flight('landing', check_battery=False)
+        if not 0 <= self.ground_height <= 0.12:
+            raise RuntimeError('Invalid preflight floor height')
+        # Allow a slower-than-commanded descent before requiring manual recovery.
+        deadline = time.time() + max(20.0, max(0.0, self.height - self.ground_height) / 0.05 + 5.0)
         disarm_height = self.ground_height + self.LAND_DISARM_CLEARANCE_M
-        last_step = 0
+        self.landing_pub.publish(Float32(data=self.ground_height))
+        self.target_height = self.ground_height
+        rospy.loginfo('Landing toward preflight floor height %.3f m', self.ground_height)
         while time.time() < deadline:
             if self.mode == 'DISARMED':
                 self.unlock_xy()
@@ -570,9 +549,5 @@ class Drone(object):
                     rospy.logwarn('Releasing X/Y hold during landing: %s', error)
                     self.unlock_xy()
                     hold_xy = False
-            now = time.time()
-            if now - last_step >= self.LAND_STEP_SECONDS:
-                self._set_altitude(max(0.0, self.target_height - self.LAND_STEP_M))
-                last_step = now
             rospy.sleep(0.1)
         raise RuntimeError('Landing was not confirmed; drone is still armed')

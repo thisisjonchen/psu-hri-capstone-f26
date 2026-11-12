@@ -15,6 +15,5 @@ i_limit_deg: 3.0
 # Never command more lean than this (degrees). The old controller allowed about 3.3.
 # Raise in steps as flights look good; keep well below 10.
 max_lean_deg: 5.0
-# Betaflight angle mode: degrees of lean at full stick (CLI: get angle_limit or
-# get level_limit). 55 is the default until measured on the DD24.
-angle_limit_deg: 55.0
+# Match Betaflight's angle_limit; both drones use the shared calibration.
+angle_limit_deg: 60.0

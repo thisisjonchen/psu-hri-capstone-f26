@@ -107,6 +107,23 @@ class AltitudeControllerTest(unittest.TestCase):
             command = self.step(c, height=.05, now=10 + i/60.0)
         self.assertLess(command, 1510 + 50, 'throttle ran away to %.1f us' % command)
 
+    def test_launch_throttle_ramp_is_independent_of_target_height(self):
+        for target in (.10, .25, .75):
+            with self.subTest(target=target):
+                c = AltitudeController(hover_throttle=1540., rate_i=0.)
+                c.start_takeoff(.05, 10.)
+                commands = []
+                for i in range(151):
+                    elapsed = i / RATE
+                    height = min(target, .05 + .1 * elapsed)
+                    climb = .1 if height < target else 0.
+                    commands.append(c.step(target, height, climb, 1., 10. + elapsed))
+                self.assertAlmostEqual(commands[0], 1490.)
+                self.assertAlmostEqual(commands[120], 1540.)
+                self.assertAlmostEqual(commands[-1], 1540.)
+                self.assertLess(largest_step(commands), 1., 'launch throttle jumped')
+                self.assertAlmostEqual(c.target, min(target, .30))
+
     def test_no_integration_into_throttle_saturation(self):
         c = AltitudeController(throttle_range=(1200., 1520.), rate_i_limit=5.)
         for i in range(600):
@@ -148,23 +165,21 @@ class AltitudeControllerTest(unittest.TestCase):
                 self.assertLess(max(lean), .25 + .02, 'extra thrust while leaning')
                 self.assertGreater(min(lean), .25 - .10, 'fell while leaning')
 
-    def test_land_requests_during_takeoff_have_no_throttle_jump(self):
-        def land(at_height, target_height):
-            def request(flight, target):
-                if flight.drone.height >= at_height and target != target_height:
-                    flight.controller.cancel_takeoff()  # As pid_controller does on a pose command.
-                    return target_height
-                return target
-            return request
-        flight = FlightTest(SimulatedDrone()).takeoff(seconds=10, on_step=land(.15, .10))
-        self.assertLess(largest_step(flight.commands), 10)
-        self.assertLess(abs(flight.heights[-1] - .10), .03, 'did not come back down to the request')
-        # Landing requested before the drone has left the ground: it stays down.
+    def test_landing_reaches_floor_and_respects_descent_limit(self):
+        for true_hover in (1490., 1530.):
+            flight = FlightTest(SimulatedDrone(true_hover=true_hover)).takeoff(seconds=15)
+            start = len(flight.commands)
+            flight.controller.start_landing(flight.drone.ground)
+            flight.run(12, .25)
+            self.assertLess(flight.heights[-1], flight.drone.ground + .01)
+            self.assertGreater(min(flight.climbs[start:]), -.3)
+            self.assertLess(largest_step(flight.commands[start - 1:]), 10)
+        # A landing request during the takeoff ramp must not resume climbing.
         flight = FlightTest(SimulatedDrone())
         flight.controller.start_takeoff(flight.tof, flight.now)
         flight.run(.5, .25)
-        flight.controller.cancel_takeoff()
-        flight.run(3, .05)
+        flight.controller.start_landing(flight.drone.ground)
+        flight.run(3, .25)
         self.assertLess(max(flight.heights), .06, 'lifted off after landing was requested')
 
     def test_climb_and_descent_speeds_respect_limits(self):

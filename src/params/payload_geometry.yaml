@@ -1,8 +1,7 @@
-# Geometry in meters; PID startup loads this with coordination.yaml when
-# /pidrone/coordination is absent. See scripts/PALS/COORDINATION.md.
+# Distances in meters, loaded with coordination.yaml at PID startup.
 nominal_separation_m: 1.0
 payload_drop_m: 0.5
-# payload_drop_m remains a planning value; it does not command altitude.
+# payload_drop_m is for planning only; it does not set altitude.
 
 # Level drones, taut equal ropes, and a common payload attachment centered below
 # the drone attachment points. Assumes attachment spacing equals drone spacing.

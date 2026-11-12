@@ -1,17 +1,19 @@
 """Hardware-free checks for the laptop dashboard server."""
-import mimetypes
+import asyncio
 import io
 import json
-from email.message import Message
+import mimetypes
 import subprocess
 import sys
 import threading
 import unittest
 from pathlib import Path
+from email.message import Message
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from server import DashboardHandler
+from server import DashboardHandler, State, terminal
+import drones
 import peer_relay
 
 
@@ -40,6 +42,49 @@ import server
 
 
 class ResponseTest(unittest.TestCase):
+    def test_branch_status_only_queries_explicit_targets(self):
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.allowed = lambda: True
+        handler.respond = mock.Mock()
+        with mock.patch.object(drones, 'branch_command', return_value={'branches': ['main']}) as command:
+            handler.path = '/api/branches?drone=drone2'
+            handler.do_GET()
+            command.assert_called_once_with('drone2', 'status', None, None)
+            handler.respond.assert_called_once_with(200, {'drones': {'drone2': {'branches': ['main']}}})
+            command.reset_mock()
+            for query in ('', '?drone=drone3', '?drone=drone1&drone=drone1'):
+                handler.path = '/api/branches' + query
+                handler.do_GET()
+                self.assertEqual(handler.respond.call_args.args[0], 400)
+            command.assert_not_called()
+
+    def test_branch_mutations_require_explicit_action_and_request_header(self):
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.allowed = lambda: True
+        handler.path = '/api/branches'
+        handler.respond = mock.Mock()
+        handler.send_error = mock.Mock()
+        handler.headers = Message()
+        handler.headers['Content-Type'] = 'application/json'
+        with mock.patch.object(drones, 'branch_results', return_value={'drone2': {'dirty': False}}) as calls:
+            handler.do_POST()
+            handler.send_error.assert_called_once_with(403)
+            handler.headers['X-Routine-Request'] = '1'
+            for body in ({'branch': 'main'}, {'action': 'unknown', 'drones': ['drone2']},
+                         {'action': 'clear'}, {'action': 'clear', 'drones': ['drone2']}):
+                payload = json.dumps(body).encode()
+                handler.rfile = io.BytesIO(payload)
+                handler.headers['Content-Length'] = str(len(payload))
+                handler.do_POST()
+                if body.get('action') == 'clear' and 'drones' in body:
+                    self.assertEqual(handler.respond.call_args.args[0], 200)
+                    self.assertEqual(calls.call_args_list, [mock.call('prepare-clear', ['drone2'], None),
+                                                           mock.call('clear', ['drone2'])])
+                else:
+                    self.assertEqual(handler.respond.call_args.args[0], 400)
+                    calls.assert_not_called()
+                del handler.headers['Content-Length']
+
     def test_closed_browser_connection_ends_response_without_retry(self):
         for stage in ('headers', 'body'):
             for error in (BrokenPipeError, ConnectionResetError, OSError):
@@ -63,52 +108,51 @@ class ResponseTest(unittest.TestCase):
                         handler.wfile.write.assert_not_called()
 
 
+class TerminalBridgeTest(unittest.TestCase):
+    def test_ssh_disconnect_is_reported_and_bridge_closes_without_stopping_nodes(self):
+        for failure, active, state in (
+                (None, True, State.OPEN),
+                (None, False, State.OPEN),
+                (drones.paramiko.SSHException('transport failed'), False, State.OPEN),
+                (EOFError('connection closed'), False, State.OPEN),
+                (None, False, State.CLOSED)):
+            with self.subTest(failure=failure, active=active, state=state):
+                websocket, client, channel = mock.MagicMock(), mock.Mock(), mock.Mock()
+                websocket.request.path = '/terminal/drone1'
+                websocket.recv.return_value = '{"cols":80,"rows":24}'
+                websocket.state = state
+                websocket.__iter__.return_value = iter(())
+                channel.recv.side_effect = failure if failure else [b'output', b'']
+                client.get_transport.return_value.is_active.return_value = active
+                client.get_transport.return_value.get_exception.return_value = EOFError('connection closed')
+                with mock.patch.object(drones, 'open_terminal', return_value=(client, channel)), \
+                        mock.patch('server.threading.Thread') as thread, \
+                        mock.patch('server.logging.warning') as warning:
+                    thread.return_value.start.side_effect = lambda: thread.call_args.kwargs['target']()
+                    terminal(websocket)
+                messages = [call.args[0] for call in websocket.send.call_args_list]
+                reports = [message for message in messages if isinstance(message, str)]
+                if state is State.OPEN and not active:
+                    self.assertEqual(len(reports), 1)
+                    self.assertIn('drone1: SSH terminal disconnected:', reports[0])
+                    warning.assert_called_once()
+                else:
+                    self.assertEqual(reports, [])
+                    warning.assert_not_called()
+                websocket.close.assert_called_once()
+                client.close.assert_called_once()
+                channel.send.assert_not_called()
+                client.exec_command.assert_not_called()
+
+
 class PeerRelayLifecycleTest(unittest.TestCase):
-    def test_toggle_api_validates_boolean_and_returns_shared_state(self):
+    def test_retired_toggle_api_cannot_disable_relay(self):
         handler = DashboardHandler.__new__(DashboardHandler)
         handler.allowed = lambda: True
-        handler.respond = mock.Mock()
-        handler.server = mock.Mock(relay_enabled=threading.Event())
+        handler.send_error = mock.Mock()
         handler.path = '/api/peer-relay'
-        for value in (False, True, 'false'):
-            body = json.dumps({'enabled': value}).encode()
-            handler.headers = Message()
-            handler.headers['Content-Type'] = 'application/json'
-            handler.headers['X-Routine-Request'] = '1'
-            handler.headers['Content-Length'] = str(len(body))
-            handler.rfile = io.BytesIO(body)
-            handler.do_POST()
-            if isinstance(value, bool):
-                handler.respond.assert_called_with(200, {'enabled': value})
-                handler.do_GET()
-                handler.respond.assert_called_with(200, {'enabled': value})
-            else:
-                self.assertEqual(handler.respond.call_args.args[0], 400)
-                self.assertTrue(handler.server.relay_enabled.is_set())
-
-    def test_disabled_relay_stops_forwarding_and_can_resume(self):
-        stop, enabled = threading.Event(), threading.Event()
-        clients = [mock.Mock(), mock.Mock()]
-        messages = [{'drone_id': 'drone2'}, {'drone_id': 'drone1'}]
-        waits = 0
-        def wait(_):
-            nonlocal waits
-            waits += 1
-            if waits == 1:
-                enabled.set()
-            elif waits == 2:
-                enabled.clear()
-            else:
-                stop.set()
-        with mock.patch('websockets.sync.client.connect', return_value=mock.MagicMock()), \
-                mock.patch.object(peer_relay, 'Client', side_effect=clients), \
-                mock.patch.object(peer_relay, 'peer_messages', return_value=messages) as states, \
-                mock.patch.object(stop, 'wait', side_effect=wait):
-            peer_relay.run(stop, enabled=enabled)
-        states.assert_called_once()
-        for client, message in zip(clients, messages):
-            client.send.assert_called_once_with({
-                'op': 'publish', 'topic': peer_relay.PEER_TOPIC, 'msg': message})
+        handler.do_POST()
+        handler.send_error.assert_called_once_with(404)
 
     def test_waits_for_pair_skips_invalid_data_and_reconnects_after_loss(self):
         stop = threading.Event()
@@ -116,19 +160,22 @@ class PeerRelayLifecycleTest(unittest.TestCase):
         clients = [mock.Mock() for _ in sockets]
         for client in clients:
             client.snapshot.return_value = {}
+            client.start = mock.AsyncMock()
+            client.send = mock.AsyncMock()
         # First attempt: drone2 is offline. Second: valid pair, then a lost
         # connection. Third: both reconnect with new telemetry subscriptions.
         clients[1].snapshot.side_effect = [{}, {}, RuntimeError('connection lost')]
         messages = [{'drone_id': 'drone2'}, {'drone_id': 'drone1'}]
         attempts = [sockets[0], OSError('drone2 offline')] + sockets[1:]
-        with mock.patch('websockets.sync.client.connect', side_effect=attempts) as connect, \
+        with mock.patch('websockets.asyncio.client.connect', side_effect=attempts) as connect, \
                 mock.patch.object(peer_relay, 'Client', side_effect=clients), \
                 mock.patch.object(peer_relay, 'peer_messages',
-                                  side_effect=[ValueError('stale pose'), messages, messages]) as states:
-            def wait(_):
+                                  side_effect=[ValueError('stale pose'), ([peer_relay.PEER_TOPIC, peer_relay.PREVIEW_TOPIC], messages),
+                                               ([peer_relay.PREVIEW_TOPIC] * 2, messages)]) as states:
+            async def wait(_):
                 if states.call_count == 3:
                     stop.set()
-            with mock.patch.object(stop, 'wait', side_effect=wait):
+            with mock.patch.object(peer_relay.asyncio, 'sleep', side_effect=wait):
                 peer_relay.run(stop)
         self.assertEqual(connect.call_count, 6)
         for call in connect.call_args_list:
@@ -137,6 +184,33 @@ class PeerRelayLifecycleTest(unittest.TestCase):
         clients[0].send.assert_not_called()
         for index, client in enumerate(clients[1:]):
             client.send.assert_called_once_with({
-                'op': 'publish', 'topic': peer_relay.PEER_TOPIC, 'msg': messages[index % 2]})
+                'op': 'publish', 'topic': peer_relay.PEER_TOPIC if index == 0 else peer_relay.PREVIEW_TOPIC,
+                'msg': messages[index % 2]})
         for socket in sockets:
-            socket.__exit__.assert_called_once()
+            socket.__aexit__.assert_awaited_once()
+
+    def test_stalled_send_does_not_block_other_recipient(self):
+        stop = threading.Event()
+        clients = [mock.Mock(), mock.Mock()]
+        delivered = threading.Event()
+        cancelled = threading.Event()
+        async def blocked(_):
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        async def healthy(_):
+            delivered.set()
+        for client, send in zip(clients, (blocked, healthy)):
+            client.start = mock.AsyncMock()
+            client.send = send
+            client.snapshot.return_value = {}
+        async def wait(_):
+            stop.set()
+        with mock.patch('websockets.asyncio.client.connect', side_effect=[mock.MagicMock(), mock.MagicMock()]), \
+                mock.patch.object(peer_relay, 'Client', side_effect=clients), \
+                mock.patch.object(peer_relay, 'peer_messages', return_value=([peer_relay.PEER_TOPIC] * 2, [{}, {}])), \
+                mock.patch.object(peer_relay.asyncio, 'sleep', side_effect=wait):
+            peer_relay.run(stop)
+        self.assertTrue(delivered.is_set())
+        self.assertTrue(cancelled.is_set())

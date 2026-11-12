@@ -11,7 +11,7 @@ import threading
 import numpy as np
 import rospy
 from geometry_msgs.msg import Point, PoseWithCovarianceStamped
-from pidrone_pkg.msg import TagDetection, TagMap, TagWaypointMap
+from pidrone_pkg.msg import TagDetection, TagMap
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, UInt32
 
@@ -45,7 +45,6 @@ class AprilTagMappingNode(object):
         self.last_detection_stamp = None
         self.tags = {}  # id -> recent observations and last confirmed position
         self.publisher = rospy.Publisher('/pidrone/apriltag/map', TagMap, queue_size=1, latch=True)
-        self.waypoint_publisher = rospy.Publisher('/pidrone/apriltag/waypoints', TagWaypointMap, queue_size=1, latch=True)
         self.publish_map()
         rospy.Subscriber(rospy.get_param('~detection_topic', '/pidrone/apriltag/detections'),
                          TagDetection, self.detection_callback, queue_size=1)
@@ -61,12 +60,8 @@ class AprilTagMappingNode(object):
     def publish_map(self):
         msg = TagMap()
         msg.header.frame_id = self.frame
-        # Snapshot revision time, NOT a claim that a cached tag was remeasured.
-        # Per-frame acquisition stamps remain in TagDetection and fused pose.
+        # This stamps the map update; cached tags retain their old positions.
         msg.header.stamp = rospy.Time.now()
-        waypoints = TagWaypointMap()
-        waypoints.map = msg
-        waypoints.generation = self.generation if self.generation is not None else 0
         for tag_id in sorted(self.tags):
             entry = self.tags[tag_id]
             if entry['position'] is None:
@@ -78,9 +73,7 @@ class AprilTagMappingNode(object):
             msg.zones.append(entry['zone'])
             msg.positions.append(point)
             msg.sample_counts.append(self.min_samples)
-            waypoints.observed_at.append(rospy.Time.from_sec(entry['confirmed_at']))
         self.publisher.publish(msg)
-        self.waypoint_publisher.publish(waypoints)
 
     def generation_callback(self, msg):
         with self.lock:
@@ -194,7 +187,6 @@ class AprilTagMappingNode(object):
                 entry['stamp'] = observation_time
                 if len(samples) == self.min_samples:
                     entry['position'] = np.mean(samples, axis=0)
-                    entry['confirmed_at'] = observation_time
                     entry['zone'] = message.zones[index]
                     changed = True
             if changed:

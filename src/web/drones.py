@@ -1,10 +1,12 @@
 """SSH access to the drones for the dashboard's script terminals."""
 import getpass
+import json
 import os
 import re
 import shlex
 import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
 
@@ -33,6 +35,69 @@ Host drone1 drone2
 _setup_lock = threading.Lock()
 _clients = {}
 _lock = threading.Lock()
+_branch_lock = threading.Lock()
+
+
+def branch_command(drone, action, branch=None, revision=None):
+    host(drone)
+    helper = Path(__file__).with_name('drone_git.py').read_text(encoding='utf-8')
+    args = ['python3', '-c', helper, action]
+    if branch is not None:
+        args.append(branch)
+    if revision is not None:
+        args.append(revision)
+    code, output = run(drone, 'cd ' + PACKAGE + ' && ' + ' '.join(shlex.quote(arg) for arg in args) + ' 2>&1',
+                       timeout=660 if action == 'build' else 90)
+    try:
+        result = json.loads(output.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise RuntimeError(output.strip() or 'No branch status received')
+    if code or 'error' in result:
+        raise RuntimeError(result.get('error', 'Branch operation failed'))
+    return result
+
+
+def branch_results(action, targets, branch=None, revision=None):
+    if (not isinstance(targets, (list, tuple)) or not 1 <= len(targets) <= len(DRONES)
+            or any(drone not in DRONES for drone in targets) or len(set(targets)) != len(targets)):
+        raise ValueError('Select one or two distinct drones')
+    targets = tuple(targets)
+
+    def perform(drone):
+        try:
+            return branch_command(drone, action, branch, revision)
+        except (ValueError, RuntimeError) as error:
+            return {'error': str(error)}
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        return dict(zip(targets, pool.map(perform, targets)))
+
+
+def branch_action(action, targets, branch=None):
+    if action not in ('switch', 'clear'):
+        raise ValueError('Unknown branch action')
+    if action == 'switch' and (not isinstance(branch, str) or
+                              not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', branch)):
+        raise ValueError('Invalid branch name')
+    if not _branch_lock.acquire(blocking=False):
+        raise RuntimeError('A branch action is already in progress')
+    try:
+        prepared = branch_results('prepare' if action == 'switch' else 'prepare-clear', targets, branch)
+        if any('error' in result for result in prepared.values()):
+            return {'phase': 'prepare', 'drones': prepared}
+        if action == 'clear':
+            return {'phase': 'clear', 'drones': branch_results('clear', targets)}
+        revisions = {result['target'] for result in prepared.values()}
+        if len(revisions) != 1:
+            raise RuntimeError('The drones fetched different revisions; no branches changed.')
+        revision = revisions.pop()
+        switched = branch_results('switch', targets, branch, revision)
+        if any('error' in result for result in switched.values()):
+            return {'phase': 'switch', 'drones': switched}
+        built = branch_results('build', targets, branch, revision)
+        return {'phase': 'build', 'drones': {
+            drone: dict(switched[drone], **result) for drone, result in built.items()}}
+    finally:
+        _branch_lock.release()
 
 
 def host(drone):
@@ -70,7 +135,8 @@ def connect(drone, timeout=5):
         client.connect(host(drone), username=USER, key_filename=str(KEY), timeout=timeout,
                        banner_timeout=timeout, auth_timeout=timeout,
                        allow_agent=False, look_for_keys=False)
-    except paramiko.SSHException as error:
+        client.get_transport().set_keepalive(15)
+    except (paramiko.SSHException, EOFError) as error:
         client.close()
         raise RuntimeError('%s: %s (run tools/pals.py ssh-setup)' % (drone, error))
     except OSError as error:
@@ -109,6 +175,7 @@ def setup_ssh(drone):
                     try:
                         client.connect(hostname, username=USER, allow_agent=False, look_for_keys=False,
                                        timeout=5, banner_timeout=5, auth_timeout=5, **auth)
+                        client.get_transport().set_keepalive(15)
                     except paramiko.AuthenticationException:
                         if 'key_filename' in auth:
                             client.close()
@@ -128,7 +195,7 @@ def setup_ssh(drone):
                     raise
                 client.close()
                 return connect(drone)
-        except (OSError, paramiko.SSHException) as error:
+        except (OSError, paramiko.SSHException, EOFError) as error:
             raise RuntimeError('%s: SSH setup failed: %s' % (drone, error)) from error
 
 
@@ -142,7 +209,7 @@ def run(drone, command, timeout=10):
         _, stdout, _ = client.exec_command(command, timeout=timeout)
         output = stdout.read().decode('utf-8', 'replace')
         return stdout.channel.recv_exit_status(), output
-    except (OSError, paramiko.SSHException) as error:
+    except (OSError, paramiko.SSHException, EOFError) as error:
         client.close()
         with _lock:
             if _clients.get(drone) is client:
@@ -172,16 +239,14 @@ def status(drone):
 
 
 def node_action(drone, action):
-    """Restart every node, or only fusion (align); fusion aligns map +Y when it starts.
+    """Run a disarmed maintenance action through the onboard launcher.
 
     Returns the script's last output line, which summarizes the result.
     """
     host(drone)
-    if action not in ('restart', 'align'):
+    if action != 'restart':
         raise ValueError('Unknown node action: %r' % (action,))
-    if routine_running(drone):
-        raise RuntimeError('a routine is running; stop it first')
-    code, output = run(drone, START + ' ' + action + ' 2>&1', timeout=90)
+    code, output = run(drone, START + ' restart 2>&1', timeout=240)
     # Interactive container shells print banners first; the script ends with its result.
     lines = output.strip().splitlines() or ['no output']
     if code:
@@ -224,7 +289,8 @@ def open_terminal(drone, cols, rows, start=False, active=lambda: True):
         channel = client.get_transport().open_session(timeout=5)
         channel.settimeout(10)
         channel.get_pty(term='xterm-256color', width=cols, height=rows)
-        attach = 'exec docker exec -it %s screen -x %s -p routine' % (CONTAINER, SESSION)
+        attach = 'exec docker exec -it %s bash -c %s' % (CONTAINER, shlex.quote(
+            'ulimit -Sn 1024 && exec screen -x %s -p routine' % SESSION))
         if start:
             command = ('git -C ' + PACKAGE + ' pull --ff-only && ' + START +
                        r" start; code=$?; printf '\033]777;%d\007' $code; [ $code -eq 0 ] && " + attach)
@@ -240,6 +306,6 @@ def open_terminal(drone, cols, rows, start=False, active=lambda: True):
         return client, channel
     except Exception as error:
         client.close()
-        if isinstance(error, (OSError, paramiko.SSHException)):
+        if isinstance(error, (OSError, paramiko.SSHException, EOFError)):
             raise RuntimeError('%s: terminal connection failed: %s' % (drone, error)) from error
         raise

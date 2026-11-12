@@ -69,6 +69,19 @@ class CalibrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,
                 r'0001 to 0002 = 5\.000 m, 0002 to 0001 = 4\.000 m'):
             solve_layout(BOARDS, inconsistent)
+        # Reciprocal agreement alone does not establish a consistent planar fit.
+        # This fails the RMS limit while staying below the individual-error limit.
+        inconsistent = copy.deepcopy(ROWS)
+        inconsistent['0001']['0003'] = inconsistent['0003']['0001'] = (5.65, 100)
+        with self.assertLogs(level='WARNING') as logs:
+            with self.assertRaisesRegex(ValueError, 'Check the corner assignments'):
+                solve_layout(BOARDS, inconsistent)
+        self.assertRegex(logs.output[0],
+                         r'RMS .*limit 0\.100 m; max .*limit 0\.200 m.*'
+                         r'0001 to 0003 measured 5\.650 m, fitted')
+        diagnostic = solve_layout(BOARDS, inconsistent, max_rms=0.15)
+        self.assertGreater(diagnostic['rms'], 0.10)
+        self.assertLess(diagnostic['max_error'], 0.20)
         order = (0, 1, 3, 2)
         layout = solve_layout([BOARDS[i] for i in order], ROWS)
         self.assertEqual([p['id'] for p in layout['positions']], [BOARDS[i]['id'] for i in order])
@@ -273,6 +286,11 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             finally:
                 active.remove(board['id'])
         ble.connect = connect
+        low_quality = dict(ROWS['0001'], **{'0002': (1, 49)})
+        def notify(uuid, callback):
+            for row in ({}, {'0002': ROWS['0001']['0002']}, low_quality, ROWS['0001']):
+                callback(None, payload(row))
+        clients['0001'].start_notify.side_effect = notify
         boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 0, None])]
         rows = await ble._measure(boards, lambda: None)
         self.assertEqual(rows, ROWS)
@@ -287,13 +305,19 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         await ble._save(positions, on_write, lambda: None)
         self.assertEqual(connections, [board['id'] for board in positions])
         self.assertFalse(active)
-        self.assertEqual(on_write.call_count, 4)
+        on_write.assert_called_once()
         for board in positions:
             clients[board['id']].write_gatt_char.assert_any_await(POSITION, encode_position(board), response=True)
         saved['0001']['x'] = 10
         with self.assertRaisesRegex(ValueError, 'failed verification'):
             await ble._save(positions, on_write, lambda: None)
         self.assertFalse(active)
+        clients['0001'].start_notify.side_effect = lambda uuid, callback: callback(None, payload(low_quality))
+        ble.timeout = 0.01
+        with self.assertRaisesRegex(ValueError, 'Could not measure all anchors'):
+            await ble._measure(BOARDS, lambda: None)
+        self.assertFalse(active)
+        self.assertEqual(set(modes.values()), {b'\x02'})
         clients['0001'].start_notify.side_effect = ValueError('cancelled')
         with self.assertRaisesRegex(ValueError, 'cancelled'):
             await ble._measure(BOARDS, lambda: None)
@@ -312,16 +336,25 @@ class LaptopCancellationTest(unittest.TestCase):
     def test_cancellation_stops_inflight_ble_and_waits_for_cleanup(self):
         ble = PansBLE()
         self.addCleanup(ble.close)
-        started, cleaned = threading.Event(), threading.Event()
+        started = threading.Event()
+        client = mock.AsyncMock()
+        async def read(key):
+            if key == DATA_MODE:
+                return b'\x02'
+            started.set()
+            await asyncio.Event().wait()
+        client.read_gatt_char.side_effect = read
+        ble.devices[BOARDS[0]['ble']] = object()
         async def stalled(guard):
-            try:
-                started.set()
-                await asyncio.Event().wait()
-            finally:
-                cleaned.set()
-        ble._scan = stalled
+            async with ble.connect(BOARDS[0], guard) as connected:
+                await ble.read_location(connected, b'\x01', guard)
+        ble._measure = stalled
         def guard():
             if started.is_set(): raise ValueError('Calibration cancelled')
-        with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
-            ble.call('scan', guard)
-        self.assertTrue(cleaned.is_set())
+        fake = NS(BleakClient=mock.Mock(return_value=client), BleakScanner=mock.Mock())
+        with mock.patch.dict(sys.modules, {'bleak': fake}):
+            with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
+                ble.call('measure', guard)
+        client.write_gatt_char.assert_has_awaits([
+            mock.call(DATA_MODE, b'\x01', response=True), mock.call(DATA_MODE, b'\x02', response=True)])
+        client.disconnect.assert_awaited_once()

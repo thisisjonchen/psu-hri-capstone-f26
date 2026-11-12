@@ -5,9 +5,8 @@ height error -> P (+ takeoff climb-rate feed-forward) -> climb-rate target (limi
 -> vertical acceleration -> thrust relative to hover -> angle boost
 -> throttle through the thrust curve (ArduPilot MOT_THST_EXPO).
 
-Takeoff keeps the earlier hover behavior that flew well: the target climbs at
-takeoff_rate, the feed-forward starts at takeoff_throttle and blends into
-hover_throttle by the end of the climb, and the integral is active throughout.
+The takeoff target climbs at takeoff_rate. Base throttle reaches hover_throttle
+over two seconds independently of the requested height; the integral stays active.
 
 Throttle is the Betaflight RC value (1000-2000 us); thrust is normalized 0-1.
 """
@@ -19,6 +18,11 @@ GRAVITY = 9.80665
 
 
 class AltitudeController(object):
+    TAKEOFF_THROTTLE_RAMP_SECONDS = 2.0
+    LAND_RATE = 0.15
+    LAND_FINAL_RATE = 0.10
+    LAND_SLOW_HEIGHT = 0.15
+
     def __init__(self, hover_throttle=1510.0, takeoff_throttle=1490.0,
                  throttle_range=(1200.0, 1700.0), height_p=0.8, rate_p=1.43,
                  rate_i=0.71, rate_i_limit=0.71, climb_limit=0.3, descent_limit=0.2,
@@ -45,6 +49,7 @@ class AltitudeController(object):
         self.integral = 0.0
         self.time = None
         self.takeoff = None
+        self.landing_ground = None
         self.target = None
 
     def start_takeoff(self, height, now):
@@ -55,8 +60,17 @@ class AltitudeController(object):
     def cancel_takeoff(self):
         self.takeoff = None
 
+    def start_landing(self, ground_height):
+        if not 0 <= ground_height <= 0.12:
+            raise ValueError('Landing requires a valid preflight floor height')
+        self.takeoff = None
+        self.landing_ground = ground_height
+
+    def cancel_landing(self):
+        self.landing_ground = None
+
     def thrust(self, throttle):
-        """ArduPilot thrust curve: thrust = (1 - expo) * a + expo * a^2."""
+        """Approximate thrust from RC throttle; Betaflight also scales and mixes it."""
         a = (throttle - 1000.0) / 1000.0
         return (1 - self.thrust_expo) * a + self.thrust_expo * a * a
 
@@ -74,16 +88,21 @@ class AltitudeController(object):
         feed_forward = 0.0
         if self.takeoff is not None:
             started, start = self.takeoff
-            self.target = min(desired_height, start + self.takeoff_rate * (now - started))
-            progress = 1.0 if desired_height <= start else (self.target - start) / (desired_height - start)
-            # Blend the takeoff feed-forward into hover so the climb ends without a step.
-            hover = self.takeoff_throttle + (self.hover_throttle - self.takeoff_throttle) * max(0.0, progress)
-            if self.target >= desired_height:
-                self.takeoff = None
-            else:
+            elapsed = max(0.0, now - started)
+            self.target = min(desired_height, start + self.takeoff_rate * elapsed)
+            progress = min(1.0, elapsed / self.TAKEOFF_THROTTLE_RAMP_SECONDS)
+            hover = self.takeoff_throttle + (self.hover_throttle - self.takeoff_throttle) * progress
+            if self.target < desired_height:
                 feed_forward = self.takeoff_rate  # The ramp's own climb rate, as PX4 does.
+            elif progress >= 1.0:
+                self.takeoff = None
         rate_target = max(-self.descent_limit, min(self.climb_limit,
                                                     feed_forward + self.height_p * (self.target - height)))
+        if self.landing_ground is not None:
+            self.target = self.landing_ground
+            descent = (self.LAND_FINAL_RATE if height - self.landing_ground <= self.LAND_SLOW_HEIGHT
+                       else self.LAND_RATE)
+            rate_target = -min(self.descent_limit, descent)
         rate_error = rate_target - climb_rate
         previous = self.integral
         self.integral = max(-self.rate_i_limit, min(self.rate_i_limit,

@@ -1,7 +1,7 @@
 """Horizontal velocity controller against an independent simulated drone.
 
 The simulator models Betaflight angle mode as a lagged lean response with a
-different full-stick angle (65 deg) than the controller assumes (55 deg), air
+different full-stick angle (65 deg) than the controller assumes (60 deg), air
 drag, a constant push from a tilted IMU level, and a delayed, noisy velocity
 estimate. Requirements are basic flight behavior, not the controller's formulas.
 """
@@ -65,7 +65,7 @@ class VelocityControllerTest(unittest.TestCase):
         roll, pitch = c.step((.2, .2), 10.)
         self.assertGreater(roll, 1500, 'right error leans right')
         self.assertGreater(pitch, 1500, 'forward error leans forward')
-        limit = 500 * 5.0 / 55.0
+        limit = 500 * 5.0 / 60.0
         for error in ((10, -10), (-3, 4), (50, 50)):
             for value in VelocityController().step(error, 10.):
                 self.assertLessEqual(abs(value - 1500), limit + 1e-9)
@@ -80,7 +80,7 @@ class VelocityControllerTest(unittest.TestCase):
     def test_push_beyond_authority_saturates_then_recovers_without_windup(self):
         flight = Flight(push_deg=(8.0, 0.0))
         flight.run(10)  # Needs more lean than the 5 deg limit allows.
-        self.assertLessEqual(max(abs(c[0] - 1500) for c in flight.commands), 500 * 5 / 55. + 1e-9)
+        self.assertLessEqual(max(abs(c[0] - 1500) for c in flight.commands), 500 * 5 / 60. + 1e-9)
         flight.axes[0].push = 0.0
         start = len(flight.velocities)
         flight.run(8)

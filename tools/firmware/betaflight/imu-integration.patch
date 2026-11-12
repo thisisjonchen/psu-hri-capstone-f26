@@ -1,0 +1,272 @@
+--- a/src/main/sensors/gyro.c
++++ b/src/main/sensors/gyro.c
+@@ -57,6 +57,8 @@
+ 
+ #include "sensors/boardalignment.h"
+ #include "sensors/gyro.h"
++#include "imu_integral_impl.h"
++#include "drivers/time.h"
+ #include "sensors/gyro_init.h"
+ 
+ #if ((TARGET_FLASH_SIZE > 128) && (defined(USE_GYRO_SPI_ICM20601) || defined(USE_GYRO_SPI_ICM20689) || defined(USE_GYRO_SPI_MPU6500)))
+@@ -391,10 +393,10 @@
+ }
+ #endif // USE_YAW_SPIN_RECOVERY
+ 
+-static FAST_CODE void gyroUpdateSensor(gyroSensor_t *gyroSensor)
++static FAST_CODE bool gyroUpdateSensor(gyroSensor_t *gyroSensor)
+ {
+     if (!gyroSensor->gyroDev.readFn(&gyroSensor->gyroDev)) {
+-        return;
++        return false;
+     }
+     gyroSensor->gyroDev.dataReady = false;
+ 
+@@ -418,7 +420,9 @@
+         }
+     } else {
+         performGyroCalibration(gyroSensor, gyroConfig()->gyroMovementCalibrationThreshold);
+-    }
++        return false;
++    }
++    return true;
+ }
+ 
+ FAST_CODE void gyroUpdate(void)
+@@ -427,10 +431,11 @@
+     float adcSum[XYZ_AXIS_COUNT] = {0};
+ 
+     float active = 0;
++    bool fresh = true;
+ 
+     for (int i = 0; i < GYRO_COUNT; i++) {
+         if (gyro.gyroEnabledBitmask & GYRO_MASK(i)) {
+-            gyroUpdateSensor(&gyro.gyroSensor[i]);
++            fresh = gyroUpdateSensor(&gyro.gyroSensor[i]) && fresh;
+             if (isGyroSensorCalibrationComplete(&gyro.gyroSensor[i])) {
+                 adcSum[X] += gyro.gyroSensor[i].gyroDev.gyroADC.x * gyro.gyroSensor[i].gyroDev.scale;
+                 adcSum[Y] += gyro.gyroSensor[i].gyroDev.gyroADC.y * gyro.gyroSensor[i].gyroDev.scale;
+@@ -445,6 +450,10 @@
+         gyro.gyroADC[Y] = adcSum[Y] / active;
+         gyro.gyroADC[Z] = adcSum[Z] / active;
+     }
++
++    float integralRate[3];
++    for (int axis = 0; axis < 3; axis++) integralRate[axis] = gyro.gyroADC[axis] * (M_PIf / 180.f);
++    imuIntegralGyro(micros(), integralRate, fresh && active > 0);
+ 
+     if (gyro.downsampleFilterEnabled) {
+         // using gyro lowpass 2 filter for downsampling
+--- a/src/main/sensors/acceleration.c
++++ b/src/main/sensors/acceleration.c
+@@ -38,6 +38,8 @@
+ #include "sensors/gyro.h"
+ 
+ #include "acceleration.h"
++#include "imu_integral.h"
++#include "drivers/time.h"
+ 
+ FAST_DATA_ZERO_INIT acc_t acc;                       // acc access functions
+ #ifdef USE_CRSF_ACCGYRO_TELEMETRY
+@@ -123,6 +125,8 @@
+     UNUSED(currentTimeUs);
+ 
+     if (!acc.dev.readFn(&acc.dev)) {
++        const float zero[3] = {0};
++        imuIntegralAccel(micros(), zero, false);
+         return;
+     }
+ 
+@@ -134,6 +138,9 @@
+     calibrateAccelerometer();
+     applyAccelerationTrims(accelerationRuntime.accelerationTrims);
+     postProcessAccelerometer();
++    float integralForce[3];
++    for (int axis = 0; axis < 3; axis++) integralForce[axis] = acc.accADC.v[axis] * acc.dev.acc_1G_rec * 9.8f;
++    imuIntegralAccel(micros(), integralForce, accIsCalibrationComplete());
+ 
+ #ifdef USE_CRSF_ACCGYRO_TELEMETRY
+     // Skip accumulation if reset is in progress (resetSeq odd) to avoid corruption.
+--- a/src/main/msp/msp.c
++++ b/src/main/msp/msp.c
+@@ -148,6 +148,7 @@
+ #include "sensors/boardalignment.h"
+ #include "sensors/compass.h"
+ #include "sensors/gyro.h"
++#include "sensors/imu_integral.h"
+ #include "sensors/gyro_init.h"
+ #include "sensors/rangefinder.h"
+ #include "sensors/opticalflow.h"
+@@ -2398,6 +2399,29 @@
+ {
+ 
+     switch (cmdMSP) {
++    // Private PALS extension, version 1. Standard MSP replies remain unchanged.
++    case 0x7F01: {
++        imuIntegral_t integral;
++        if (sbufBytesRemaining(src) != 8) return MSP_RESULT_ERROR;
++        const uint32_t request = sbufReadU32(src);
++        const uint32_t acknowledged = sbufReadU32(src);
++        imuIntegralReply(micros(), acknowledged, &integral);
++        sbufWriteU8(dst, 1);
++        sbufWriteU8(dst, integral.valid ? 1 : 0);
++        sbufWriteU32(dst, request);
++        sbufWriteU32(dst, integral.sequence);
++        sbufWriteU32(dst, integral.endUs);
++        sbufWriteU32(dst, integral.durationUs);
++        sbufWriteData(dst, integral.rotation, sizeof(integral.rotation));
++        sbufWriteData(dst, integral.velocity, sizeof(integral.velocity));
++        for (int i = 0; i < 3; i++) sbufWriteU16(dst, lrintf(acc.accADC.v[i]));
++        for (int i = 0; i < 3; i++) sbufWriteU16(dst, gyroRateDps(i));
++        sbufWriteU16(dst, attitude.values.roll);
++        sbufWriteU16(dst, attitude.values.pitch);
++        sbufWriteU16(dst, DECIDEGREES_TO_DEGREES(attitude.values.yaw));
++        break;
++    }
++
+     case MSP_BOXNAMES:
+         {
+             const int page = sbufBytesRemaining(src) ? sbufReadU8(src) : 0;
+--- /dev/null
++++ b/src/main/sensors/imu_integral.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include <stdbool.h>
++#include <stdint.h>
++
++typedef struct {
++    uint32_t sequence, endUs, durationUs;
++    float rotation[4]; // x, y, z, w; end body axes relative to interval start.
++    float velocity[3]; // Integrated specific force in the starting body axes, m/s.
++    bool valid;
++} imuIntegral_t;
++
++void imuIntegralGyro(uint32_t now, const float rate[3], bool valid);
++void imuIntegralAccel(uint32_t now, const float force[3], bool valid);
++void imuIntegralRead(uint32_t now, imuIntegral_t *result);
++void imuIntegralReply(uint32_t now, uint32_t acknowledged, imuIntegral_t *result);
+--- /dev/null
++++ b/src/main/sensors/imu_integral_impl.h
+@@ -0,0 +1,122 @@
++// Included once in gyro.c. Sensor tasks and the MSP task run serially.
++#include <math.h>
++#include <string.h>
++#include "imu_integral.h"
++
++static struct {
++    uint32_t time, start, gyroTime, accelTime, sequence;
++    bool started, gyroValid, accelValid, valid;
++    float rate[3], force[3], q[4], velocity[3];
++} imuIntegral;
++
++static void integralProduct(const float a[4], const float b[4], float out[4])
++{
++    float r[4] = {
++        a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
++        a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
++        a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
++        a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]
++    };
++    memcpy(out, r, sizeof(r));
++}
++
++static void integralAdvance(uint32_t now)
++{
++    if (!imuIntegral.started) {
++        imuIntegral.started = true;
++        imuIntegral.start = imuIntegral.time = now;
++        imuIntegral.q[3] = 1.f;
++        return;
++    }
++    const uint32_t elapsed = now - imuIntegral.time;
++    imuIntegral.time = now;
++    if (!elapsed) return;
++    if (!imuIntegral.gyroValid || !imuIntegral.accelValid || elapsed > 20000
++        || now - imuIntegral.gyroTime > 5000 || now - imuIntegral.accelTime > 10000
++        || now - imuIntegral.start > 200000) {
++        imuIntegral.valid = false;
++        return;
++    }
++    const float dt = elapsed * 1.e-6f;
++    // Compose every sample's rotation, preserving rotation about changing axes.
++    float half[4], mid[4];
++    float n = 1.f;
++    for (int i = 0; i < 3; i++) {
++        half[i] = imuIntegral.rate[i] * dt * .25f;
++        n += half[i]*half[i];
++    }
++    n = 1.f / sqrtf(n);
++    for (int i = 0; i < 3; i++) half[i] *= n;
++    half[3] = n;
++    integralProduct(imuIntegral.q, half, mid);
++    const float x=mid[0], y=mid[1], z=mid[2], w=mid[3];
++    const float *f = imuIntegral.force;
++    const float tx=2.f*(y*f[2]-z*f[1]), ty=2.f*(z*f[0]-x*f[2]), tz=2.f*(x*f[1]-y*f[0]);
++    imuIntegral.velocity[0] += (f[0]+w*tx+y*tz-z*ty)*dt;
++    imuIntegral.velocity[1] += (f[1]+w*ty+z*tx-x*tz)*dt;
++    imuIntegral.velocity[2] += (f[2]+w*tz+x*ty-y*tx)*dt;
++    integralProduct(mid, half, imuIntegral.q);
++}
++
++void imuIntegralGyro(uint32_t now, const float rate[3], bool valid)
++{
++    integralAdvance(now);
++    imuIntegral.gyroTime = now;
++    imuIntegral.gyroValid = valid;
++    if (!valid) imuIntegral.valid = false;
++    memcpy(imuIntegral.rate, rate, sizeof(imuIntegral.rate));
++}
++
++void imuIntegralAccel(uint32_t now, const float force[3], bool valid)
++{
++    integralAdvance(now);
++    imuIntegral.accelTime = now;
++    imuIntegral.accelValid = valid;
++    if (!valid) imuIntegral.valid = false;
++    memcpy(imuIntegral.force, force, sizeof(imuIntegral.force));
++}
++
++void imuIntegralRead(uint32_t now, imuIntegral_t *result)
++{
++    integralAdvance(now);
++    result->sequence = ++imuIntegral.sequence;
++    result->endUs = now;
++    result->durationUs = now - imuIntegral.start;
++    result->valid = imuIntegral.valid && result->durationUs > 0 && result->durationUs <= 200000;
++    float norm = 0.f;
++    for (int i = 0; i < 4; i++) norm += imuIntegral.q[i]*imuIntegral.q[i];
++    norm = 1.f / sqrtf(norm);
++    for (int i = 0; i < 4; i++) result->rotation[i] = imuIntegral.q[i]*norm;
++    memcpy(result->velocity, imuIntegral.velocity, sizeof(result->velocity));
++    memset(imuIntegral.velocity, 0, sizeof(imuIntegral.velocity));
++    memset(imuIntegral.q, 0, sizeof(imuIntegral.q));
++    imuIntegral.q[3] = 1.f;
++    imuIntegral.start = now;
++    imuIntegral.valid = imuIntegral.gyroValid && imuIntegral.accelValid;
++}
++
++static imuIntegral_t pendingIntegral;
++static uint32_t acknowledgedIntegral;
++
++void imuIntegralReply(uint32_t now, uint32_t acknowledged, imuIntegral_t *result)
++{
++    imuIntegralRead(now, result);
++    if (acknowledged == 0 || acknowledged == pendingIntegral.sequence) {
++        acknowledgedIntegral = acknowledged;
++    } else if (pendingIntegral.sequence) {
++        // Retain an unanswered interval, including its changing body frame.
++        const float *q=pendingIntegral.rotation, *v=result->velocity;
++        const float tx=2.f*(q[1]*v[2]-q[2]*v[1]);
++        const float ty=2.f*(q[2]*v[0]-q[0]*v[2]);
++        const float tz=2.f*(q[0]*v[1]-q[1]*v[0]);
++        float sum[3] = {v[0]+q[3]*tx+q[1]*tz-q[2]*ty,
++                        v[1]+q[3]*ty+q[2]*tx-q[0]*tz,
++                        v[2]+q[3]*tz+q[0]*ty-q[1]*tx};
++        for (int i=0;i<3;i++) result->velocity[i]=pendingIntegral.velocity[i]+sum[i];
++        integralProduct(q,result->rotation,result->rotation);
++        result->durationUs += pendingIntegral.durationUs;
++        result->valid = result->valid && pendingIntegral.valid && acknowledged == acknowledgedIntegral
++            && result->durationUs <= 200000;
++    }
++    pendingIntegral = *result;
++}

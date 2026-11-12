@@ -3,10 +3,12 @@ import traceback
 import sys
 import yaml
 import threading
+import errno
 
 import rospy
 import rospkg
 import signal
+import select
 import numpy as np
 
 print("tf import")
@@ -21,8 +23,11 @@ from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from geometry_msgs.msg import Quaternion
-from pidrone_pkg.msg import Battery, Mode, RC, State
+from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
+from localization import monotonic
+from localization.distance_guard import fresh, STATE_TIMEOUT
+from localization.imu_clock import ImuClock
 import os
 
 
@@ -33,6 +38,7 @@ class FlightController(object):
 
     Publishers:
     /pidrone/imu
+    /pidrone/imu_msp (MSP accelerometer and gyro counts)
     /pidrone/battery
     /pidrone/mode
 
@@ -54,6 +60,9 @@ class FlightController(object):
         self.curr_mode = 'DISARMED'         #initialize as disarmed
         self.prev_mode = 'DISARMED'         #initialize as disarmed
         self.mode_lock = threading.RLock()
+        self.preflight = self.preflight_received = self.preflight_stamp = None
+        self.coordination_selection = self.selection_received = None
+        self.flight_paired = None
         self.calibration_owner = rospy.get_param('/pidrone/localization/calibration_owner', '')
         self.calibration_request = ''
         # Clear the retired flight lock when upgrading an existing ROS session.
@@ -61,6 +70,13 @@ class FlightController(object):
         # store the command to send to the flight controller
         self.command = cmds.disarm_cmd      #initialize as disarmed
         self.last_command = cmds.disarm_cmd
+        now = monotonic()
+        self.next_rc = self.next_imu = self.next_attitude = self.next_battery = now
+        self.imu_pending = self.battery_pending = None
+        self.imu_clock = ImuClock()
+        self.imu_request = self.imu_ack = 0
+        self.integrated_started = False
+        self.last_rc_ack = now
         # store the mode publisher
         self.modepub = None
         # store the time for angular velocity calculations
@@ -100,11 +116,65 @@ class FlightController(object):
     # ROS subscriber callback methods:
     ##################################
     def desired_mode_callback(self, msg):
-        """ Set the current mode to the desired mode """
+        """Check readiness before accepting an arm or takeoff request."""
         with self.mode_lock:
+            if msg.mode not in ('DISARMED', 'ARMED', 'FLYING'):
+                return
+            if self.curr_mode == 'FLYING' and msg.mode == 'ARMED':
+                rospy.logwarn_throttle(1, 'Ignoring arm request while flying')
+                return
+            if (msg.mode in ('ARMED', 'FLYING') and self.curr_mode != 'FLYING'
+                    and msg.mode != self.curr_mode):
+                reason = self.preflight_failure()
+                if self.curr_mode == 'DISARMED' and msg.mode == 'FLYING':
+                    reason = 'arm_before_takeoff'
+                if reason:
+                    rospy.logwarn_throttle(1, 'Refusing %s: %s' % (msg.mode, reason))
+                    return
+                if self.curr_mode == 'DISARMED':
+                    self.flight_paired = self.preflight.paired
             self.prev_mode = self.curr_mode
             self.curr_mode = msg.mode
+            if self.prev_mode != self.curr_mode:
+                self.preflight = self.preflight_received = self.preflight_stamp = None
+            if self.curr_mode == 'DISARMED':
+                self.flight_paired = None
             self.update_command()
+
+    def coordination_selection_callback(self, msg):
+        with self.mode_lock:
+            if self.curr_mode == 'DISARMED':
+                if self.coordination_selection != msg.data:
+                    self.preflight = self.preflight_received = None
+                self.coordination_selection, self.selection_received = msg.data, monotonic()
+
+    def preflight_callback(self, msg):
+        with self.mode_lock:
+            stamp = msg.header.stamp.to_sec()
+            new_sample = self.preflight_stamp is None or stamp > self.preflight_stamp
+            if msg.ready and not new_sample:
+                return
+            if new_sample:
+                self.preflight_stamp, self.preflight_received = stamp, monotonic()
+            # A refusal still takes effect when its timestamp has not changed.
+            self.preflight = msg
+
+    def preflight_failure(self):
+        report = self.preflight
+        if (report is None or self.preflight_received is None
+                or not fresh(report.header.stamp.to_sec(), rospy.get_time())
+                or not 0 <= monotonic() - self.preflight_received <= STATE_TIMEOUT
+                or report.mode != self.curr_mode):
+            return 'preflight_unavailable'
+        if self.curr_mode == 'DISARMED':
+            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= 2.:
+                return 'flight_setup_unavailable'
+            paired = self.coordination_selection
+        else:
+            paired = self.flight_paired
+        if report.paired != paired:
+            return 'flight_setup_changed'
+        return '' if report.ready else (report.reason or 'preflight_not_ready')
 
     def calibration_owner_callback(self, msg):
         try:
@@ -143,23 +213,89 @@ class FlightController(object):
 
     # Update methods:
     #################
-    def update_imu_message(self):
-        """
-        Compute the ROS IMU message by reading data from the board.
-        """
+    @staticmethod
+    def next_poll(deadline, now, hz):
+        return deadline + (int(max(0., now - deadline) * hz) + 1) / hz
 
-        # Queue both requests before waiting for replies, avoiding an extra
-        # request/response turnaround between attitude and acceleration.
-        replies = self.board.getDataBulk([(MultiWii.ATTITUDE, []), (MultiWii.RAW_IMU, [])])
-        if any(not isinstance(reply, dict) for reply in replies) or set(
-                reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU)):
+    def poll(self, publish_integrated):
+        """Schedule RC and telemetry independently on the same serial connection."""
+        now = monotonic()
+        received = []
+        for code, reply in self.board.receive_available():
+            if code == MultiWii.SET_RAW_RC:
+                if reply == 'Set Raw RC':
+                    self.last_rc_ack = now
+                else:
+                    rospy.logwarn_throttle(1, 'Invalid RC acknowledgment from flight controller')
+            elif code in (MultiWii.INTEGRATED_IMU, 255):
+                if self.imu_pending is not None and code == self.imu_pending[0]:
+                    if isinstance(reply, dict):
+                        if reply.get('request') != self.imu_pending[4]:
+                            continue
+                        reply['sent'] = self.imu_pending[2]
+                        reply['publish_attitude'] = self.imu_pending[3]
+                        # Acknowledge this interval before scheduling the next request.
+                        integrated = self.integrated_imu_sample(reply)
+                        if integrated is not None:
+                            publish_integrated(integrated)
+                    self.imu_pending = None
+                    received.append((code, reply))
+            elif code == MultiWii.ANALOG and self.battery_pending is not None:
+                self.battery_pending = None
+                received.append((code, reply))
+
+        now = monotonic()
+        if self.imu_pending is not None and now - self.imu_pending[1] >= .05:
+            rospy.logwarn_throttle(1, 'IMU response timed out; skipping sample')
+            self.imu_pending = None
+        if self.battery_pending is not None and now - self.battery_pending >= 1.:
+            rospy.logwarn_throttle(1, 'Battery response timed out; skipping sample')
+            self.battery_pending = None
+        if now - self.last_rc_ack >= 1.:
+            rospy.logwarn_throttle(1, 'Missing RC acknowledgment from flight controller')
+
+        requests = []
+        command = self.command
+        rc_due = now >= self.next_rc
+        command_sent = rc_due or command != self.last_command
+        if command_sent:
+            assert len(command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got " + str(len(command))
+            requests.append((MultiWii.SET_RAW_RC, command))
+            if rc_due:
+                self.next_rc = self.next_poll(self.next_rc, now, 60.)
+        if now >= self.next_imu and self.imu_pending is None:
+            attitude_due = now >= self.next_attitude
+            if attitude_due:
+                self.next_attitude = self.next_poll(self.next_attitude, now, 60.)
+            self.imu_request = (self.imu_request+1) & 0xffffffff
+            requests.append((MultiWii.INTEGRATED_IMU, [self.imu_request,self.imu_ack]))
+            self.imu_pending = (MultiWii.INTEGRATED_IMU, now, rospy.Time.now().to_sec(), attitude_due,self.imu_request)
+            self.next_imu = self.next_poll(self.next_imu, now, 100.)
+        if now >= self.next_battery and self.battery_pending is None:
+            requests.append((MultiWii.ANALOG, []))
+            self.battery_pending = now
+            self.next_battery = now + .5
+        if requests:
+            self.board.send_commands(requests)
+        if command_sent and command != self.last_command:
+            self.last_command = command
+        return command_sent, received
+
+    def update_imu_message(self, replies):
+        """Build the legacy IMU message from a fresh attitude/acceleration pair."""
+        if (not isinstance(replies, list) or len(replies) != 2
+                or any(not isinstance(reply, dict) for reply in replies)
+                or set(reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU))):
             rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
             return False
 
+        attitude = next(reply for reply in replies if reply['cmd'] == MultiWii.ATTITUDE)
+        raw = next(reply for reply in replies if reply['cmd'] == MultiWii.RAW_IMU)
+
         # calculate values to update imu_message:
-        roll = np.deg2rad(self.board.attitude['angx'])
-        pitch = -np.deg2rad(self.board.attitude['angy'])
-        heading = np.deg2rad(self.board.attitude['heading'])
+        roll = np.deg2rad(attitude['angx'])
+        pitch = -np.deg2rad(attitude['angy'])
+        heading = np.deg2rad(attitude['heading'])
         # Note that at pitch angles near 90 degrees, the roll angle reading can
         # fluctuate a lot
         # transform heading (similar to yaw) to standard math conventions, which
@@ -179,9 +315,9 @@ class FlightController(object):
         # transform euler angles into quaternion
         quaternion = tf.transformations.quaternion_from_euler(roll, pitch, heading)
         # calculate the linear accelerations
-        lin_acc_x = self.board.rawIMU['ax'] * self.accRawToMss - self.accZeroX
-        lin_acc_y = self.board.rawIMU['ay'] * self.accRawToMss - self.accZeroY
-        lin_acc_z = self.board.rawIMU['az'] * self.accRawToMss - self.accZeroZ
+        lin_acc_x = raw['ax'] * self.accRawToMss - self.accZeroX
+        lin_acc_y = raw['ay'] * self.accRawToMss - self.accZeroY
+        lin_acc_z = raw['az'] * self.accRawToMss - self.accZeroZ
 
         # Rotate the IMU frame to align with our convention for the drone's body
         # frame. IMU: x is forward, y is left, z is up. We want: x is right,
@@ -233,15 +369,55 @@ class FlightController(object):
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
         return True
 
-    def update_battery_message(self):
-        """
-        Compute the ROS battery message by reading data from the board.
-        """
-        # extract vbat, amperage
-        self.board.getData(MultiWii.ANALOG)
-        # Update Battery message:
-        self.battery_message.vbat = self.board.analog['vbat'] * 0.10
-        self.battery_message.amperage = self.board.analog['amperage']
+    def msp_imu_sample(self, reply):
+        """Build an IMU message from MSP counts and the packet receipt time."""
+        try:
+            values = [reply[key] for key in ('ax', 'ay', 'az', 'gx', 'gy', 'gz')]
+            counts = [int(value) for value in values]
+            stamp = float(reply['timestamp'])
+            if (counts != values or any(v < -32768 or v > 32767 for v in counts)
+                    or not 0 < stamp < 4294967296):
+                raise ValueError('invalid MSP counts or receive time')
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # A bad raw sample should not interrupt the control loop.
+            rospy.logwarn_throttle(1, 'Invalid MSP IMU sample; skipping it')
+            return None
+        message = MspImu()
+        message.header = Header()
+        message.header.frame_id = 'fc_msp'
+        message.header.stamp = rospy.Time.from_sec(stamp)
+        message.accelerometer = counts[:3]
+        message.gyroscope = counts[3:]
+        return message
+
+    def integrated_imu_sample(self, reply):
+        try:
+            if (not np.all(np.isfinite(reply['rotation'] + reply['velocity']))
+                    or not .9 < np.linalg.norm(reply['rotation']) < 1.1
+                    or (reply['valid'] and not 0 < reply['duration_us'] <= 200000)):
+                raise ValueError('Invalid integrated IMU payload')
+            stamp = self.imu_clock.map(reply['end_us'], reply['sent'], reply['timestamp'])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            rospy.logwarn_throttle(1, 'Invalid integrated IMU sample; skipping: %s' % error)
+            return None
+        message = IntegratedImu()
+        message.header = Header()
+        message.header.frame_id = 'fc_msp'
+        message.header.stamp = rospy.Time.from_sec(stamp)
+        message.sequence = reply['sequence']
+        message.sample_time_us = reply['end_us']
+        message.integration_time_us = reply['duration_us']
+        message.valid = reply['valid']
+        message.delta_rotation = reply['rotation']
+        message.delta_velocity = reply['velocity']
+        if reply['valid'] or not self.integrated_started:
+            self.imu_ack = reply['sequence']
+        self.integrated_started = self.integrated_started or reply['valid']
+        return message
+
+    def update_battery_message(self, reply):
+        self.battery_message.vbat = reply['vbat'] * 0.10
+        self.battery_message.amperage = reply['amperage']
 
     def update_command(self):
         ''' Set command values if the mode is ARMED or DISARMED '''
@@ -274,15 +450,6 @@ class FlightController(object):
                 print('The USB is unplugged. Please check connection.')
                 raise
         return board
-
-    def send_rc_cmd(self):
-        """ Send commands to the flight controller board """
-        assert len(self.command) == 8, "COMMAND HAS WRONG SIZE, expected 8, got "+str(len(self.command))
-        self.board.send_raw_command(8, MultiWii.SET_RAW_RC, self.command)
-        self.board.receiveDataPacket()
-        if (self.command != self.last_command):
-            print('new command sent:', self.command)
-            self.last_command = self.command
 
     def near_zero(self, n):
         """ Set a number to zero if it is below a threshold value """
@@ -340,9 +507,6 @@ class FlightController(object):
             print('Check the infrared node\n')
             disarm = True
 
-        if self.range is not None and self.range > 1:
-            print(('\nSafety Failure: too high: ' + str(self.range)))
-            disarm = True
         if curr_time - self.heartbeat_state_estimator > rospy.Duration.from_sec(1):
             print('\nSafety Failure: not receiving a state estimate.')
             print('Check the state_estimator node\n')
@@ -371,7 +535,9 @@ def main():
     # Publishers
     ###########
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
+    msp_imupub = rospy.Publisher('/pidrone/imu_msp', MspImu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
+    integral_pub = rospy.Publisher('/pidrone/imu_integrated', IntegratedImu, queue_size=100, tcp_nodelay=True)
     fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
     calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
     calibration_owner_pub = rospy.Publisher('/pidrone/localization/calibration_owner/status', String, queue_size=1, latch=True)
@@ -383,6 +549,8 @@ def main():
     # Subscribers
     ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
+    rospy.Subscriber('/pidrone/coordination/paired', Bool, fc.coordination_selection_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/preflight', FlightReadiness, fc.preflight_callback, queue_size=1)
     rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
@@ -394,11 +562,11 @@ def main():
 
     print("Started flight-controller node!")
 
+    published_mode, last_mode_at = None, None
+    published_calibration = None
     # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
-    # set the loop rate (Hz)
-    r = rospy.Rate(60)
-    last_battery_at = None
     try:
+        calibration_pub.publish(Bool(data=False))
         while not rospy.is_shutdown():
             # if the current mode is anything other than disarmed
             # preform as safety check
@@ -407,28 +575,52 @@ def main():
                 print("mode", fc.curr_mode)
                 break
                 
-            # Deliver the current command before waiting for sensor telemetry.
             fc.update_command()
-            fc.send_rc_cmd()
+            command_sent, replies = fc.poll(integral_pub.publish)
+            for code, reply in replies:
+                if code == MultiWii.ANALOG:
+                    if isinstance(reply, dict):
+                        fc.update_battery_message(reply)
+                        batpub.publish(fc.battery_message)
+                    else:
+                        rospy.logwarn_throttle(1, 'Invalid battery response; skipping sample')
+                    continue
+                if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.INTEGRATED_IMU:
+                    rospy.logwarn_throttle(1, 'Missing integrated IMU reply; imu100001 firmware is required')
+                    continue
+                if reply['publish_attitude'] and fc.update_imu_message(reply['legacy']):
+                    imupub.publish(fc.imu_message)
+                if msp_imupub.get_num_connections() > 0:
+                    raw = next(sample for sample in reply['legacy'] if sample['cmd'] == MultiWii.RAW_IMU)
+                    msp_message = fc.msp_imu_sample(raw)
+                    if msp_message is not None:
+                        msp_imupub.publish(msp_message)
 
-            if fc.update_imu_message():
-                imupub.publish(fc.imu_message)
-            # 2 Hz leaves margin for the routines' 1-second battery watchdog.
-            now = rospy.get_time()
-            if last_battery_at is None or now < last_battery_at or now - last_battery_at >= 0.5:
-                fc.update_battery_message()
-                batpub.publish(fc.battery_message)
-                last_battery_at = rospy.get_time()
+            if command_sent:
+                with fc.mode_lock:
+                    now = monotonic()
+                    # Report the ROS control mode, not Betaflight's arming or Angle flags.
+                    if fc.curr_mode != published_mode or now - last_mode_at >= .1:
+                        fc.modepub.publish(fc.curr_mode)
+                        published_mode, last_mode_at = fc.curr_mode, now
+                    calibration = (fc.calibration_owner, fc.calibration_request)
+                    if calibration != published_calibration:
+                        calibration_owner_pub.publish(String(data=json.dumps({'owner': calibration[0],
+                                                                             'request': calibration[1]})))
+                        published_calibration = calibration
 
-            # publish the current mode of the drone
-            fc.modepub.publish(fc.curr_mode)
-            with fc.mode_lock:
-                calibration_pub.publish(Bool(data=False))
-                calibration_owner_pub.publish(String(data=json.dumps({'owner': fc.calibration_owner,
-                                                                     'request': fc.calibration_request})))
-
-            # sleep for the remainder of the loop time
-            r.sleep()
+            # Wake on a reply or the next request deadline; check commands within 5 ms.
+            deadline = fc.next_rc
+            if fc.imu_pending is None:
+                deadline = min(deadline, fc.next_imu)
+            if fc.battery_pending is None:
+                deadline = min(deadline, fc.next_battery)
+            try:
+                select.select([fc.board.ser], [], [], max(0., min(.005, deadline - monotonic())))
+            except (select.error, OSError) as error:
+                # Python 2 interrupts select on signals. Recheck ROS shutdown above.
+                if not error.args or error.args[0] != errno.EINTR:
+                    raise
             
     except SerialException:
         print('\nCannot connect to the flight controller board.')

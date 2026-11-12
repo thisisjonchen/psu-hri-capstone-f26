@@ -2,7 +2,10 @@
 bleak>=0.22,<2
 numpy>=1.24
 paramiko>=3.4,<4
+psutil>=6,<8
 websockets>=15,<16
 opencv-python
 pupil-apriltags
 pyserial>=3.0
+# Decode ROS recordings on the laptop.
+rosbags>=0.10,<0.12

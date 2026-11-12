@@ -1,0 +1,14 @@
+<launch>
+  <node name="rosbridge_websocket" pkg="pidrone_pkg" type="rosbridge_websocket.py" output="screen">
+    <param name="retry_startup_delay" value="5" />
+    <param name="max_message_size" value="None" />
+    <param name="topics_glob" value="[*]" />
+    <param name="services_glob" value="[*]" />
+    <param name="params_glob" value="[*]" />
+  </node>
+  <node name="rosapi" pkg="rosapi" type="rosapi_node" output="screen">
+    <param name="topics_glob" value="[*]" />
+    <param name="services_glob" value="[*]" />
+    <param name="params_glob" value="[*]" />
+  </node>
+</launch>

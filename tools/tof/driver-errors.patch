@@ -1,0 +1,164 @@
+--- a/vl53l1x/src/i2c.cpp
++++ b/vl53l1x/src/i2c.cpp
+@@ -38,11 +38,11 @@
+ 	reg = htons(reg); // little endian to big endian
+ 
+ 	// write register number
+-	if (write(fd, &reg, sizeof(reg)) < 0) {
++	if (write(fd, &reg, sizeof(reg)) != static_cast<ssize_t>(sizeof(reg))) {
+ 		return false;
+ 	}
+ 
+-	return read(fd, pdata, count);
++	return read(fd, pdata, count) == static_cast<ssize_t>(count);
+ }
+ 
+ bool i2c_readRegisterByte(int reg, uint8_t *pdata)
+@@ -52,7 +52,7 @@
+ 
+ bool i2c_readRegisterWord(uint16_t reg, uint16_t *pdata)
+ {
+-	if (i2c_readRegisterMulti(reg, 2, pdata) < 0) {
++	if (!i2c_readRegisterMulti(reg, 2, pdata)) {
+ 		return false;
+ 	}
+ 	*pdata = ntohs(*pdata); // big endian to little endian
+@@ -68,7 +68,7 @@
+ 	memcpy(buf, &reg, sizeof(reg));
+ 	memcpy(buf + sizeof(reg), pdata, count);
+ 
+-	return write(fd, buf, count + sizeof(reg)) > 0;
++	return write(fd, buf, count + sizeof(reg)) == static_cast<ssize_t>(count + sizeof(reg));
+ }
+ 
+ bool i2c_writeRegisterByte(uint16_t reg, uint8_t value)
+--- a/vl53l1x/src/vl53l1x.cpp
++++ b/vl53l1x/src/vl53l1x.cpp
+@@ -12,6 +12,9 @@
+  */
+ 
+ #include <string>
++#include <chrono>
++#include <cerrno>
++#include <cstring>
+ #include <vector>
+ #include <ros/ros.h>
+ #include <sensor_msgs/Range.h>
+@@ -26,7 +29,9 @@
+ #define CHECK_STATUS(func) { \
+ 	VL53L1_Error status = func; \
+ 	if (status != VL53L1_ERROR_NONE) { \
+-		ROS_WARN("VL53L1X: Error %d on %s", status, STR(func)); \
++		ROS_FATAL("VL53L1X: Error %d on %s", status, STR(func)); \
++		i2c_release(); \
++		return 1; \
+ 	} \
+ }
+ 
+@@ -64,7 +69,7 @@
+ 
+ 	if (timing_budget < 0.02 || timing_budget > 1) {
+ 		ROS_FATAL("Error: timing_budget should be within 0.02 and 1 s (%g is set)", timing_budget);
+-		ros::shutdown();
++		return 1;
+ 	}
+ 
+ 	// The minimum inter-measurement period must be longer than the timing budget + 4 ms (*)
+@@ -72,18 +77,41 @@
+ 
+ 	// Setup I2C bus
+ 	i2c_setup(i2c_bus, i2c_address);
++	if (!ros::ok()) { i2c_release(); return 1; }
++
++	ROS_INFO("VL53L1X: waiting up to 10 s for sensor communication");
++	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
++	uint16_t identity = 0;
++	int identity_error = 0;
++	bool reachable = false;
++	while (ros::ok()) {
++		errno = 0;
++		const bool read_ok = i2c_readRegisterWord(0x010f, &identity);
++		identity_error = read_ok ? 0 : errno;
++		if (read_ok && identity == 0xeacc) { reachable = true; break; }
++		if (std::chrono::steady_clock::now() >= deadline) break;
++		ros::WallDuration(.25).sleep();
++	}
++	if (!ros::ok()) { i2c_release(); return 0; }
++	if (!reachable) {
++		ROS_FATAL("VL53L1X: sensor unavailable after 10 s on I2C bus %d address 0x%02x "
++		          "(identity=0x%04x, errno=%d: %s)", i2c_bus, i2c_address,
++		          identity, identity_error, identity_error ? strerror(identity_error) : "unexpected or incomplete identity");
++		i2c_release();
++		return 1;
++	}
+ 
+ 	// Init sensor
+-	VL53L1_Dev_t dev;
++	VL53L1_Dev_t dev = {};
+ 	VL53L1_Error dev_error;
+-	VL53L1_software_reset(&dev);
+-	VL53L1_WaitDeviceBooted(&dev);
+-	VL53L1_DataInit(&dev);
+-	VL53L1_StaticInit(&dev);
+-	VL53L1_SetPresetMode(&dev, VL53L1_PRESETMODE_AUTONOMOUS);
++	CHECK_STATUS(VL53L1_software_reset(&dev));
++	CHECK_STATUS(VL53L1_WaitDeviceBooted(&dev));
++	CHECK_STATUS(VL53L1_DataInit(&dev));
++	CHECK_STATUS(VL53L1_StaticInit(&dev));
++	CHECK_STATUS(VL53L1_SetPresetMode(&dev, VL53L1_PRESETMODE_AUTONOMOUS));
+ 
+ 	// Print device info
+-	VL53L1_DeviceInfo_t device_info;
++	VL53L1_DeviceInfo_t device_info = {};
+ 	CHECK_STATUS(VL53L1_GetDeviceInfo(&dev, &device_info));
+ 	ROS_INFO("VL53L1X: Device name: %." STR(VL53L1_DEVINFO_STRLEN) "s", device_info.Name);
+ 	ROS_INFO("VL53L1X: Device type: %." STR(VL53L1_DEVINFO_STRLEN) "s", device_info.Type);
+@@ -117,12 +145,14 @@
+ 	// Check for errors after start
+ 	if (dev_error != VL53L1_ERROR_NONE) {
+ 		ROS_FATAL("VL53L1X: Can't start measurement: error %d", dev_error);
+-		ros::shutdown();
++		i2c_release();
++		return 1;
+ 	}
+ 
+ 	ROS_INFO("VL53L1X: ranging");
+ 
+ 	VL53L1_RangingMeasurementData_t measurement_data;
++	bool restart_failed = false;
+ 
+ 	// Main loop
+ 	ros::Rate r(poll_rate);
+@@ -132,14 +162,29 @@
+ 
+ 		// Check the data is ready
+ 		uint8_t data_ready = 0;
+-		VL53L1_GetMeasurementDataReady(&dev, &data_ready);
++		VL53L1_Error ready_error = VL53L1_GetMeasurementDataReady(&dev, &data_ready);
++		if (ready_error != VL53L1_ERROR_NONE) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: data-ready read failed: %d", ready_error);
++			continue;
++		}
+ 		if (!data_ready) {
+ 			continue;
+ 		}
+ 
+ 		// Read measurement
+-		VL53L1_GetRangingMeasurementData(&dev, &measurement_data);
+-		VL53L1_ClearInterruptAndStartMeasurement(&dev);
++		VL53L1_Error read_error = VL53L1_GetRangingMeasurementData(&dev, &measurement_data);
++		const bool recovering = restart_failed;
++		VL53L1_Error restart_error = VL53L1_ClearInterruptAndStartMeasurement(&dev);
++		restart_failed = restart_error != VL53L1_ERROR_NONE;
++		if (restart_failed) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: measurement restart failed: %d", restart_error);
++		}
++		if (read_error != VL53L1_ERROR_NONE) {
++			ROS_WARN_THROTTLE(1.0, "VL53L1X: measurement read failed: %d", read_error);
++			continue;
++		}
++		// Discard the pending result until its interrupt has been acknowledged.
++		if (restart_failed || recovering) continue;
+ 
+ 		// Publish measurement data
+ 		data.header.stamp = range.header.stamp;

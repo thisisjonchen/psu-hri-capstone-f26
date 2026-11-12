@@ -3,6 +3,8 @@
 
   record   stream the topics from the drone to CSV files on this laptop
   camera   record only the camera: raw motion vectors, flow output, height, IMU
+  ekf      capture raw MSP counts, JPEGs, range and published estimates
+  telemetry capture sensors, state, commands and heartbeat without images or drone-side data files
   analyze  summarize a recording: rates, height, velocities, distances, sign check,
            and (for camera recordings) where in the image motion is seen
 
@@ -10,17 +12,22 @@ Usage (from the repository root, props off):
   python3 tools/flow_capture.py record --drone drone1 --seconds 30
   python3 tools/flow_capture.py camera --drone drone1 --seconds 30
   python3 tools/flow_capture.py analyze flow_capture_<time>
+  python3 tools/flow_capture.py ekf --drone drone1 --seconds 30
+  python3 tools/flow_capture.py telemetry --drone drone2 --seconds 45
 
-Uses the same `ssh <drone>` login as the rest of the tools and runs rostopic in
-the drone's pidrone_pkg container. Nothing is written on the drone.
+Uses the same `ssh <drone>` login as the rest of the tools. Subscribers run in
+the drone's pidrone_pkg container; recording files are written on this laptop.
 """
 import argparse
+import base64
 import csv
+import json
 import math
 import re
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -41,6 +48,107 @@ CAMERA_TOPICS = {
     'range': TOPICS['range'],
     'imu': TOPICS['imu'],
 }
+
+
+def record_ekf(drone, seconds, out_dir, images=True):
+    """Stream telemetry to the laptop; buffer full camera captures on the Pi."""
+    if not 0 < seconds <= 3600:
+        raise ValueError('seconds must be in (0, 3600]')
+    out_dir.mkdir(parents=True)
+    worker = Path(__file__).with_name('ekf_stream.py').read_bytes()
+    remote_path = '/tmp/pals-ekf-%s.jsonl' % uuid.uuid4().hex if images else None
+    if images:
+        command = ("umask 077; docker exec -i pidrone_pkg bash -ic 'exec python -u - %d' > %s; "
+                   "pals_status=$?; cat %s || exit $?; exit \"$pals_status\"") % (seconds, remote_path, remote_path)
+        print('Recording images on %s for %d seconds; download follows. Use with props removed.' % (drone, seconds))
+    else:
+        command = "docker exec -i pidrone_pkg bash -ic 'exec python -u - %d --telemetry'" % seconds
+        print('Recording telemetry from %s for %d seconds directly to the laptop; no images.' % (drone, seconds))
+    with (out_dir / 'events.jsonl').open('wb') as output, (out_dir / 'capture.stderr').open('wb') as errors:
+        errors.write(('Remote recording: %s:%s\n' % (drone, remote_path) if images
+                      else 'Telemetry streamed directly to the laptop.\n').encode())
+        errors.flush()
+        try:
+            result = subprocess.run(['ssh', drone, command], input=worker, stdout=output,
+                                    stderr=errors, timeout=seconds + 600)
+        except subprocess.TimeoutExpired as error:
+            location = '%s:%s' % (drone, remote_path) if images else str(out_dir / 'events.jsonl')
+            raise RuntimeError('Capture timed out; data retained at ' + location) from error
+    if result.returncode:
+        raise RuntimeError('Capture failed; see %s.%s' %
+                           (out_dir / 'capture.stderr', ' Remote recording: %s:%s' % (drone, remote_path) if images else ''))
+    # Keep the remote recording until the local completion marker and counts agree.
+    for _ in read_ekf_events(out_dir):
+        pass
+    if remote_path:
+        cleanup = subprocess.run(['ssh', drone, 'rm -f ' + remote_path], stderr=subprocess.PIPE)
+        if cleanup.returncode:
+            print('Saved locally; remote cleanup failed: %s:%s' % (drone, remote_path), file=sys.stderr)
+    print('Saved capture to %s' % out_dir)
+
+
+def read_ekf_events(folder, metadata=None):
+    """Read messages in arrival order with their original timestamps.
+
+    Reading through the end also checks that the recording completed.
+    """
+    session = None
+    schemas, counts = {}, Counter()
+    sequence, last_elapsed, finished = 0, -1, False
+    with (folder / 'events.jsonl').open() as stream:
+        for line_number, line in enumerate(stream, 1):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                if session is None:  # An interactive login shell can print a preamble.
+                    continue
+                raise ValueError('Invalid JSON at line %d' % line_number)
+            if not isinstance(record, dict):
+                raise ValueError('Expected a record at line %d' % line_number)
+            kind = record.get('kind')
+            if session is None:
+                if kind != 'session' or record.get('version') != 1:
+                    raise ValueError('Unsupported or missing capture session')
+                session = record
+                if metadata is not None:
+                    metadata.update(record.get('metadata', {}))
+                continue
+            if finished:
+                raise ValueError('Unexpected data after capture completion')
+            if kind == 'schema':
+                schemas[(record['type'], record['md5sum'])] = record['definition']
+            elif kind == 'message':
+                if record['sequence'] != sequence:
+                    raise ValueError('Missing or reordered event at sequence %d' % sequence)
+                for field in ('received_ns', 'elapsed_ns'):
+                    if type(record[field]) is not int or record[field] < 0:
+                        raise ValueError('Invalid integer timestamp: ' + field)
+                stamp = record['header_stamp_ns']
+                if stamp is not None and (type(stamp) is not int or stamp < 0):
+                    raise ValueError('Invalid header timestamp')
+                if record['elapsed_ns'] < last_elapsed:
+                    raise ValueError('Recorder monotonic time moved backwards')
+                last_elapsed = record['elapsed_ns']
+                schema = (record['type'], record['md5sum'])
+                if schema not in schemas:
+                    raise ValueError('Message has no recorded schema')
+                record['definition'] = schemas[schema]
+                record['payload'] = base64.b64decode(record['payload'], validate=True)
+                counts[record['topic']] += 1
+                sequence += 1
+                yield record
+            elif kind == 'end':
+                if record['reason'] != 'duration':
+                    raise ValueError('Capture ended early: ' + record['reason'])
+                if record['messages'] != sequence or any(
+                        record['counts'].get(topic, 0) != counts[topic]
+                        for topic in set(record['counts']) | set(counts)):
+                    raise ValueError('Capture completion counts do not match')
+                finished = True
+            else:
+                raise ValueError('Unknown capture record: %s' % kind)
+    if not finished:
+        raise ValueError('Incomplete capture: missing completion marker')
 
 
 def record(drone, seconds, out_dir, topics=TOPICS):
@@ -313,12 +421,22 @@ def main():
     cam.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_camera_<time>)')
     ana = sub.add_parser('analyze', help='summarize a recording')
     ana.add_argument('folder', type=Path)
+    for name, help_text in (('ekf', 'capture IMU, images and other EKF inputs; props off'),
+                            ('telemetry', 'capture sensors and controller data without images or drone-side data files')):
+        capture = sub.add_parser(name, help=help_text)
+        capture.add_argument('--drone', required=True, choices=('drone1', 'drone2'))
+        capture.add_argument('--seconds', type=int, default=30)
+        capture.add_argument('--out', type=Path, help='output folder (default: ./flow_capture_%s_<time>)' % name)
     args = parser.parse_args()
     if args.command == 'record':
         record(args.drone, args.seconds, args.out or Path('flow_capture_' + time.strftime('%Y%m%d_%H%M%S')))
     elif args.command == 'camera':
         record(args.drone, args.seconds,
                args.out or Path('flow_capture_camera_' + time.strftime('%Y%m%d_%H%M%S')), CAMERA_TOPICS)
+    elif args.command in ('ekf', 'telemetry'):
+        record_ekf(args.drone, args.seconds,
+                   args.out or Path('flow_capture_' + args.command + '_' + time.strftime('%Y%m%d_%H%M%S')),
+                   images=args.command == 'ekf')
     else:
         analyze(args.folder)
 

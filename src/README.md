@@ -15,21 +15,121 @@ Assuming that the base environment is already set up on the DD24 by following th
    python3 tools/pals.py dashboard
    ```
    Open `http://localhost:8000` if it does not open automatically.
-3. Place each drone disarmed, stationary, and facing the top of the map (+Y).
+   Run the command again to replace an existing dashboard on the same port; restart while disarmed.
+3. Place each drone disarmed on a level floor, stationary and facing the top of the map (+Y).
 4. Click **Connect** in the drone's panel. This sets up SSH if needed, starts its nodes, and opens its terminal. Repeat for the other drone if needed.
-5. Under **Routines**, select a script, enter its arguments, and click **Run**.
+5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
 6. Read all instructions carefully and be ready to disarm at all times.
 
 Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
 
+**Separation guard** defaults off onboard and in the dashboard, bypassing spacing
+corrections and peer checks for both drones. Confirm
+**Disabled on drone** in each status panel before flight. Local estimate checks and
+disarm/watchdog behavior remain active. Re-enable it under **Controls** while the
+connected drones are disarmed. The dashboard resets the switch off when reopened.
+
+For the complete firmware, driver and code rollout, see the
+[drone update guide](../tools/DRONE_UPDATE.md).
+
+## Betaflight telemetry setup
+
+The current FC node and EKF require the bundled `imu100001` firmware. Update the
+firmware and ROS package together; the older `usb2ms001` build does not supply
+integrated IMU telemetry.
+
+To install the firmware and save the 250 Hz serial setting together,
+run from the laptop with the drone disarmed and props removed:
+
+```sh
+python3 tools/pals.py flash-fc --drone drone1
+```
+
+Use `--drone drone2` for drone2. The command backs up the selected drone, preserves
+its configuration, and verifies the update. See the
+[firmware instructions](../tools/firmware/betaflight/README.md#apply-to-a-drone) for
+supported versions and the Pi-side code needed for 100 Hz IMU delivery.
+
+Drone2 uses a SpeedyBee F405 V3 with a custom Betaflight 2026.6.1 build
+(`imu100001`, based on `6dbc4218f`, board config `749fff1`, MSP API 1.48).
+The firmware flushes USB replies every 2 ms. Its saved MSP serial service rate
+is 250 Hz:
+
+```text
+set serial_update_rate_hz = 250
+save
+```
+
+Apply this in the Betaflight CLI while disarmed, with the Pi's flight-controller
+node stopped so it releases the USB port. `save` persists the setting and reboots
+the flight controller. After reconnecting, verify it with
+`get serial_update_rate_hz`, then restart the Pi's flight-controller node.
+
+Drone2's PID profile 0 also uses `vbat_sag_compensation = 100` for battery-voltage
+compensation. This changes motor-output scaling and requires hover-throttle
+verification. The flash command preserves this setting; it does not enable it.
+
+The serial setting controls how often Betaflight services serial traffic. The
+USB interval is a compiled firmware change, preserved in the
+[patch and build instructions](../tools/firmware/betaflight/README.md). Flashing a stock
+image removes that change; restoring the CLI settings alone does not restore it.
+
+The Pi requests integrated rotation and specific force at 100 Hz for
+`/pidrone/imu_integrated`, with FC interval timestamps mapped into ROS time.
+`/pidrone/imu_msp` retains current sensor counts stamped at Pi receipt; the existing
+`/pidrone/imu` attitude messages and RC commands run at 60 Hz. These settings do not
+change gyro sampling or PID loop rates. They are applied to drone2; drone1 is unverified.
+
+## EKF recording and replay
+
+Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
+each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
+Both paths consume integrated IMU increments directly. Splitting an interval assumes
+constant rotation rate and uniformly distributed delta velocity in its starting axes.
+The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
+
+```sh
+cmake -S src/native -B .venv/ekf-native
+cmake --build .venv/ekf-native
+```
+
+Add `.venv/ekf-native` to `LD_LIBRARY_PATH` (`DYLD_LIBRARY_PATH` on macOS)
+before running Python.
+
+Record from the laptop with props removed:
+
+```sh
+python3 tools/flow_capture.py ekf --drone drone2 --seconds 40
+```
+
+Captures require IMU, JPEGs, camera calibration and ToF, and include published
+estimates. Data is buffered on the Pi, downloaded, then removed there. Allow about
+70 MB for a 40-second capture. IMU timestamps mark host receipt; camera timestamps
+mark driver callbacks, not sensor acquisition.
+`camera_delay_s` subtracts the camera's delay relative to IMU timestamps during
+fusion; it leaves recorded timestamps unchanged.
+
+Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
+
+```sh
+.venv/bin/python tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+```
+
+The profile supplies sensor geometry, scales and initial state. Use
+`stationary_intervals_s` only for known periods without translation or rotation;
+leave it empty when rest is unknown. Replay does not affect flight control.
+For older captures containing `motion_vectors_raw`, use `--camera encoder`.
+New captures use JPEGs and omit encoder vectors.
+
 ## Changing Branches
-If the repo has been cloned on the drone and you wish to change the branch the drone is currently on, do the following.
-1. Use the drone's dashboard terminal, or `ssh duckie@[drone].local` (password **quackquack**).
-2. Go to the directory where we have the repo: `cd ~/catkin_ws/src/pidrone_pkg`
-3. You should have the branch you want to change to in mind. If you are unsure of the current branch of the drone, run `git branch --show-current`
-4. To change to the branch you want, do `git checkout -f [branch]`
-5. You are ready to go! Feel free to test as needed. If you need to modify any code, do so on your laptop/base station, push to the branch, then pull.
-6. Restart the nodes while disarmed and facing +Y: `bash ~/catkin_ws/src/pidrone_pkg/boot/pals-start.sh restart`.
+Open **Branches** next to GitHub, select a published branch, then **Switch**.
+Both drones must be reachable, report DISARMED, and have no running routine or local
+changes. Save or stash local changes in their terminals, or use **Clear local changes**
+to discard uncommitted changes and untracked files on both drones after confirmation.
+Clearing keeps commits and ignored files. Switching fetches origin,
+updates each tracking branch without discarding commits, and leaves nodes running.
+Rebuild if native code changed, then use **Restart** with props removed, stationary
+on the floor facing +Y. **Refresh** shows each drone's current branch and revision.
    
    
 ## Cloning the Repo

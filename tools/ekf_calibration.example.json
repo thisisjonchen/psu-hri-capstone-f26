@@ -1,0 +1,23 @@
+{
+  "notes": "Fill in the sensor calibration and initial state. Body axes are forward/left/up; sensor offsets are measured from the IMU. Accelerometer offsets exclude gravity. Initial biases use body axes, m/s^2 and rad/s; zero is an uncalibrated starting guess. stationary_intervals_s contains verified periods at rest as [start, end) seconds since the first IMU stamp; leave empty when unknown.",
+  "acceleration_m_s2_per_count": null,
+  "gyro_rad_s_per_count": null,
+  "acceleration_offset_msp_counts": null,
+  "rotation_body_msp": null,
+  "range_offset_body": null,
+  "range_beam_body": null,
+  "rotation_body_camera": null,
+  "camera_offset_body": null,
+  "uwb_offset_body": [0.0, 0.038, 0.0],
+  "initial": {
+    "quaternion": null,
+    "position": null,
+    "velocity": null,
+    "acceleration_bias": [0.0, 0.0, 0.0],
+    "gyro_bias": [0.0, 0.0, 0.0]
+  },
+  "fusion_delay_s": 0.35,
+  "camera_delay_s": 0.04,
+  "uwb_delay_s": 0.3,
+  "stationary_intervals_s": []
+}

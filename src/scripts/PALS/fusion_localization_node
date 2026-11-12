@@ -1,274 +1,117 @@
 #!/usr/bin/env python
-"""IMU/optical-flow velocity, local odometry, IMU/ToF climb rate and UWB room position.
+"""Adapt room-frame EKF output for the controller and validate the anchor layout.
 
-IMU acceleration predicts velocity and optical flow corrects it. On the ground
-(not flying, or within ground_margin of the ground height) velocity is zero;
-below flow_min_height the IMU coasts alone, as PX4 does. UWB only
-corrects the room offset, so XY control works without UWB. IMU vertical
-acceleration and ToF height give the climb rate used by altitude control.
+The EKF initializes room XY from UWB and owns the startup +Y heading.
+Here, XY corrections reach the controller at a limited speed; velocity passes
+through unchanged. ToF freshness remains part of controller readiness.
 """
 import math
 import threading
-from collections import deque
+from copy import deepcopy
 
 import numpy as np
 import rospy
 import tf
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
-from pidrone_pkg.msg import AnchorLayout, Mode, State, TagCorners
-from sensor_msgs.msg import CameraInfo, Imu, Range
+from pidrone_pkg.msg import AnchorLayout, State
+from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, UInt32
 
-from localization.fusion import (RoomOffset, VelocityFilter, VerticalFilter, body_angle,
-                                 horizontal_acceleration, rotate, vertical_acceleration)
 from localization.position import PositionCombiner
-from localization.apriltag_geometry import camera_rotation, floor_tag_yaw_offset
 from localization import monotonic
+from localization.rotations import quaternion_matrix
 
 
 class FusionLocalizationNode(object):
     def __init__(self):
         self.lock = threading.RLock()
+        self.updated = threading.Event()
+        self.ekf_odom = None
+        self.ekf_ready, self.ekf_ready_at = False, None
+        self.ekf_reference_lost = False
+        self.ekf_published_stamp = None
+        self.range_stamp = None
         self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
-        self.velocity_settings = dict(
-            acceleration_stddev=float(rospy.get_param('~acceleration_stddev', 0.3)),
-            bias_stddev=float(rospy.get_param('~acceleration_bias_stddev', 0.02)),
-            timeout=float(rospy.get_param('~velocity_timeout', 0.5)),
-            max_gap=self.timeout,
-            gate=float(rospy.get_param('~innovation_gate', 9.21)),
-            max_rejections=int(rospy.get_param('~flow_max_rejections', 5)))
-        self.velocity = VelocityFilter(**self.velocity_settings)
-        self.vertical_settings = dict(
-            acceleration_stddev=float(rospy.get_param('~vertical_acceleration_stddev', 0.3)),
-            bias_stddev=float(rospy.get_param('~vertical_bias_stddev', 0.05)),
-            max_gap=self.timeout)
-        self.vertical = VerticalFilter(**self.vertical_settings)
-        self.tof_variance = float(rospy.get_param('~tof_height_stddev', 0.02)) ** 2
-        self.room = RoomOffset(
-            drift_stddev=float(rospy.get_param('~drift_stddev', 0.08)),
-            gate=float(rospy.get_param('~innovation_gate', 9.21)),
-            max_innovation=float(rospy.get_param('~max_innovation', 1.0)))
         self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
+        self.max_correction_speed = float(rospy.get_param('~max_correction_speed', 0.05))
         self.frame = rospy.get_param('~frame_id', 'map')
-        self.odom_frame = rospy.get_param('~odom_frame', 'odom')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
-        flow_stddev = float(rospy.get_param('~flow_velocity_stddev', 0.15))
-        zero_stddev = float(rospy.get_param('~zero_velocity_stddev', 0.02))
-        self.flow_variance, self.zero_variance = flow_stddev ** 2, zero_stddev ** 2
-        self.flow_limit = float(rospy.get_param('~max_flow_speed', 2.0))
-        self.flow_min_height = float(rospy.get_param('~flow_min_height', 0.10))
-        self.ground_margin = float(rospy.get_param('~ground_margin', 0.02))
-        self.ground_height = None
-        if (len(set((self.frame, self.odom_frame, self.body_frame))) != 3
-                or not all((self.frame, self.odom_frame, self.body_frame))
+        if (self.frame == self.body_frame or not all((self.frame, self.body_frame))
                 or not all(np.isfinite(v) and v > 0 for v in
-                           (self.timeout, self.skew, flow_stddev, zero_stddev, self.flow_limit,
-                            self.flow_min_height, self.ground_margin))):
-            raise ValueError('Invalid fusion frames, limits or timeouts')
+                           (self.timeout, self.skew, self.max_correction_speed))):
+            raise ValueError('Invalid fusion frames, timeouts or correction speed')
         self.height = PositionCombiner(
             stale_after=self.timeout, max_skew=self.skew,
             floor_z=float(rospy.get_param('~floor_z', 0.0)),
             tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
-        self.imu = None
-        self.imu_history = deque(maxlen=200)
-        self.tag_camera = None
-        self.tag_rotation = camera_rotation(
-            float(rospy.get_param('~tag_camera/camera_pitch_down_deg', 45.0)),
-            float(rospy.get_param('~tag_camera/camera_azimuth_deg', 0.0)),
-            float(rospy.get_param('~tag_camera/camera_image_roll_deg', 0.0)))
-        self.tag_samples = deque(maxlen=3)
-        self.tag_last_stamp = None
-        self.tag_correction_at = None
-        self.tag_accepted_stamp = None
-        self.tag_reason = 'Waiting for tag 5'
-        self.mode = None
-        self.mode_at = None
-        self.pending = []
+        self.attitude_stamp = None
+        self.limited = self.limited_stamp = None
         self.layout = None
         self.layout_stamp = None
+        self.layout_changed = False
         self.generation = 0
         self.last_time = None
-        self.reason = 'Waiting for UWB'
-        self.velocity_reason = 'Waiting for IMU'
+        self.last_status_at = None
+        self.published_ready = None
+        self.last_ready_at = None
+        self.published_generation = None
         self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
         self.pose_pub = rospy.Publisher('pidrone/localization/fused', PoseWithCovarianceStamped, queue_size=1)
         self.odom_pub = rospy.Publisher('pidrone/localization/odometry', Odometry, queue_size=1)
         self.status_pub = rospy.Publisher('pidrone/localization/fusion_status', DiagnosticArray, queue_size=1)
         self.local_pub = rospy.Publisher('pidrone/localization/local_ready', Bool, queue_size=1)
         self.ready_pub = rospy.Publisher('pidrone/localization/ready', Bool, queue_size=1)
-        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1)
+        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1, latch=True)
         self.broadcaster = tf.TransformBroadcaster()
         self.subscribers = [
-            rospy.Subscriber('pidrone/mode', Mode, self.mode_callback, queue_size=1),
-            rospy.Subscriber('pidrone/imu', Imu, self.imu_callback, queue_size=1),
-            rospy.Subscriber('pidrone/apriltag/reference_corners', TagCorners, self.tag_callback, queue_size=1),
-            rospy.Subscriber('raspicam_node/camera_info', CameraInfo, self.camera_callback, queue_size=1),
             rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
-            rospy.Subscriber('pidrone/picamera/twist', TwistStamped, self.flow_callback, queue_size=1),
-            rospy.Subscriber('pidrone/localization/uwb', PoseWithCovarianceStamped, self.uwb_callback, queue_size=10),
-            rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1)]
-        rospy.loginfo('Waiting to align heading: keep drone disarmed, stationary and facing map +Y')
+            rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1),
+            rospy.Subscriber('pidrone/ekf/odometry', Odometry, self.ekf_callback, queue_size=1,
+                             tcp_nodelay=True),
+            rospy.Subscriber('pidrone/ekf/local_ready', Bool, self.ekf_ready_callback, queue_size=1)]
 
     def fresh(self, stamp, now, timeout=None):
         limit = self.timeout if timeout is None else timeout
         return stamp is not None and 0 < stamp <= now and now - stamp <= limit
 
-    def on_ground(self):
-        """Not flying, or resting at the ground height measured before takeoff."""
-        now = rospy.get_time()
-        if self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, now):
-            return True
-        height, _ = self.height.height(monotonic(), now)
-        return bool(height is not None and self.ground_height is not None
-                    and height.z <= self.ground_height + self.ground_margin)
-
-    def invalidate_room(self):
-        self.room.reset()
-        self.pending = []
-        self.generation += 1
-
-    def mode_callback(self, msg):
+    def ekf_ready_callback(self, msg):
         with self.lock:
-            self.mode, self.mode_at = msg.mode, rospy.get_time()
+            self.ekf_ready, self.ekf_ready_at = bool(msg.data), rospy.get_time()
 
-    def imu_callback(self, msg):
-        with self.lock:
-            q = msg.orientation
-            quaternion = np.array([q.x, q.y, q.z, q.w], dtype=float)
-            stamp = msg.header.stamp.to_sec()
-            omega = np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z])
-            norm = np.linalg.norm(quaternion)
-            if (msg.orientation_covariance[0] == -1 or not self.fresh(stamp, rospy.get_time())
-                    or not np.all(np.isfinite(quaternion)) or norm < 1e-6
-                    or not np.all(np.isfinite(omega))):
-                return
-            if self.imu is not None and stamp <= self.imu[0]:
-                return
-            quaternion /= norm
-            self.height.update_attitude(tuple(quaternion), stamp, monotonic())
-            self.imu = (stamp, tf.transformations.euler_from_quaternion(quaternion), omega, quaternion)
-            self.imu_history.append(self.imu)
-            a = msg.linear_acceleration
-            acceleration = np.array([a.x, a.y, a.z])
-            valid = msg.linear_acceleration_covariance[0] != -1 and np.all(np.isfinite(acceleration))
-            self.velocity.predict(horizontal_acceleration(acceleration, self.imu[1]) if valid else None, stamp)
-            self.vertical.predict(vertical_acceleration(acceleration, self.imu[1]) if valid else None, stamp)
-            if self.on_ground():
-                _, self.velocity_reason = self.velocity.correct((0, 0), self.zero_variance, stamp, gated=False)
+    def ekf_callback(self, msg):
+        self.update_ekf(msg)
+        self.step()
+        self.updated.set()
 
-    def camera_callback(self, msg):
-        with self.lock:
-            # Ignore changing header timestamps. Geometry validates calibration on use.
-            calibration = (msg.width, msg.height, msg.header.frame_id,
-                           tuple(msg.K), tuple(msg.D), msg.distortion_model)
-            if calibration != self.tag_camera:
-                self.tag_samples.clear()
-            self.tag_camera = calibration
-
-    def tag_callback(self, msg):
-        """Use tag 5's printed top as +Y in every flight mode; never command yaw."""
+    def update_ekf(self, msg):
         with self.lock:
             now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
-            if msg.tag_id != 5:
+            if (self.ekf_reference_lost or msg.header.frame_id != self.frame
+                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, .15)):
                 return
-            if not self.fresh(stamp, now):
-                self.tag_reason = 'Tag 5 frame is stale or invalid'
+            if self.ekf_odom is not None and stamp <= self.ekf_odom.header.stamp.to_sec():
                 return
-            if self.tag_last_stamp is not None and stamp <= self.tag_last_stamp:
+            p, q, v, w = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist.linear, msg.twist.twist.angular
+            quaternion = np.array([q.x, q.y, q.z, q.w])
+            if (not all(np.all(np.isfinite(value)) for value in
+                        ((p.x, p.y, p.z), quaternion, (v.x, v.y, v.z), (w.x, w.y, w.z),
+                         msg.pose.covariance, msg.twist.covariance))
+                    or abs(np.linalg.norm(quaternion) - 1.) > .001):
                 return
-            self.tag_last_stamp = stamp
-            try:
-                if self.tag_camera is None or not self.imu_history or self.room.yaw_offset is None:
-                    raise ValueError('Tag 5 needs camera calibration and initialized IMU heading')
-                width, height, frame, k, d, model = self.tag_camera
-                if (msg.image_width != width or msg.image_height != height
-                        or not frame or msg.header.frame_id != frame):
-                    raise ValueError('Tag 5 image does not match camera calibration')
-                # Match image acquisition time, not delayed detector receipt time.
-                imu = min(self.imu_history, key=lambda sample: abs(sample[0] - stamp))
-                skew = abs(imu[0] - stamp)
-                if (not self.fresh(imu[0], now) or skew > .05
-                        or skew * np.linalg.norm(imu[2]) > math.radians(1)):
-                    raise ValueError('Tag 5 needs time-aligned IMU')
-                pixels = np.column_stack((msg.corner_x, msg.corner_y))
-                if (pixels.shape != (4, 2) or np.any(pixels < 0)
-                        or np.any(pixels[:, 0] >= width) or np.any(pixels[:, 1] >= height)):
-                    raise ValueError('Invalid tag corners or image bounds')
-                local_quaternion = tf.transformations.quaternion_multiply(
-                    imu[3], tf.transformations.quaternion_from_euler(0, 0, -math.pi / 2))
-                offset = floor_tag_yaw_offset(pixels, k, d, local_quaternion, self.tag_rotation, model)
-            except ValueError as error:
-                self.tag_samples.clear()
-                self.tag_reason = str(error)
-                return
-            if (self.tag_samples and (stamp - self.tag_samples[-1][0] > self.timeout
-                    or any(abs(math.atan2(math.sin(offset - value), math.cos(offset - value)))
-                           > math.radians(5) for _, value in self.tag_samples))):
-                self.tag_samples.clear()
-            self.tag_samples.append((stamp, offset))
-            if len(self.tag_samples) < 3:
-                self.tag_reason = 'Confirming tag 5 across three frames'
-                return
-            mean = math.atan2(sum(math.sin(v) for _, v in self.tag_samples),
-                              sum(math.cos(v) for _, v in self.tag_samples))
-            error = math.atan2(math.sin(mean - self.room.yaw_offset),
-                               math.cos(mean - self.room.yaw_offset))
-            # At most 2 degrees/sec, with no accumulated allowance through gaps
-            # or bursts of delayed detections. Small errors converge smoothly.
-            dt = min(.1, stamp - self.tag_samples[-2][0])
-            if self.tag_correction_at is not None:
-                dt = min(dt, max(0, now - self.tag_correction_at))
-            limit = math.radians(2) * dt
-            delta = max(-limit, min(limit, error * (1 - math.exp(-dt))))
-            self.room.correct_yaw(delta, self.velocity.odom)
-            self.tag_correction_at, self.tag_accepted_stamp = now, stamp
-            self.tag_reason = 'Tag 5 correcting yaw'
-            rospy.set_param('~room_yaw_offset', self.room.yaw_offset)
+            # ToF tilt compensation uses FLU attitude; the ROS odometry body is RFU.
+            quaternion = tf.transformations.quaternion_multiply(
+                quaternion, tf.transformations.quaternion_from_euler(0, 0, math.pi / 2))
+            self.attitude_stamp = stamp
+            self.height.update_attitude(tuple(quaternion), stamp, monotonic())
+            self.ekf_odom = msg
 
     def range_callback(self, msg):
         with self.lock:
+            self.range_stamp = msg.header.stamp
             self.height.update_range(msg.range, msg.min_range, msg.max_range,
                                      msg.header.stamp.to_sec(), monotonic())
-            height, _ = self.height.height(monotonic(), rospy.get_time())
-            if height is not None:
-                self.vertical.correct(height.z, self.tof_variance, height.stamp)
-                if self.mode in ('DISARMED', 'ARMED') and self.fresh(self.mode_at, rospy.get_time()):
-                    self.ground_height = height.z
-
-    def uwb_callback(self, msg):
-        with self.lock:
-            stamp = msg.header.stamp.to_sec()
-            if msg.header.frame_id != self.frame or not self.fresh(stamp, rospy.get_time()):
-                return
-            p, c = msg.pose.pose.position, msg.pose.covariance
-            self.pending.append((stamp, (p.x, p.y), [[c[0], c[1]], [c[6], c[7]]]))
-            self.pending = sorted(self.pending, key=lambda item: item[0])[-20:]
-
-    def flow_callback(self, msg):
-        with self.lock:
-            now = rospy.get_time()
-            stamp = msg.header.stamp.to_sec()
-            if self.on_ground():
-                return  # Zero-velocity observations replace the near-floor camera.
-            height, _ = self.height.height(monotonic(), now)
-            if height is not None and height.z - self.height.floor_z < self.flow_min_height:
-                self.velocity_reason = 'Below optical-flow working height; coasting on IMU'
-                return
-            if (height is None or self.imu is None or not self.fresh(self.imu[0], now)
-                    or not self.fresh(stamp, now) or msg.header.frame_id != self.body_frame
-                    or max(stamp, self.imu[0], height.stamp)
-                    - min(stamp, self.imu[0], height.stamp) > self.skew):
-                self.velocity_reason = 'Optical flow needs fresh, aligned IMU/ToF and body frame'
-                return
-            # Already metric and rotation-free (optical_flow_node uses attitude per frame).
-            velocity = np.array([msg.twist.linear.x, msg.twist.linear.y], dtype=float)
-            if not np.all(np.isfinite(velocity)) or np.linalg.norm(velocity) > self.flow_limit:
-                self.velocity_reason = 'Invalid optical-flow velocity'
-                return
-            _, self.velocity_reason = self.velocity.correct(
-                rotate(velocity, body_angle(self.imu[1][2])), self.flow_variance, stamp)
 
     def anchors_callback(self, msg):
         with self.lock:
@@ -293,163 +136,148 @@ class FusionLocalizationNode(object):
             if self.layout_stamp is not None and stamp <= self.layout_stamp:
                 return
             layout = sorted(zip(msg.anchor_ids, positions))
-            changed = self.layout is not None and (
-                [a[0] for a in layout] != [a[0] for a in self.layout]
-                or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout], atol=0.02, rtol=0))
-            if changed:
-                self.invalidate_room()
-            if self.layout is None or changed:
-                self.layout = layout
+            if self.layout is not None and (
+                    [a[0] for a in layout] != [a[0] for a in self.layout]
+                    or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout], atol=0.02, rtol=0)):
+                # The EKF started in the old layout's frame.
+                self.layout_changed = True
+                self.generation += 1
+            self.layout = layout
             self.layout_stamp = stamp
 
     def step(self):
         with self.lock:
             now = rospy.get_time()
             if self.last_time is not None and now < self.last_time:
-                self.velocity = VelocityFilter(**self.velocity_settings)
-                self.vertical = VerticalFilter(**self.vertical_settings)
-                self.invalidate_room()
-                self.height.range = self.height.attitude = self.imu = None
-                self.imu_history.clear()
-                self.tag_samples.clear()
-                self.tag_last_stamp = self.tag_correction_at = self.tag_accepted_stamp = None
-                self.layout = None
-                self.layout_stamp = None
+                self.ekf_reference_lost = True
+                self.generation += 1
+                self.height.range = self.height.attitude = self.attitude_stamp = None
+                self.layout = self.layout_stamp = None
             self.last_time = now
-            # Initial fallback only. Tag 5 may subsequently correct this offset;
-            # later turns/disarms must not recapture it from IMU alone.
-            if (self.room.yaw_offset is None and self.mode == 'DISARMED'
-                    and self.fresh(self.mode_at, now) and self.imu is not None
-                    and self.fresh(self.imu[0], now)):
-                self.room.yaw_offset = math.pi / 2.0 - self.imu[1][2]
-                rospy.set_param('~room_yaw_offset', self.room.yaw_offset)
-                rospy.loginfo('Startup heading aligned with map +Y; room_yaw_offset=%.9f rad',
-                              self.room.yaw_offset)
             height, height_reason = self.height.height(monotonic(), now)
-            imu_ready = self.imu is not None and self.fresh(self.imu[0], now)
-            local_ready = bool(imu_ready and self.velocity.ready(now))
+            attitude_ready = bool(self.fresh(self.attitude_stamp, now, .15) and not self.ekf_reference_lost)
+            local_ready = bool(attitude_ready and height is not None and self.ekf_ready
+                               and self.fresh(self.ekf_ready_at, now, .15))
+            ready = bool(local_ready and self.layout is not None and not self.layout_changed)
+            reason = ('OK' if ready
+                      else 'Clock changed; restart localization on the floor' if self.ekf_reference_lost
+                      else height_reason if height is None
+                      else 'EKF attitude unavailable' if not attitude_ready
+                      else 'Waiting for EKF readiness' if not local_ready
+                      else 'Anchor layout changed; restart localization on the floor' if self.layout_changed
+                      else 'Four surveyed anchors required')
+            ready_at = monotonic()
+            readiness = (local_ready, ready)
+            # Send changes immediately and keep the dashboard's heartbeat fresh.
+            if readiness != self.published_ready or ready_at - self.last_ready_at >= .1:
+                self.local_pub.publish(Bool(data=local_ready))
+                self.ready_pub.publish(Bool(data=ready))
+                self.published_ready, self.last_ready_at = readiness, ready_at
+            if self.generation != self.published_generation:
+                self.generation_pub.publish(UInt32(data=self.generation))
+                self.published_generation = self.generation
             if not local_ready:
-                # Odometry missed motion, so it can no longer carry the room pose.
-                self.room.reset()
-            elif self.layout is not None:
-                for stamp, position, covariance in self.pending:
-                    if self.fresh(stamp, now):
-                        _, self.reason = self.room.update(
-                            position, covariance, stamp, self.velocity.odom_at(stamp))
-            self.pending = []
-            # Only an accepted fix renews the room pose; rejected fixes still expire.
-            if self.room.offset is not None and not self.room.ready(now):
-                self.room.reset()
-            room_ready = self.room.ready(now)
-            ready = bool(local_ready and room_ready and self.layout is not None and height)
-            predicting = ready and not self.fresh(self.room.stamp, now)
-            reason = ('Predicting through UWB gap' if predicting
-                      else 'OK' if ready else height_reason if height is None
-                      else 'IMU unavailable' if not imu_ready
-                      else self.velocity_reason if not local_ready
-                      else 'Waiting for disarmed mode and fresh IMU to align heading' if self.room.yaw_offset is None
-                      else 'Four surveyed anchors required' if self.layout is None
-                      else 'UWB missing or stale' if self.reason == 'OK' else self.reason)
-            self.local_pub.publish(Bool(data=local_ready))
-            self.ready_pub.publish(Bool(data=ready))
-            self.generation_pub.publish(UInt32(data=self.generation))
-            if height and imu_ready:
-                self.publish_estimates(height, local_ready, ready, now)
+                self.limited = None
+            if height and attitude_ready:
+                self.publish_estimates(local_ready, ready)
+            status_at = monotonic()
+            if self.last_status_at is not None and status_at - self.last_status_at < .5:
+                return
+            gap = (0. if self.limited is None or self.ekf_odom is None else
+                   math.hypot(self.limited[0] - self.ekf_odom.pose.pose.position.x,
+                              self.limited[1] - self.ekf_odom.pose.pose.position.y))
             status = DiagnosticStatus()
             status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof+camera'
-            status.level = DiagnosticStatus.OK if ready and not predicting else DiagnosticStatus.WARN
+            status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
             status.message = reason
-            status.values = [KeyValue(key='velocity_source',
-                                      value='zero velocity (on ground)' if self.on_ground() else 'IMU + optical flow'),
-                             KeyValue(key='ground_height', value=str(self.ground_height)),
+            status.values = [KeyValue(key='velocity_source', value='EKF'),
                              KeyValue(key='local_ready', value=str(local_ready)),
-                             KeyValue(key='last_velocity_result', value=self.velocity_reason),
-                             KeyValue(key='acceleration_bias', value=str(self.velocity.state[2:].tolist())),
-                             KeyValue(key='room_yaw_offset', value=str(self.room.yaw_offset)),
-                             KeyValue(key='tag_yaw_status', value=(self.tag_reason
-                                 if self.fresh(self.tag_last_stamp, now) else 'Tag 5 unavailable; retaining yaw offset')),
-                             KeyValue(key='tag_yaw_stamp', value=str(self.tag_accepted_stamp)),
-                             KeyValue(key='height_source', value='ToF'),
+                             KeyValue(key='height_source', value='EKF + ToF'),
                              KeyValue(key='frame_id', value=self.frame),
-                             KeyValue(key='last_uwb_result', value=self.reason)]
+                             KeyValue(key='correction_gap_m', value='%.3f' % gap)]
             diagnostics = DiagnosticArray()
             diagnostics.header.stamp = rospy.Time.from_sec(now)
             diagnostics.status = [status]
             self.status_pub.publish(diagnostics)
+            self.last_status_at = status_at
 
-    def publish_estimates(self, height, local_ready, ready, now):
-        angle = body_angle(self.imu[1][2])
-        quaternion = tf.transformations.quaternion_multiply(self.imu[3],
-            tf.transformations.quaternion_from_euler(0, 0, -math.pi / 2.0))
-        odom = self.velocity.odom
-        state = State()
-        state.header.frame_id = self.odom_frame
-        # Preserve sensor age, even when publishing cached odometry for altitude control.
-        state.header.stamp = rospy.Time.from_sec(height.stamp)
-        p, q = state.pose_with_covariance.pose.position, state.pose_with_covariance.pose.orientation
-        p.x, p.y, p.z = odom[0], odom[1], height.z - self.height.floor_z
-        q.x, q.y, q.z, q.w = quaternion
-        state.pose_with_covariance.covariance[0] = state.pose_with_covariance.covariance[7] = 1e6
-        state.pose_with_covariance.covariance[14] = 0.03 ** 2
-        for index in (21, 28, 35):
-            state.pose_with_covariance.covariance[index] = 0.15 ** 2
-        velocity = rotate(self.velocity.velocity, -angle) if local_ready else np.zeros(2)
-        state.twist_with_covariance.twist.linear.x, state.twist_with_covariance.twist.linear.y = velocity
-        state.twist_with_covariance.twist.linear.z = self.vertical.climb_rate
-        omega = state.twist_with_covariance.twist.angular
-        omega.x, omega.y, omega.z = -self.imu[2][1], self.imu[2][0], self.imu[2][2]
-        velocity_covariance = np.eye(2) * 1e6
+    def limit(self, odometry, quaternion):
+        """Follow EKF velocity; close the XY gap to the EKF at max_correction_speed."""
+        stamp = odometry.header.stamp.to_sec()
+        p, v = odometry.pose.pose.position, odometry.twist.twist.linear
+        target = np.array([p.x, p.y])
+        if self.limited is None:
+            self.limited = target
+        else:
+            dt = max(0., stamp - self.limited_stamp)
+            self.limited = self.limited + quaternion_matrix(quaternion)[:2].dot([v.x, v.y, v.z]) * dt
+            error = target - self.limited
+            distance, step = np.linalg.norm(error), self.max_correction_speed * dt
+            self.limited = target if distance <= step else self.limited + error * step / distance
+        self.limited_stamp = stamp
+        return self.limited, float(np.sum((self.limited - target) ** 2))
+
+    def publish_estimates(self, local_ready, ready):
+        odometry = self.ekf_odom
+        stamp = odometry.header.stamp.to_sec()
+        if stamp == self.ekf_published_stamp:
+            return
+        q = odometry.pose.pose.orientation
+        quaternion = (q.x, q.y, q.z, q.w)
+        pose = deepcopy(odometry.pose)
         if local_ready:
-            rotation = np.column_stack((rotate((1, 0), -angle), rotate((0, 1), -angle)))
-            velocity_covariance = rotation.dot(self.velocity.velocity_covariance()).dot(rotation.T)
-        state.twist_with_covariance.covariance[0] = velocity_covariance[0, 0]
-        state.twist_with_covariance.covariance[1] = velocity_covariance[0, 1]
-        state.twist_with_covariance.covariance[6] = velocity_covariance[1, 0]
-        state.twist_with_covariance.covariance[7] = velocity_covariance[1, 1]
-        state.twist_with_covariance.covariance[14] = (self.vertical.covariance[1, 1]
-                                                      if self.vertical.initialized else 1e6)
-        for index in (21, 28, 35):
-            state.twist_with_covariance.covariance[index] = 1e6
+            (pose.pose.position.x, pose.pose.position.y), gap = self.limit(odometry, quaternion)
+            covariance = list(pose.covariance)
+            covariance[0] += gap
+            covariance[7] += gap
+            pose.covariance = covariance
+        state = State()
+        state.header = deepcopy(odometry.header)
+        # Keep the existing altitude watchdog tied to a real ToF observation.
+        state.header.stamp = min((odometry.header.stamp, self.range_stamp), key=lambda value: value.to_sec())
+        state.pose_with_covariance = pose
+        state.twist_with_covariance.twist.angular = odometry.twist.twist.angular
+        yaw = tf.transformations.euler_from_quaternion(quaternion)[2]
+        c, s = math.cos(yaw), math.sin(yaw)
+        level = np.array([[c, s, 0.], [-s, c, 0.], [0., 0., 1.]])
+        rotation = level.dot(quaternion_matrix(quaternion))
+        v = odometry.twist.twist.linear
+        velocity = rotation.dot([v.x, v.y, v.z])
+        state.twist_with_covariance.twist.linear.x = velocity[0]
+        state.twist_with_covariance.twist.linear.y = velocity[1]
+        state.twist_with_covariance.twist.linear.z = velocity[2]
+        # State uses heading-level translation; Odometry retains physical body twist.
+        transform = np.eye(6)
+        transform[:3, :3] = rotation
+        covariance = np.asarray(odometry.twist.covariance).reshape(6, 6)
+        state.twist_with_covariance.covariance = transform.dot(covariance).dot(transform.T).ravel().tolist()
         self.state_pub.publish(state)
+        self.ekf_published_stamp = stamp
         if not local_ready:
             return
-        odometry = Odometry()
-        odometry.header.frame_id, odometry.child_frame_id = self.odom_frame, self.body_frame
-        odometry.header.stamp = rospy.Time.from_sec(min(height.stamp, self.velocity.stamp))
-        odometry.pose, odometry.twist = state.pose_with_covariance, state.twist_with_covariance
-        self.odom_pub.publish(odometry)
-        self.broadcaster.sendTransform((p.x, p.y, p.z), quaternion, odometry.header.stamp, self.body_frame, self.odom_frame)
-        if not ready:
-            return
-        pose = PoseWithCovarianceStamped()
-        pose.header.frame_id = self.frame
-        # Odometry carries the pose, but must not make an old fix look newly measured.
-        pose.header.stamp = rospy.Time.from_sec(min(odometry.header.stamp.to_sec(), self.room.stamp))
-        p = pose.pose.pose.position
-        p.x, p.y = self.room.position(odom)
-        p.z = height.z
-        q = pose.pose.pose.orientation
-        q.x, q.y, q.z, q.w = tf.transformations.quaternion_multiply(
-            tf.transformations.quaternion_from_euler(0, 0, self.room.yaw_offset), quaternion)
-        covariance = self.room.covariance(now)
-        pose.pose.covariance[0], pose.pose.covariance[1] = covariance[0]
-        pose.pose.covariance[6], pose.pose.covariance[7] = covariance[1]
-        pose.pose.covariance[14] = 0.03 ** 2
-        for index in (21, 28, 35):
-            pose.pose.covariance[index] = 0.15 ** 2
-        self.pose_pub.publish(pose)
-        self.broadcaster.sendTransform((self.room.offset[0], self.room.offset[1], self.height.floor_z),
-            tf.transformations.quaternion_from_euler(0, 0, self.room.yaw_offset),
-            pose.header.stamp, self.odom_frame, self.frame)
+        limited = deepcopy(odometry)
+        limited.pose = pose
+        self.odom_pub.publish(limited)
+        p = pose.pose.position
+        z = p.z + self.height.floor_z
+        self.broadcaster.sendTransform((p.x, p.y, z), quaternion, odometry.header.stamp,
+                                       self.body_frame, self.frame)
+        if ready:
+            room = PoseWithCovarianceStamped()
+            room.header = deepcopy(odometry.header)
+            room.pose = deepcopy(pose)
+            room.pose.pose.position.z = z
+            self.pose_pub.publish(room)
 
 
 def main():
     rospy.init_node('fusion_localization')
     node = FusionLocalizationNode()
-    rate = rospy.Rate(60)
     while not rospy.is_shutdown():
-        node.step()
-        rate.sleep()
+        # Samples publish in their callback; keep checking freshness through gaps.
+        if not node.updated.wait(1 / 60.):
+            node.step()
+        node.updated.clear()
 
 
 if __name__ == '__main__':

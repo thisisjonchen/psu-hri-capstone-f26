@@ -69,10 +69,10 @@ class AnchorCalibration:
         if layout:
             layout['verified'] = False
         self.boards = saved.get('recovery_boards', []) if self.dirty else saved.get('boards', [])
-        self.state = {'stage': 'idle', 'message': 'Scan for anchors, or measure again using the previous corner assignments.',
+        self.state = {'stage': 'idle', 'message': '',
                       'boards': self.boards, 'preview': None, 'token': None, 'layout': layout}
         if self.dirty:
-            self.state.update(stage='error', message='Previous save was incomplete. Measure and apply again to recover.')
+            self.state.update(stage='error', message='Previous save incomplete. Measure and save again.')
         self.persist()
         self.ble = PansBLE(progress=self.ble_progress)
         self.stopping = threading.Event()
@@ -143,17 +143,16 @@ class AnchorCalibration:
             action = request['action']
             if action == 'cancel':
                 self.clear_preview()
-                self.update('idle', 'Calibration cancelled. The saved layout is unverified.' if self.dirty
-                            else 'Calibration cancelled. No new coordinates saved.')
+                self.update('idle', 'Cancelled. Layout unverified.' if self.dirty else 'Cancelled.')
                 return
             self.check_cancelled()
             ble = self.ble
             if action == 'scan':
                 if self.preview is not None:
                     raise ValueError('Cancel the current preview before scanning again')
-                self.update('scanning', 'Scanning Bluetooth anchors...', preview=None, token=None)
+                self.update('scanning', 'Scanning…', preview=None, token=None)
                 self.boards = ble.call('scan', self.check_cancelled)
-                message = 'Found %d anchors. Select an anchor for each corner.' % len(self.boards)
+                message = '%d anchors found.' % len(self.boards)
                 if not self.boards:
                     message = ('No anchors found. Check power and laptop Bluetooth, close other apps '
                                'connected to the anchors, then scan again.')
@@ -168,22 +167,23 @@ class AnchorCalibration:
                 boards = [dict(known[c['ble']], z=0.0) for c in choices]
                 self.preview = None
                 self.preview_at = None
-                self.update('measuring', 'Measuring distances between anchors...', preview=None, token=None)
+                self.update('measuring', 'Measuring…', preview=None, token=None)
                 rows = ble.call('measure', self.check_cancelled, boards)
+                logging.info('Anchor calibration ranges [meters, quality], corner order '
+                             '[bottom left, bottom right, top right, top left] %s: %s',
+                             [board['id'] for board in boards], json.dumps(rows, sort_keys=True))
                 preview = solve_layout(boards, rows)
                 self.check_cancelled()
                 self.preview = preview
                 self.preview_at = monotonic()
-                self.update('preview', 'Review the layout, then save it to all four anchors.',
-                            preview=preview, token=str(uuid.uuid4()))
+                self.update('preview', '', preview=preview, token=str(uuid.uuid4()))
             elif action == 'edit':
                 layout = self.state.get('layout')
                 if not layout or self.dirty:
                     raise ValueError('No saved layout to adjust; measure first')
                 self.preview = {'positions': copy.deepcopy(layout['positions'])}
                 self.preview_at = monotonic()
-                self.update('preview', 'Adjust X/Y coordinates, then save to all four anchors.',
-                            preview=self.preview, token=str(uuid.uuid4()))
+                self.update('preview', '', preview=self.preview, token=str(uuid.uuid4()))
             elif action == 'apply':
                 if (self.preview is None or self.preview_at is None or monotonic() - self.preview_at > 120
                         or request.get('token') != self.state['token']):
@@ -191,7 +191,7 @@ class AnchorCalibration:
                 positions = self.preview['positions']
                 if 'positions' in request:
                     positions = adjust_layout(positions, request['positions'])
-                self.update('saving', 'Saving and verifying anchor coordinates...')
+                self.update('saving', 'Saving…')
                 ble.call('save', self.check_cancelled, positions, self.mark_write)
                 self.check_cancelled()
                 # Keep the recovery warning until saved coordinates are verified.
@@ -200,14 +200,14 @@ class AnchorCalibration:
                           'positions': copy.deepcopy(positions)}
                 self.preview = None
                 self.preview_at = None
-                self.update('complete', 'Layout saved and verified.',
+                self.update('complete', 'Layout saved.',
                             token=None, preview=None, layout=layout)
         except Exception as error:
             logging.warning('Anchor calibration: %s', error)
             self.preview = None
             self.preview_at = None
             # Unknown or partial coordinate writes require a successful retry.
-            message = ('Calibration cancelled. The saved layout is unverified.'
+            message = ('Cancelled. Layout unverified.'
                        if self.cancel.is_set() and self.dirty else str(error))
             self.update('error', message, preview=None, token=None)
         finally:

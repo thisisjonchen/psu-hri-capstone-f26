@@ -1,9 +1,3 @@
-# Loaded automatically at PID startup when /pidrone/coordination is absent.
-# Dashboard selects solo/paired before arming; the choice is fixed for the flight.
-# Set false to force solo operation. A missing peer never disables a paired flight's guard.
-# Disabled while single-drone flight is stabilized; set true to restore paired flight.
-enabled: false
-# Provisional horizontal center-to-center limits for unloaded trials (meters).
+# Horizontal center-to-center distance limits (meters).
 min_distance: 0.85
 max_distance: 1.15
-# Nominal separation comes from payload_geometry.yaml. IDs come from ROS_MASTER_URI.
