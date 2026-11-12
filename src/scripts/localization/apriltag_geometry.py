@@ -2,7 +2,6 @@
 
 Coordinate frames: map (+Z up); drone controller body (+X right, +Y forward,
 +Z up); OpenCV optical camera (+X image right, +Y image down, +Z forward).
-Only static images of tags lying on a known horizontal plane are supported.
 This module has no ROS dependency and works with Python 2.7 and older NumPy.
 """
 from __future__ import division
@@ -13,6 +12,48 @@ import cv2
 import numpy as np
 
 from localization.rotations import quaternion_matrix
+
+
+def undistort_pixels(pixels, k, d, model):
+    uv = np.asarray(pixels, dtype=float).reshape(-1, 1, 2)
+    k = np.asarray(k, dtype=float).reshape(3, 3)
+    d = np.asarray(d, dtype=float).reshape(-1)
+    try:
+        if model == 'equidistant':
+            if d.size != 4 or not hasattr(getattr(cv2, 'fisheye', None), 'undistortPoints'):
+                raise ValueError('Equidistant calibration requires four coefficients and OpenCV fisheye support')
+            return cv2.fisheye.undistortPoints(uv, k, d)
+        if model in ('plumb_bob', 'rational_polynomial'):
+            return cv2.undistortPoints(uv, k, d)
+        raise ValueError('Unsupported distortion model: {}'.format(model))
+    except cv2.error as exc:
+        raise ValueError('Cannot undistort tag: {}'.format(exc))
+
+
+def estimate_tag_center(corners, size, camera_matrix, distortion, drone_position,
+                        drone_quaternion, camera_offset_body, rotation_body_camera,
+                        max_distance, distortion_model):
+    """Solve the tag-to-camera pose and return its center in map meters."""
+    half = size / 2.
+    # Any cyclic start or winding describes the same square center.
+    square = np.array([[-half, half, 0], [half, half, 0],
+                       [half, -half, 0], [-half, -half, 0]], dtype=float)
+    points = undistort_pixels(corners, camera_matrix, distortion, distortion_model)
+    if not np.all(np.isfinite(points)):
+        raise ValueError('Invalid undistorted tag corners')
+    try:
+        # Default iterative planar PnP is available on older OpenCV builds.
+        ok, rvec, tvec = cv2.solvePnP(square, points, np.eye(3), None)
+        if not ok or not np.all(np.isfinite(tvec)) or not np.all(np.isfinite(rvec)):
+            raise ValueError('Tag pose solve failed')
+        center = tvec.reshape(3)
+        camera_corners = square.dot(cv2.Rodrigues(rvec)[0].T) + center
+    except cv2.error as exc:
+        raise ValueError('Cannot solve tag pose: {}'.format(exc))
+    if np.any(camera_corners[:, 2] <= 0) or np.linalg.norm(center) > max_distance:
+        raise ValueError('Tag pose is behind the camera or out of range')
+    body_to_map = quaternion_matrix(drone_quaternion)
+    return drone_position + body_to_map.dot(camera_offset_body + rotation_body_camera.dot(center))
 
 
 def camera_rotation(pitch_down_deg, azimuth_deg=0.0, image_roll_deg=0.0):
@@ -60,19 +101,7 @@ def project_floor_tag(pixel, camera_matrix, distortion, drone_position,
             or k[0, 0] <= 0 or k[1, 1] <= 0 or not np.isfinite(plane_z)
             or not np.isfinite(max_distance) or max_distance <= 0):
         raise ValueError('Invalid intrinsics or pose')
-    try:
-        if distortion_model == 'equidistant':
-            if d.size != 4:
-                raise ValueError('Equidistant calibration requires four coefficients')
-            if not hasattr(cv2, 'fisheye') or not hasattr(cv2.fisheye, 'undistortPoints'):
-                raise ValueError('OpenCV fisheye.undistortPoints is required for equidistant calibration')
-            ray_xy = cv2.fisheye.undistortPoints(uv, k, d).reshape(2)
-        elif distortion_model in ('plumb_bob', 'rational_polynomial'):
-            ray_xy = cv2.undistortPoints(uv, k, d).reshape(2)
-        else:
-            raise ValueError('Unsupported distortion model: {}'.format(distortion_model))
-    except cv2.error as exc:
-        raise ValueError('Cannot undistort tag: {}'.format(exc))
+    ray_xy = undistort_pixels(uv, k, d, distortion_model).reshape(2)
     ray_camera = np.array([ray_xy[0], ray_xy[1], 1.0])
     body_to_map = quaternion_matrix(drone_quaternion)
     ray_map = np.dot(np.dot(body_to_map, rotate_camera), ray_camera)

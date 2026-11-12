@@ -53,13 +53,14 @@ class AprilTagMappingTests(unittest.TestCase):
         self.now = 100.0
         self.maps = []
         ros = ModuleType('rospy')
-        # These expectations are worked out for a 60 degree mounting; set it explicitly.
-        params = {'~camera_pitch_down_deg': 60.0}
+        # Exercise the mapper's default 45 degree camera mounting.
+        params = {}
         ros.get_param = lambda name, default: params.get(name, default)
         ros.Time = NS(now=lambda: Stamp(self.now))
         ros.Subscriber = ros.loginfo = ros.logwarn = ros.logwarn_throttle = mock.Mock()
+        reports = {'/pidrone/apriltag/map': self.maps}
         ros.Publisher = lambda topic, *args, **kwargs: NS(
-            publish=lambda msg: self.maps.append(copy.deepcopy(msg)))
+            publish=lambda msg: reports[topic].append(copy.deepcopy(msg)))
         modules = {'rospy': ros}
         for package, messages in [
                 ('geometry_msgs', {'Point': NS, 'PoseWithCovarianceStamped': Pose}),
@@ -79,25 +80,32 @@ class AprilTagMappingTests(unittest.TestCase):
         self.node.generation_callback(NS(data=1))
         self.node.ready_callback(NS(data=True))
         self.node.camera_callback(NS(width=320, height=240, K=AprilTagGeometryTests.K,
-                                     D=[0] * 5, distortion_model='plumb_bob'))
+                                     D=[0] * 5, distortion_model='plumb_bob',
+                                     header=NS(frame_id='camera')))
 
-    def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
+    def set_pose(self, pose_stamp, position=(1, 2, 1), yaw=0, sign=1):
         pose = Pose()
         pose.header.frame_id, pose.header.stamp = 'map', Stamp(pose_stamp)
-        pose.pose.pose.position = NS(x=1, y=2, z=1)
-        pose.pose.pose.orientation.w = 1
+        pose.pose.pose.position = NS(x=position[0], y=position[1], z=position[2])
+        pose.pose.pose.orientation = NS(x=0, y=0, z=sign*math.sin(yaw/2), w=sign*math.cos(yaw/2))
         self.node.pose_callback(pose)
+
+    def observe(self, image_stamp, pose_stamp, pixel=(160, 120), size=(320, 240)):
+        self.set_pose(pose_stamp)
         message = NS(header=NS(stamp=Stamp(image_stamp)), camera_online=True,
-                     image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PICKUP'],
+                     image_width=size[0], image_height=size[1], tag_ids=[0], zones=['PAYLOAD'],
                      center_x=[pixel[0]], center_y=[pixel[1]])
         self.node.detection_callback(message)
         return message
 
     def test_delayed_detections_publish_coordinates_once_per_image(self):
-        # Pose updates can overtake image processing; older poses also remain valid.
-        for index, pose_offset in enumerate((-.03, -.03, -.15)):
+        # Use the image-time midpoint during translation and yaw, even with
+        # opposite quaternion signs on the bracketing poses.
+        for index in range(3):
             self.now = 100 + index * .1
-            message = self.observe(self.now - .1, self.now + pose_offset)
+            self.set_pose(self.now - .08, position=(.9, 2, 1), yaw=-.2)
+            self.set_pose(self.now - .02, position=(1.1, 2, 1), yaw=.2, sign=-1)
+            message = self.observe(self.now - .05, self.now - .02)
             published = len(self.maps)
             self.node.detection_callback(message)
             self.assertEqual(len(self.maps), published)
@@ -107,7 +115,7 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual(result.sample_counts, [3])
         point = result.positions[0]
         np.testing.assert_allclose((point.x, point.y, point.z),
-                                   (1, 2 + 1/math.sqrt(3), 0), atol=1e-7)
+                                   (1, 3, 0), atol=1e-7)
         # Losing readiness pauses sampling without erasing measured landmarks.
         self.node.ready_callback(NS(data=False))
         self.now += .1
@@ -118,10 +126,26 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertEqual(self.maps[-1].tag_ids, [])
         self.assertIsNone(self.node.pose)
 
+    def test_unbracketed_image_can_retry_and_history_resets_on_readiness_loss(self):
+        message = self.observe(99.95, 99.9)
+        self.assertEqual(self.node.tags, {})
+        self.set_pose(99.98)
+        self.node.detection_callback(message)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
+        self.node.ready_callback(NS(data=False))
+        self.node.ready_callback(NS(data=True))
+        self.set_pose(100)
+        message.header.stamp = Stamp(99.99)
+        self.node.detection_callback(message)
+        self.assertEqual(len(self.node.tags[0]['samples']), 1)
+        self.node.generation_callback(NS(data=2))
+        self.assertEqual(len(self.node.poses), 0)
+
     def test_timing_fix_does_not_accept_stale_future_or_zero_stamps(self):
         for image_stamp, pose_stamp in ((99.5, 100), (99.9, 99.5),
                                        (100.1, 100), (99.9, 100.1)):
             self.node.pose = None
+            self.node.poses.clear()
             self.observe(image_stamp, pose_stamp)
             self.assertEqual(self.node.tags, {})
         # Cached poses must expire even if callbacks stop arriving.
@@ -153,9 +177,9 @@ class AprilTagMappingTests(unittest.TestCase):
         result = self.maps[-1]
         self.assertEqual(result.tag_ids, [0])
         point = result.positions[0]
-        down = math.sqrt(3)/2 + y/2
+        down = (1 + y) / math.sqrt(2)
         np.testing.assert_allclose((point.x, point.y, point.z),
-                                   (1 + x/down, 2 + (.5-y*math.sqrt(3)/2)/down, 0), atol=1e-7)
+                                   (1 + x/down, 2 + (1-y)/(1+y), 0), atol=1e-7)
 
         # A malformed calibration update pauses observations without losing the map.
         self.node.camera_callback(NS(width=240, height=320, K=k, D=d + [0],
@@ -204,6 +228,22 @@ class AprilTagMappingTests(unittest.TestCase):
         self.assertAlmostEqual(mapped_x(), 1.4)
         sample(10)
         self.assertAlmostEqual(mapped_x(), .5)
+
+    def test_measured_square_recovers_tag_center_above_floor(self):
+        self.node.rotation = camera_rotation(90)
+        self.node.tag_sizes[0] = .1
+        # A 10 cm tag spans 60 px at 0.5 m depth with a 300 px focal length.
+        # Its center is 60 px right of the optical axis, i.e. 10 cm right.
+        for _ in range(3):
+            self.now += .1
+            self.set_pose(self.now)
+            self.node.detection_callback(NS(
+                header=NS(stamp=Stamp(self.now)), camera_online=True,
+                image_width=320, image_height=240, tag_ids=[0], zones=['PAYLOAD'],
+                center_x=[220], center_y=[120],
+                corner_x=[190, 250, 250, 190], corner_y=[150, 150, 90, 90]))
+        point, = self.maps[-1].positions
+        np.testing.assert_allclose((point.x, point.y, point.z), (1.1, 2, .5), atol=1e-7)
 
 
 if __name__ == '__main__':

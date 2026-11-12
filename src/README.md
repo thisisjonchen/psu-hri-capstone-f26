@@ -160,6 +160,25 @@ If the DD24 does not have the repo cloned yet, here are instructions for doing s
    ```
 7. You are now ready to go. Continue from **Step 2** in **Standard Operation + Control**.
 
+## AprilTag Detection and Mapping
+
+Tag mapping interpolates fused position and attitude at the image
+timestamp. Images need an exact-time pose or fresh poses on both sides; frames
+without that history are skipped. `max_image_pose_skew` bounds image and pose age.
+This aligns reported timestamps; it does not correct sensor timestamp bias.
+
+The floor AprilTag detector reports two `tag36h11` IDs, **0 (PAYLOAD)** and
+**1 (DROP_OFF)**. The map averages the latest saved XY positions from both
+drones by tag ID. If a tag moves, an older saved position can still influence
+the average until that drone updates or clears its map.
+
+Camera feeds outline detected tags in cyan using their four image corners.
+Set `tag_sizes_m` in `params/apriltag_mapping.yaml` to enable four-corner
+pose estimation for those IDs. Measure each printed black square edge to edge,
+excluding its white margin. Unconfigured tags use floor projection.
+Outlines expire when observations stop; they may lag the separate MJPEG stream.
+Rebuild catkin after deploying the updated `TagDetection.msg` corner fields.
+
 ## Camera Out of Focus
 
 The camera may be out of focus. Here are some steps to fix that.

@@ -29,7 +29,6 @@ class FleetMap {
     this.anchorReports = {};
     this.anchorStamps = {};
     this.tagReports = {};
-    this.tagRevision = 0;
     this.layoutUsable = false;
     const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
       [0, 1, 2].map(i => ({
@@ -301,15 +300,9 @@ class FleetMap {
         !points.every(point => point && [point.x, point.y, point.z].every(Number.isFinite))) return;
     const previous = this.tagReports[id];
     if (previous && stamp <= previous.stamp) return;
-    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => {
-      const value = { id: tag, zone: zones[i], x: points[i].x, y: points[i].y,
-        z: points[i].z, count: counts[i] };
-      const old = previous && previous.frame === frame && previous.tags.find(p => p.id === tag);
-      // Keep a local revision so cached tags do not look newly observed.
-      const unchanged = old && ['zone', 'x', 'y', 'z', 'count'].every(key => old[key] === value[key]);
-      value.revision = unchanged ? old.revision : ++this.tagRevision;
-      return value;
-    }) };
+    this.tagReports[id] = { frame, stamp, tags: tags.map((tag, i) => ({
+      id: tag, zone: zones[i], x: points[i].x, y: points[i].y
+    })) };
     this.render();
   }
 
@@ -321,13 +314,18 @@ class FleetMap {
       if (!drones[id].connected || !report || report.frame !== this.room.frame ||
           !this.hasMatchingReport(id)) return;
       report.tags.forEach(tag => {
-        const previous = groups.get(tag.id);
-        if (!previous || tag.revision > previous.revision) groups.set(tag.id, tag);
+        const group = groups.get(tag.id);
+        if (group) {
+          group.x += tag.x;
+          group.y += tag.y;
+          group.count++;
+        } else {
+          groups.set(tag.id, { ...tag, count: 1 });
+        }
       });
     });
-    // Lifetime sample counts and averaging can pin a moved tag to its old spot.
     return Array.from(groups.values()).sort((a, b) => a.id - b.id)
-      .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x, y: tag.y }));
+      .map(tag => ({ id: tag.id, zone: tag.zone, x: tag.x / tag.count, y: tag.y / tag.count }));
   }
 
   drawTagLabels(chart) {
@@ -605,6 +603,8 @@ class DroneSession {
     this.id = id;
     this.host = id + '.local';
     this.detectionReceivedAt = null;
+    this.tagOverlayStamp = null;
+    this.tagOverlayReceivedAt = null;
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
@@ -634,6 +634,7 @@ class DroneSession {
       [0, 1, 2].forEach(i => { this.series[key + i] = []; });
     });
     this.field('camera').addEventListener('error', () => {
+      this.clearTagOverlay();
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
         this.field('batteryFill').setAttribute('width', 0);
@@ -646,6 +647,7 @@ class DroneSession {
   field(name) {
     if (name === 'camera') return document.getElementById(this.id + '-camera');
     if (name === 'detection') return document.getElementById(this.id + '-detection');
+    if (['tagOverlay', 'tagOutline'].includes(name)) return document.getElementById(this.id + '-' + name);
     return this.root.querySelector('[data-field="' + name + '"]');
   }
   get connected() { return !!(this.ros && this.ros.isConnected); }
@@ -654,6 +656,7 @@ class DroneSession {
     const status = this.field('detection');
     status.textContent = text;
     status.dataset.state = state;
+    if (state !== 'detected') this.clearTagOverlay();
   }
 
   updateDetection(message) {
@@ -671,9 +674,41 @@ class DroneSession {
     this.setDetection(message.tag_ids.length ? message.tag_ids.map((id, i) =>
       message.zones[i] + ' · Tag ' + id).join(', ') : 'No AprilTag detected',
       message.tag_ids.length ? 'detected' : 'none');
+    this.updateTagOverlay(message);
+  }
+
+  clearTagOverlay() {
+    this.tagOverlayReceivedAt = null;
+    this.field('tagOverlay').setAttribute('visibility', 'hidden');
+  }
+
+  updateTagOverlay(message) {
+    const { corner_x: x, corner_y: y, image_width: width, image_height: height } = message;
+    const stamp = message.header && message.header.stamp;
+    const count = message.tag_ids.length * 4;
+    if (!count || !stamp || !Number.isInteger(stamp.secs) || stamp.secs <= 0 ||
+        !Number.isInteger(stamp.nsecs) || stamp.nsecs < 0 || stamp.nsecs >= 1e9 ||
+        ![width, height].every(n => Number.isInteger(n) && n > 0) ||
+        !Array.isArray(x) || !Array.isArray(y) || x.length !== count || y.length !== count ||
+        !x.every(n => Number.isFinite(n) && n >= 0 && n < width) ||
+        !y.every(n => Number.isFinite(n) && n >= 0 && n < height)) return this.clearTagOverlay();
+    const time = stamp.secs + stamp.nsecs / 1e9;
+    if (this.tagOverlayStamp !== null && time <= this.tagOverlayStamp) return;
+    this.tagOverlayStamp = time;
+    this.tagOverlayReceivedAt = Date.now();
+    const paths = [];
+    for (let i = 0; i < count; i += 4) {
+      paths.push('M ' + x[i] + ' ' + y[i] + ' L ' + x[i+1] + ' ' + y[i+1] +
+        ' L ' + x[i+2] + ' ' + y[i+2] + ' L ' + x[i+3] + ' ' + y[i+3] + ' Z');
+    }
+    this.field('tagOutline').setAttribute('d', paths.join(' '));
+    const overlay = this.field('tagOverlay');
+    overlay.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    overlay.setAttribute('visibility', this.field('camera').getAttribute('src') !== 'nocamera.svg' ? 'visible' : 'hidden');
   }
 
   refreshDetection() {
+    if (this.tagOverlayReceivedAt !== null && Date.now() - this.tagOverlayReceivedAt > 750) this.clearTagOverlay();
     if (this.detectionReceivedAt !== null && Date.now() - this.detectionReceivedAt > 1500) {
       this.detectionReceivedAt = null;
       this.setDetection('No tag data', 'offline');
@@ -764,6 +799,7 @@ class DroneSession {
   }
 
   resetTelemetry() {
+    this.tagOverlayStamp = null;
     this.xyFrames = {};
     this.xyReceivedAt = {};
     this.startTime = null;

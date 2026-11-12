@@ -9,3 +9,6 @@ float32[] center_x
 float32[] center_y
 uint32 image_width
 uint32 image_height
+# Four consecutive image-space corners per tag, in detector perimeter order.
+float32[] corner_x
+float32[] corner_y

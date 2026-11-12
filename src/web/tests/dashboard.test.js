@@ -339,6 +339,7 @@ function dashboard({ discover = true, calibrationFetch = null } = {}) {
     elements.set(id, root);
     elements.set(id + '-camera', element());
     elements.set(id + '-detection', element());
+    for (const name of ['tagOverlay', 'tagOutline']) elements.set(id + '-' + name, element());
   }
   for (const id of ['fullscreen-toggle', 'separation-guard', 'commandFeedback', 'fleetGrid', 'fleet-xyChart', 'drone1-connectionStatus', 'drone2-connectionStatus', 'drone1-connectionToggle', 'drone2-connectionToggle',
     'room-status', 'room-fit', 'room-zoom-in', 'room-zoom-out', 'map-frame', 'map-placeholder', 'map-legend',
@@ -862,7 +863,7 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   const oldRos = a.ros;
   const oldRange = a.subscribers.find(topic => topic.name === '/pidrone/range');
   const oldTags = a.subscribers.find(topic => topic.name === '/pidrone/apriltag/detections');
-  oldTags.receive(tags([0], ['PICKUP']));
+  oldTags.receive(tags([0], ['PAYLOAD']));
   a.connect();
   assert.equal(a.ros, oldRos);
   assert.equal(app.timers.size, 2);
@@ -873,7 +874,7 @@ test('disconnect and reconnect clear only that drone and ignore stale callbacks'
   assert.equal(a.field('detection').textContent, 'No tag data');
   app.connect('drone1');
   oldRange.receive({ ...stamp(500), range: 9 });
-  oldTags.receive(tags([0], ['PICKUP']));
+  oldTags.receive(tags([0], ['PAYLOAD']));
   assert.equal(a.field('detection').textContent, 'No tag data');
   oldRos.events.close();
   assert.equal(a.connected, true);
@@ -1542,21 +1543,42 @@ test('ROS tag results stay isolated and include tag zero and multiple tags', () 
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/apriltag/detections';
-  app.receive(a, topic, tags([0, 2], ['PICKUP', 'BORDER']));
+  const detected = { ...tags([0, 1], ['PAYLOAD', 'DROP_OFF']), ...stamp(100),
+    image_width: 240, image_height: 320,
+    corner_x: [10, 30, 30, 10, 50, 80, 80, 50], corner_y: [20, 20, 40, 40, 60, 60, 90, 90] };
+  app.receive(a, topic, detected);
+  assert.equal(a.field('tagOverlay').visibility, 'visible');
+  assert.equal(a.field('tagOverlay').viewBox, '0 0 240 320');
+  assert.equal(a.field('tagOutline').d, 'M 10 20 L 30 20 L 30 40 L 10 40 Z M 50 60 L 80 60 L 80 90 L 50 90 Z');
+  assert.equal(b.field('tagOverlay').visibility, 'hidden');
   app.receive(b, topic, tags([1], ['DROP_OFF']));
-  assert.equal(a.field('detection').textContent, 'PICKUP · Tag 0, BORDER · Tag 2');
+  assert.equal(a.field('detection').textContent, 'PAYLOAD · Tag 0, DROP_OFF · Tag 1');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
   app.receive(a, topic, tags([], []));
   assert.equal(a.field('detection').textContent, 'No AprilTag detected');
   assert.equal(a.field('detection').dataset.state, 'none');
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
   assert.equal(b.field('detection').textContent, 'DROP_OFF · Tag 1');
+  app.receive(a, topic, { ...detected, ...stamp(101) });
+  app.advanceTime(800);
+  app.receive(a, topic, { ...detected, ...stamp(101) });
+  for (const callback of app.maintenanceTimers.values()) callback();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  app.receive(a, topic, { ...detected, ...stamp(102) });
+  app.receive(a, topic, { ...detected, ...stamp(103), corner_x: [NaN] });
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  app.receive(a, topic, { ...detected, ...stamp(104) });
+  a.field('camera').listeners.error();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  a.disconnect();
+  assert.equal(a.field('tagOverlay').visibility, 'hidden');
 });
 
 test('camera loss, malformed results, and a silent ROS detector clear stale tags', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
   const topic = '/pidrone/apriltag/detections';
-  const detected = tags([0], ['PICKUP']);
+  const detected = tags([0], ['PAYLOAD']);
   for (const message of [tags([], [], false), tags([-1], ['UNKNOWN']), tags([0], []), tags([0], ['']), {}]) {
     app.receive(a, topic, detected);
     app.receive(a, topic, message);
@@ -1833,44 +1855,44 @@ test('tap selection, overlapping targets, and keyboard adjustment work without c
   assert.doesNotMatch(html, /id="target-(drone|x|y|submit)"/);
 });
 
-test('mapped AprilTags follow changed positions across drones and clear on generation change', () => {
+test('mapped AprilTags average positions by ID and clear reports on generation change', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  const tagMap = (x, count, time = 100) => ({
+  const tagMap = (x, count, time = 100, y = 2) => ({
     header: { stamp: { secs: time, nsecs: 0 }, frame_id: 'map' },
-    tag_ids: [0], zones: ['PICKUP'],
-    positions: [{ x, y: 2, z: 0 }], sample_counts: [count]
+    tag_ids: [0], zones: ['PAYLOAD'],
+    positions: [{ x, y, z: 0 }], sample_counts: [count]
   });
   app.receive(a, '/pidrone/apriltag/map', tagMap(1, 4));
-  app.receive(b, '/pidrone/apriltag/map', tagMap(1.2, 6));
+  app.receive(b, '/pidrone/apriltag/map', tagMap(1.5, 6, 100, 3));
   const tags = app.fleetMap.mappedTags();
   assert.equal(tags.length, 1);
   assert.equal(tags[0].id, 0);
-  assert.equal(tags[0].x, 1.2);
+  assert.deepEqual([tags[0].x, tags[0].y], [1.25, 2.5]);
   assert.equal(app.fleetMap.chart.data.datasets.find(d => d.key === 'apriltags').data.length, 1);
-  // A new location wins even when the other drone has more historical samples.
+  // Each drone contributes one equally weighted estimate, regardless of sample count.
   app.receive(a, '/pidrone/apriltag/map', tagMap(2, 3, 101));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 2);
-  // Updates to a different tag must not refresh the cached location of tag 0.
-  const otherTag = tagMap(1.2, 6, 102);
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.75);
+  const otherTag = tagMap(1.5, 6, 102, 3);
   otherTag.tag_ids.push(1); otherTag.zones.push('DROP_OFF');
   otherTag.positions.push({ x: 3, y: 2, z: 0 }); otherTag.sample_counts.push(3);
   app.receive(b, '/pidrone/apriltag/map', otherTag);
-  assert.equal(app.fleetMap.mappedTags()[0].x, 2);
-  // Small moves must not be averaged back toward the other drone's old marker.
-  app.receive(a, '/pidrone/apriltag/map', tagMap(1.4, 3, 103));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 1.4);
+  const updated = app.fleetMap.mappedTags();
+  assert.equal(updated.length, 2);
+  assert.equal(updated[0].x, 1.75);
+  assert.equal(updated[1].x, 3);
   app.receive(a, '/pidrone/apriltag/map', tagMap(1, 20, 100));
-  assert.equal(app.fleetMap.mappedTags()[0].x, 1.4);
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.75);
   app.receive(a, '/pidrone/localization/generation', { data: 0 });
   app.receive(a, '/pidrone/localization/generation', { data: 1 });
   assert.equal(app.fleetMap.tagReports.drone1, undefined);
   assert.equal(app.fleetMap.mappedTags().length, 2); // Drone 2's independent map remains.
+  assert.equal(app.fleetMap.mappedTags()[0].x, 1.5);
   b.disconnect();
   assert.equal(app.fleetMap.mappedTags().length, 0);
 });
 
-test('routine execution automatically targets active drones and waits for readiness', async () => {
+test('routine execution synchronizes start for one or two drones', async () => {
   let released, sends = [];
   const context = vm.createContext({ document: { addEventListener() {} },
     awaitSyncStart(ids) { released = ids; }, confirmSyncStart() {} });
