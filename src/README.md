@@ -24,7 +24,7 @@ Assuming that the base environment is already set up on the DD24 by following th
 Add flight routines to `routines/` to make them available in the dashboard.
 Tune XY hold, routine movement, and routine settling in `params/position.yaml`.
 Find altitude and velocity tuning, shared flight limits, and RC presets in `params/flight.yaml`.
-Set the paired spacing limits in `params/coordination.yaml`.
+Set paired spacing limits and coordination timeouts in `params/coordination.yaml`.
 After updating to this layout, run `catkin_make` on each drone and use the
 dashboard from the same revision before restarting the nodes.
 

@@ -18,9 +18,9 @@ from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Header, Empty, Bool, String
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from flight.multiwii import MultiWii
-from flight.settings import load_flight_settings
+from flight.settings import load_coordination_settings, load_flight_settings
 from localization import monotonic
-from flight.distance_guard import fresh, STATE_TIMEOUT, SELECTION_TIMEOUT
+from flight.distance_guard import fresh
 from flight.imu_clock import ImuClock
 
 
@@ -31,6 +31,9 @@ class FlightController(object):
     """Send RC commands over MSP and publish flight-controller telemetry."""
 
     def __init__(self):
+        coordination = load_coordination_settings()
+        self.state_timeout = coordination['state_timeout_s']
+        self.selection_timeout = coordination['selection_timeout_s']
         presets = load_flight_settings()['rc']
         if not isinstance(presets, dict):
             raise ValueError('RC presets must be a mapping')
@@ -130,12 +133,12 @@ class FlightController(object):
     def preflight_failure(self):
         report = self.preflight
         if (report is None or self.preflight_received is None
-                or not fresh(report.header.stamp.to_sec(), rospy.get_time())
-                or not 0 <= monotonic() - self.preflight_received <= STATE_TIMEOUT
+                or not fresh(report.header.stamp.to_sec(), rospy.get_time(), self.state_timeout)
+                or not 0 <= monotonic() - self.preflight_received <= self.state_timeout
                 or report.mode != self.curr_mode):
             return 'preflight_unavailable'
         if self.curr_mode == 'DISARMED':
-            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= SELECTION_TIMEOUT:
+            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= self.selection_timeout:
                 return 'flight_setup_unavailable'
             paired = self.coordination_selection
         else:

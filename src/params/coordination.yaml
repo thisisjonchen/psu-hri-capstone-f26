@@ -5,3 +5,7 @@ max_distance: 1.15
 # Vertical drop between the drone and payload attachment points (m), for planning.
 # Taut equal ropes meeting below the midpoint are about 0.707 m each before knots.
 payload_drop_m: 0.5
+
+# Maximum ages for peer state and preflight reports, and for the paired/solo selection (s).
+state_timeout_s: 0.5
+selection_timeout_s: 2.0

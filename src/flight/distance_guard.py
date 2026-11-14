@@ -7,10 +7,6 @@ try:
 except ImportError:
     from urlparse import urlparse
 
-STATE_TIMEOUT = 0.5
-SELECTION_TIMEOUT = 2.0
-
-
 def automatic_coordination(settings, master_uri):
     """Get the drone identities from ROS_MASTER_URI."""
     config = dict(settings)
@@ -30,8 +26,8 @@ def finite(values):
     return all(not math.isnan(v) and not math.isinf(v) for v in values)
 
 
-def fresh(stamp, now):
-    return finite((stamp, now)) and stamp > 0 and 0 <= now - stamp <= STATE_TIMEOUT
+def fresh(stamp, now, timeout):
+    return finite((stamp, now)) and stamp > 0 and 0 <= now - stamp <= timeout
 
 
 def uncertainty(covariance):

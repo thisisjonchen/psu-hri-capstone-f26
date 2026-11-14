@@ -27,6 +27,12 @@ def load_flight_settings():
     return settings
 
 
+def load_coordination_settings():
+    settings = _load_settings('coordination.yaml')
+    _validate_positive({name: settings[name] for name in ('state_timeout_s', 'selection_timeout_s')})
+    return settings
+
+
 def load_position_settings():
     import rospy
 

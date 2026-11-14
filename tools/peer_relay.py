@@ -11,7 +11,8 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from flight.distance_guard import fresh, finite, uncertainty, STATE_TIMEOUT
+from flight.distance_guard import fresh, finite, uncertainty
+from flight.settings import load_coordination_settings
 
 
 TOPICS = {
@@ -24,6 +25,7 @@ TOPICS = {
 }
 PEER_TOPIC = '/pidrone/coordination/peer'
 PREVIEW_TOPIC = '/pidrone/coordination/peer_preview'
+STATE_TIMEOUT = load_coordination_settings()['state_timeout_s']
 
 
 def stamp(header):
@@ -66,12 +68,12 @@ class Client:
                 if (len(previous['anchor_ids']) == len(previous['positions']) == len(known) == 4
                         and len(ids) == len(positions) == len(set(ids)) < 4
                         and message['header']['frame_id'] == previous['header']['frame_id']
-                        and fresh(stamp(message['header']), time.time())
+                        and fresh(stamp(message['header']), time.time(), STATE_TIMEOUT)
                         and all(name in known and all(float(p[axis]) == float(known[name][axis])
                                                      for axis in ('x', 'y', 'z'))
                                 for name, p in zip(ids, positions))):
                     # Keep the complete observation's sensor AND receipt timestamps.
-                    # Partial reports cannot extend its existing 0.5 s lifetime.
+                    # Partial reports cannot extend its lifetime.
                     return
             except (KeyError, TypeError, ValueError, IndexError, OverflowError):
                 pass
@@ -95,7 +97,7 @@ def read_state(snapshot, now, received_now):
     if not data['ready']['data']:
         raise ValueError('both drones need fresh localization')
     for message in (pose, odom, anchors):
-        if not fresh(stamp(message['header']), now):
+        if not fresh(stamp(message['header']), now, STATE_TIMEOUT):
             raise ValueError('old/future sensor timestamp; check clock synchronization')
     frame = pose['header']['frame_id']
     if not frame or anchors['header']['frame_id'] != frame or odom['child_frame_id'] != 'pidrone_body':

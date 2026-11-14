@@ -8,21 +8,16 @@ import signal
 import functools
 import math
 import threading
-import yaml
 import numpy as np
 from flight.altitude_controller import AltitudeController
-from flight.settings import load_flight_settings, load_position_settings
+from flight.settings import load_coordination_settings, load_flight_settings, load_position_settings
 from flight.velocity_controller import VelocityController
 from geometry_msgs.msg import Point, Vector3, Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import AnchorLayout, FlightReadiness, Mode, RC, State
 from std_msgs.msg import Empty, Bool, UInt32, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
-from flight.distance_guard import (
-    DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, SELECTION_TIMEOUT, automatic_coordination)
+from flight.distance_guard import DistanceGuard, fresh, uncertainty, automatic_coordination
 from localization import monotonic
-
-PARAMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
-
 
 def synchronized(method):
     """Keep ROS callbacks from changing a target halfway through a PID step."""
@@ -38,7 +33,7 @@ class PIDController(object):
     error calculated by the desired and current velocity and position of the drone
     '''
 
-    def __init__(self, flight_settings=None):
+    def __init__(self, flight_settings=None, coordination_settings=None):
         self.lock = threading.RLock()
         self.current_mode = 'DISARMED'
         self.desired_mode = 'DISARMED'
@@ -81,6 +76,9 @@ class PIDController(object):
         self.local_estimate_ready = self.room_estimate_ready = False
         self.room_pose = self.room_target = self.room_anchors = None
         self.room_generation = None
+        coordination = load_coordination_settings() if coordination_settings is None else coordination_settings
+        self.state_timeout = coordination['state_timeout_s']
+        self.selection_timeout = coordination['selection_timeout_s']
         self.coordination_config = rospy.get_param('/pidrone/coordination', None)
         self.distance_guard = None
         self.peer_state = self.peer_received = None
@@ -135,7 +133,7 @@ class PIDController(object):
                 or msg.recipient_id != config['drone_id']):
             return False
         stamp = msg.header.stamp.to_sec()
-        if not fresh(stamp, rospy.get_time()):
+        if not fresh(stamp, rospy.get_time(), self.state_timeout):
             return False
         # Repeated packets must not extend the freshness timeout.
         return previous is None or stamp > previous.header.stamp.to_sec()
@@ -162,8 +160,8 @@ class PIDController(object):
             return None, self.coordination_error
         if not self.room_ready(allow_prediction=False):
             return None, 'local_position_unavailable'
-        if (peer is None or not fresh(peer.header.stamp.to_sec(), rospy.get_time()) or
-                not 0 <= monotonic() - received <= STATE_TIMEOUT):
+        if (peer is None or not fresh(peer.header.stamp.to_sec(), rospy.get_time(), self.state_timeout) or
+                not 0 <= monotonic() - received <= self.state_timeout):
             return None, 'peer_state_stale'
         if peer.header.frame_id != pose.header.frame_id or peer.recipient_generation != self.room_generation:
             return None, 'reference_mismatch'
@@ -182,7 +180,7 @@ class PIDController(object):
             return report
         if self.current_mode == 'DISARMED':
             received = self.coordination_selection_received
-            if received is None or not 0 <= monotonic() - received <= SELECTION_TIMEOUT:
+            if received is None or not 0 <= monotonic() - received <= self.selection_timeout:
                 report.reason = 'flight_setup_unavailable'
                 return report
             report.paired = self.coordination_enabled and bool(self.coordination_selection)
@@ -375,7 +373,7 @@ class PIDController(object):
         previous = self.current_mode
         if previous == 'DISARMED' and msg.mode in ('ARMED', 'FLYING'):
             received = self.coordination_selection_received
-            fresh_selection = received is not None and 0 <= monotonic() - received <= SELECTION_TIMEOUT
+            fresh_selection = received is not None and 0 <= monotonic() - received <= self.selection_timeout
             # An enabled guard defaults to paired protection if the selection is invalid.
             self.coordination_active = self.coordination_enabled and (
                 bool(self.coordination_selection) if fresh_selection and not self.coordination_error else True)
@@ -529,12 +527,11 @@ def main():
     node_name = os.path.splitext(os.path.basename(__file__))[0]
     rospy.init_node(node_name)
 
+    coordination = load_coordination_settings()
     if not rospy.has_param('/pidrone/coordination'):
         try:
-            with open(os.path.join(PARAMS_DIR, 'coordination.yaml')) as stream:
-                settings = yaml.safe_load(stream)
-            config = automatic_coordination(settings, os.environ.get('ROS_MASTER_URI', ''))
-        except (IOError, ValueError, TypeError, yaml.YAMLError) as error:
+            config = automatic_coordination(coordination, os.environ.get('ROS_MASTER_URI', ''))
+        except ValueError as error:
             # Keep the PID running; an enabled guard will block horizontal motion.
             rospy.logwarn('Automatic coordination configuration: %s', error)
             config = {}
@@ -545,7 +542,7 @@ def main():
         if not rospy.has_param(namespace):
             rospy.set_param(namespace, flight[controller])
 
-    pid_controller = PIDController(flight)
+    pid_controller = PIDController(flight, coordination)
 
     pid_controller.cmdpub = rospy.Publisher('/pidrone/fly_commands', RC, queue_size=1, tcp_nodelay=True)
     pid_controller.position_control_pub = rospy.Publisher('/pidrone/position_control', Bool, queue_size=1)
