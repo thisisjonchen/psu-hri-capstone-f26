@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Sourced by pi.screenrc after interactive bash has loaded the ROS environment.
-# Also usable from a window's shell: bash screen_node.sh <node>.
+# Launch or retry a node from a Screen window with the ROS environment loaded.
 
 # Startup report for the routine window, which the dashboard terminal shows first.
 pidrone_node_check() {
-    local name nodes pending=() missing=()
+    local name nodes attempt pending=() missing=()
     local -A windows=([/flight_controller_node]='1 FC' [/pid_controller]='2 PID'
         [/fusion_localization]='3 SE' [/ekf_localization]='3 SE' [/raspicam_node]='4 Vision' [/vl53l1x]='5 TOF'
         [/rosbridge_websocket]='6 rosbridge' [/web_video_server]='7 web_vid_serv'
@@ -13,11 +12,12 @@ pidrone_node_check() {
     python "$package_dir/boot/wait_for_ros_master.py" || return
     echo 'Checking onboard nodes (up to 60 s)...'
     pending=("${!windows[@]}")
-    for _ in $(seq 20); do
-        nodes=$(rosnode list 2>/dev/null)
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        nodes=$(rosnode list 2>/dev/null) || nodes=
+        nodes=$'\n'"$nodes"$'\n'
         missing=()
         for name in "${pending[@]}"; do
-            if grep -qx -- "$name" <<<"$nodes"; then
+            if [[ $nodes == *$'\n'"$name"$'\n'* ]]; then
                 printf '  ok       %s\n' "$name"
             else
                 missing+=("$name")
@@ -34,32 +34,33 @@ pidrone_node_check() {
 }
 
 pidrone_screen_node() {
-    local node=${1:-} package_dir status
-    local -a command
+    local node=${1:-} package_dir status launch
+    local -a command launch_args=()
     package_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || return
     cd -- "$package_dir" || return
-    export PYTHONPATH="$package_dir${PYTHONPATH:+:$PYTHONPATH}"
+    if [[ ${PIDRONE_LIBRARY_PATH+x} ]]; then
+        export LD_LIBRARY_PATH="$PIDRONE_LIBRARY_PATH"
+        unset PIDRONE_LIBRARY_PATH
+    fi
+    case ":${PYTHONPATH:-}:" in
+        *":$package_dir:"*) ;;
+        *) export PYTHONPATH="$package_dir${PYTHONPATH:+:$PYTHONPATH}" ;;
+    esac
     # Serial ports resolved by boot/pals-start.sh when nodes start.
     if [[ -r "$HOME/catkin_ws/pals.env" ]]; then
-        set -a
         # shellcheck disable=SC1091
         source "$HOME/catkin_ws/pals.env" || return
-        set +a
+        export PALS_FC_PORT PALS_UWB_PORT
     fi
 
     case "$node" in
-        shell) ;;
         check) pidrone_node_check; return ;;
-        *) echo "Retry after stopping this command: bash screen_node.sh $node" ;;
-    esac
-
-    case "$node" in
         core) command=(roscore) ;;
         fc) command=(python -u flight/flight_controller_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u flight/pid_controller.py) ;;
-        se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch") ;;
-        vision) command=(roslaunch --wait "$package_dir/launch/raspicam_node.launch") ;;
+        se) launch=fusion_localization ;;
+        vision) launch=raspicam_node ;;
         tof)
             if [[ ! -r "$HOME/catkin_ws/install/setup.bash" ]]; then
                 echo 'TOF startup failed: missing ~/catkin_ws/install/setup.bash' >&2
@@ -67,22 +68,26 @@ pidrone_screen_node() {
             fi
             # shellcheck disable=SC1091
             source "$HOME/catkin_ws/install/setup.bash" || return
-            command=(roslaunch --wait "$package_dir/launch/tof.launch")
+            launch=tof
             ;;
-        bridge) command=(roslaunch --wait "$package_dir/launch/rosbridge.launch") ;;
+        bridge) launch=rosbridge ;;
         video) command=(rosrun web_video_server web_video_server) ;;
-        tags) command=(roslaunch --wait "$package_dir/launch/apriltag_detection.launch") ;;
-        tagmap) command=(roslaunch --wait "$package_dir/launch/apriltag_mapping.launch") ;;
+        tags) launch=apriltag_detection ;;
+        tagmap) launch=apriltag_mapping ;;
         uwb)
-            command=(roslaunch --wait "$package_dir/launch/uwb_localization.launch")
+            launch=uwb_localization
             if [[ -n "${PALS_UWB_PORT:-}" ]]; then
-                command+=("port:=$PALS_UWB_PORT")
+                launch_args+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
+        *) echo 'Usage: bash boot/screen_node.sh {core|fc|pid|se|vision|tof|bridge|video|tags|tagmap|uwb|check|shell}' >&2
            return 2 ;;
     esac
+    if [[ -n ${launch:-} ]]; then
+        command=(roslaunch --wait "$package_dir/launch/$launch.launch" "${launch_args[@]}")
+    fi
 
+    echo "Retry from this window with: bash boot/screen_node.sh $node"
     if ! command -v "${command[0]}" >/dev/null; then
         echo "Startup failed: ${command[0]} is not available; check the ROS environment." >&2
         return 127

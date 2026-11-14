@@ -1,3 +1,4 @@
+import runpy
 import shutil
 import subprocess
 import sys
@@ -417,8 +418,8 @@ source "$1" restart
                                   'restart was not queued', result.stdout + result.stderr)
                 else:
                     self.assertIn('mock replacement launch reached', result.stdout)
-                    self.assertLess(commands.index('cleanup and FC verification'),
-                                    commands.index('exec -d pidrone_pkg'))
+                    self.assertEqual(commands.splitlines()[:3], [
+                        'start pidrone_pkg', 'cleanup and FC verification', 'start pidrone_pkg'])
 
     def test_full_shutdown_recovers_stuck_nodes_but_requires_disarmed_and_stopped_container(self):
         cases = [(None, None), ('missing', None), ('hung', None), ('timeout', None),
@@ -515,9 +516,9 @@ source "$1" restart
                     self.assertEqual(run.call_count, 0 if restart else 1)
 
     def test_restart_readiness_requires_fresh_tof_and_localization(self):
-        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
-        code = launcher.read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
-        for fault in (None, 'missing', 'stale', 'invalid', 'localization'):
+        source = Path(__file__).resolve().parents[2]
+        script = source / 'boot/wait_for_localization.py'
+        for fault in (None, 'missing', 'stale', 'invalid', 'invalid_after_valid', 'localization'):
             with self.subTest(fault=fault):
                 now, subscribers = [100.0], {}
 
@@ -526,30 +527,32 @@ source "$1" restart
                     subscribers['/pidrone/localization/local_ready'](
                         SimpleNamespace(data=fault != 'localization'))
                     if fault != 'missing':
-                        stamp = now[0] - (2 if fault == 'stale' else 0)
-                        subscribers['/pidrone/range'](SimpleNamespace(
-                            range=float('nan') if fault == 'invalid' else .05,
-                            min_range=0., max_range=4.,
-                            header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: stamp))))
+                        stamp = now[0] - (0.3 if fault == 'stale' else 0)
+                        def send_range(value):
+                            subscribers['/pidrone/range'](SimpleNamespace(
+                                range=value, min_range=0., max_range=4.,
+                                header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: stamp))))
+                        if fault == 'invalid_after_valid':
+                            send_range(.05)
+                        send_range(float('nan') if fault in ('invalid', 'invalid_after_valid') else .05)
 
                 modules = {
-                    'time': SimpleNamespace(sleep=sleep),
+                    'time': SimpleNamespace(sleep=sleep, monotonic=lambda: now[0]),
                     'rospy': SimpleNamespace(init_node=lambda *a, **kw: None,
+                        get_param=lambda key, default: {'/fusion_localization/sensor_timeout': 0.2}.get(key, default),
                         get_time=lambda: now[0], is_shutdown=lambda: False,
                         Subscriber=lambda topic, cls, callback: subscribers.update({topic: callback})),
                     'diagnostic_msgs.msg': SimpleNamespace(DiagnosticArray=object),
                     'sensor_msgs.msg': SimpleNamespace(Range=object),
                     'std_msgs.msg': SimpleNamespace(Bool=object)}
-                with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report:
-                    if fault:
-                        with self.assertRaises(SystemExit) as error:
-                            exec(code, {})
-                        self.assertEqual(error.exception.code, 1)
-                        expected = 'Localization is not ready' if fault == 'localization' else 'ToF has no fresh valid range'
-                        self.assertIn(expected, report.call_args.args[0])
-                    else:
-                        exec(code, {})
-                        self.assertIn('EKF initialized', report.call_args.args[0])
+                with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report, \
+                        mock.patch.object(sys, 'path', [str(source), *sys.path]):
+                    main = runpy.run_path(str(script))['main']
+                    main.__globals__['monotonic'] = lambda: now[0]
+                    self.assertEqual(main(), int(fault is not None))
+                expected = ('EKF initialized' if fault is None else 'Localization is not ready'
+                            if fault == 'localization' else 'ToF has no fresh valid range')
+                self.assertIn(expected, report.call_args.args[0])
 
     def test_gyro_check_requires_fresh_disarmed_telemetry_through_end_of_window(self):
         for fault in (None, 'imu', 'mode', 'armed'):

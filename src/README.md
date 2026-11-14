@@ -211,14 +211,8 @@ When calibrating:
 - CA83: Tag 3
 
 ## Tips + Tricks
-- Use `d + [enter] to exit out of a screen session
-- If you come across an issue with the screen session, run:
-   ```
-   screen -ls
-   screen -S <session-id> -X quit
-   cd ~/catkin_ws/src/pidrone_pkg
-   screen -c boot/pi.screenrc
-   ```
+- Press the backtick key, then `d`, to detach from Screen.
+- Retry an exited node with the command printed in its window. Use the dashboard's **Restart** button to restart all nodes while disarmed.
 
 ## To Install Python Dependencies on Drone
 1. Add to `requirements.txt`

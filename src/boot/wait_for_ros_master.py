@@ -43,7 +43,7 @@ def main():
         master = xmlrpc.ServerProxy(uri)
         while True:
             try:
-                code, message, pid = master.getPid('/pidrone_screen_startup')
+                code, message, _ = master.getPid('/pidrone_screen_startup')
                 if code == 1:
                     print('ROS master is ready.')
                     return 0
