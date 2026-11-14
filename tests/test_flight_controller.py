@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace as NS
 from threading import Lock
 from unittest import mock
 
-from flight.h2rMultiWii import MultiWii
+from flight.multiwii import MultiWii
 from flight.command_values import disarm_cmd
 import test_fusion as fusion_helpers
 
@@ -32,7 +32,7 @@ class MspPacketTest(unittest.TestCase):
         writes = []
         serial = NS(write=writes.append, read=incoming.read,
                     inWaiting=lambda: len(incoming.getvalue()) - incoming.tell())
-        with mock.patch('flight.h2rMultiWii.serial.Serial', return_value=serial):
+        with mock.patch('flight.multiwii.serial.Serial', return_value=serial):
             board = MultiWii('fake')
         board.send_commands([(MultiWii.INTEGRATED_IMU, [1, 0]), (MultiWii.ANALOG, [])])
         replies = board.receive_available()

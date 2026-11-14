@@ -18,7 +18,7 @@ from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Header, Empty, Bool, String
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from flight import command_values as cmds
-from flight.h2rMultiWii import MultiWii
+from flight.multiwii import MultiWii
 from localization import monotonic
 from flight.distance_guard import fresh, STATE_TIMEOUT, SELECTION_TIMEOUT
 from flight.imu_clock import ImuClock

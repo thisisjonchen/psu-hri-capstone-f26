@@ -1,20 +1,11 @@
 #!/usr/bin/env python
 
-"""MSP transport for RC commands, integrated IMU, and battery telemetry."""
-
-__author__ = "Aldo Vargas and Stefanie Tellex"
-__copyright__ = "Copyright 2014 Altax.net, 2017"
-
-__license__ = "GPL"
-__version__ = "1.5"
-
 import logging
 import struct
 import time
 from threading import Lock
 
 import serial
-
 
 class MultiWii(object):
     RAW_IMU = 102

@@ -43,7 +43,7 @@ controller left in DFU mode before any firmware write can return to its original
 firmware by disconnecting and reconnecting its power.
 
 The 100 Hz IMU delivery also needs the current Pi-side
-`flight_controller_node.py`, `h2rMultiWii.py`, the generated `IntegratedImu` message,
+`flight_controller_node.py`, `multiwii.py`, the generated `IntegratedImu` message,
 and the rebuilt EKF. Update firmware and ROS code together. The flash command
 does not deploy Pi code. Restart localization on the floor after restarting the FC.
 
