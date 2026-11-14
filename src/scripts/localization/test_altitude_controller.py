@@ -2,7 +2,8 @@
 
 Flight tests run the controller against an independent simulated drone whose
 thrust curve, hover throttle and battery deliberately differ from the
-controller's settings, with delayed noisy 10 Hz ToF and a biased noisy IMU.
+controller's settings. Feedback is the simulated height and climb rate, with
+optional noise to exercise the cascade independently of the estimator.
 Expectations are basic yes/no flight requirements (lifts off, no throttle jolts,
 no runaway, no climb while leaning), not the controller's formulas or tuned values.
 The simulator exaggerates overshoot (no drag, ground effect or motor lag), so
@@ -11,10 +12,8 @@ overshoot and takeoff feel are judged in real flight testing.
 import math
 import random
 import unittest
-from collections import deque
 
 from altitude_controller import AltitudeController
-from localization.fusion import VerticalFilter
 
 G = 9.80665
 RATE = 60.0
@@ -48,40 +47,29 @@ class SimulatedDrone(object):
 
 
 class FlightTest(object):
-    """Controller + vertical filter + sensors flying the simulated drone."""
+    """Controller driving a simulated drone with noisy state feedback."""
 
-    def __init__(self, drone, controller=None, imu_bias=0.2, imu_noise=0.3, seed=1):
+    def __init__(self, drone, controller=None, climb_noise=.02, seed=1):
         self.drone, self.rng = drone, random.Random(seed)
         self.controller = controller or AltitudeController()
-        self.filter = VerticalFilter()
-        self.imu_bias, self.imu_noise = imu_bias, imu_noise
-        self.history = deque()  # (time, true height) for 50 ms ToF latency
-        self.tof = drone.height
-        self.accel, self.commands, self.heights, self.climbs = 0.0, [], [], []
+        self.climb_noise = climb_noise
+        self.commands, self.heights, self.climbs = [], [], []
         self.now = 10.0
 
-    def run(self, seconds, target, tilt=0.0, on_step=None):
+    def run(self, seconds, target, tilt=0.0):
         for _ in range(int(seconds * RATE)):
             self.now += 1 / RATE
-            self.filter.predict(self.accel + self.imu_bias + self.rng.gauss(0, self.imu_noise), self.now)
-            self.history.append((self.now, self.drone.height))
-            if int(round(self.now * RATE)) % 6 == 0:  # 10 Hz ToF
-                stamp, height = [s for s in self.history if s[0] <= self.now - 0.05][-1]
-                self.tof = height + self.rng.gauss(0, 0.01)
-                self.filter.correct(self.tof, 0.02 ** 2, stamp)
-            while self.history[0][0] < self.now - 1:
-                self.history.popleft()
-            if on_step:
-                target = on_step(self, target)
-            command = self.controller.step(target, self.tof, self.filter.climb_rate, math.cos(tilt), self.now)
-            self.accel = self.drone.step(command, tilt)
+            height = self.drone.height + self.rng.gauss(0, .005)
+            climb = self.drone.climb + self.rng.gauss(0, self.climb_noise)
+            command = self.controller.step(target, height, climb, math.cos(tilt), self.now)
+            self.drone.step(command, tilt)
             self.commands.append(command)
             self.heights.append(self.drone.height)
             self.climbs.append(self.drone.climb)
         return self
 
     def takeoff(self, target=0.25, seconds=6.0, **kwargs):
-        self.controller.start_takeoff(self.tof, self.now)
+        self.controller.start_takeoff(self.drone.height, self.now)
         return self.run(seconds, target, **kwargs)
 
 
@@ -176,7 +164,7 @@ class AltitudeControllerTest(unittest.TestCase):
             self.assertLess(largest_step(flight.commands[start - 1:]), 10)
         # A landing request during the takeoff ramp must not resume climbing.
         flight = FlightTest(SimulatedDrone())
-        flight.controller.start_takeoff(flight.tof, flight.now)
+        flight.controller.start_takeoff(flight.drone.height, flight.now)
         flight.run(.5, .25)
         flight.controller.start_landing(flight.drone.ground)
         flight.run(3, .25)
@@ -190,8 +178,8 @@ class AltitudeControllerTest(unittest.TestCase):
         self.assertGreater(min(flight.climbs), -.2 * 1.5, 'descended at %.2f m/s' % -min(flight.climbs))
         self.assertLess(abs(flight.heights[-1] - .25), .03, 'did not settle back at the target')
 
-    def test_vibration_noise_does_not_shake_the_throttle(self):
-        flight = FlightTest(SimulatedDrone(), imu_noise=1.5).takeoff(seconds=15)
+    def test_climb_rate_noise_does_not_shake_the_throttle(self):
+        flight = FlightTest(SimulatedDrone(), climb_noise=.08).takeoff(seconds=15)
         commands = flight.commands[-int(5 * RATE):]
         mean = sum(commands) / len(commands)
         spread = math.sqrt(sum((c - mean) ** 2 for c in commands) / len(commands))

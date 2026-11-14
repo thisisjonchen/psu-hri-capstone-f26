@@ -11,6 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   nav_msgs
   std_msgs
+  diagnostic_msgs
   message_generation
 )
 
@@ -84,7 +85,6 @@ generate_messages(
   DEPENDENCIES
   geometry_msgs
   std_msgs
-  geometry_msgs
 )
 catkin_package(CATKIN_DEPENDS message_runtime)
 

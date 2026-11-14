@@ -67,8 +67,8 @@ void Profile::validate() const {
     require(std::isfinite(delay) && delay>=0. && delay<=.4,"Live fusion delay must be in [0, 0.4]");
     require(std::isfinite(camera_delay) && camera_delay>=0. && camera_delay<=delay,
             "Camera delay must fit within the fusion delay");
-    require(std::isfinite(uwb_delay) && uwb_delay>=0.,
-            "Startup UWB delay must be finite and nonnegative");
+    require(std::isfinite(uwb_delay) && uwb_delay>=0. && uwb_delay<=delay,
+            "UWB delay must fit within the fusion delay");
 }
 void Filter::initialize(double x, double y, double xy_variance, double height, const Quaternion& q,
                         const Vec& ba, const Vec& bg) {
@@ -246,8 +246,9 @@ Output body_output(const Filter& f, const Vec& angular_rate) {
     return result;
 }
 bool Snapshot::range_ready(double now) const {
-    const double age=now-delay-origin_ns/1.e9-range_aid;
-    return initialized && age>=0. && age<=.5;
+    // Keep the original 0.15 s horizon + 0.5 s range support limit.
+    const double age=now-origin_ns/1.e9-range_aid;
+    return initialized && age>=0. && age<=std::min(.65,delay+.5);
 }
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
@@ -338,12 +339,28 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     queue(m);
 }
 void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
-    if (origin_ns_ || !fault_.empty()) return;
+    if (stamp<=0 || !uwb_reference_valid_ || !fault_.empty()) return;
     stamp-=std::llround(profile_.uwb_delay*1.e9);
     if (stamp<=0 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
-    // UWB supplies the initial room position; camera/IMU/ToF maintain motion afterward.
-    if (!rest_since_ || stamp<rest_since_) return;
-    uwb_initial_.push_back({stamp,x,y,variance});
+    if (!origin_ns_) {
+        if (rest_since_ && stamp>=rest_since_) uwb_initial_.push_back({stamp,x,y,variance});
+        return;
+    }
+    Measurement m;
+    m.stamp=(stamp-origin_ns_)/1.e9;
+    m.sensor="uwb";
+    m.xy=cv::Vec2d(x,y);
+    m.value=variance;
+    queue(m);
+}
+
+void LiveEKF::invalidate_uwb_reference() {
+    uwb_reference_valid_=false;
+    uwb_initial_.clear();
+    for (auto it=measurements_.begin();it!=measurements_.end();) {
+        if (it->second.sensor=="uwb") it=measurements_.erase(it);
+        else ++it;
+    }
 }
 
 bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,const Vec& rate) {
@@ -493,11 +510,10 @@ bool LiveEKF::correct(const Measurement& m) {
         Vec rate; if (!mean_rate(m.value,m.end,rate)) return false;
         try { return correct_camera(m,rate); } catch (const cv::Exception&) { return false; }
     }
-    cv::Mat h=cv::Mat::zeros(m.sensor=="range" ? 1 : 3,15,CV_64F);
     if (m.sensor=="range") {
         if (filter_.correct_range(m.value,profile_,&range_trace_.innovation)) return true;
         const Rotation r=rotation(filter_.quaternion());
-        const Vec center=filter_.position()+r*profile_.range_offset,direction=r*profile_.range_beam;
+        const Vec direction=r*profile_.range_beam;
         // Range can correct a height prediction that has crossed below the floor.
         if (direction[2]>=-.1) return false;
         const Rotation a=r*skew(profile_.range_offset),b=r*skew(profile_.range_beam);
@@ -511,6 +527,19 @@ bool LiveEKF::correct(const Measurement& m) {
         range_trace_.ground_reset=true;
         return true;
     }
+    if (m.sensor=="uwb") {
+        const Rotation r=rotation(filter_.quaternion());
+        const Vec tag=filter_.position()+r*profile_.uwb_offset;
+        const Rotation derivative=-r*skew(profile_.uwb_offset);
+        cv::Mat h=cv::Mat::zeros(2,15,CV_64F);
+        for (int i=0;i<2;++i) {
+            h.at<double>(i,i)=1.;
+            for (int j=0;j<3;++j) h.at<double>(i,6+j)=derivative(i,j);
+        }
+        return filter_.correct((cv::Mat_<double>(2,1)<<m.xy[0]-tag[0],m.xy[1]-tag[1]),
+                               h,cv::Mat::eye(2,2,CV_64F)*m.value,9.21,true);
+    }
+    cv::Mat h=cv::Mat::zeros(3,15,CV_64F);
     if (m.sensor=="zero_velocity") {
         block(h,0,3,Rotation::eye()); block(h,0,6,skew(filter_.velocity())*rotation(filter_.quaternion()));
         return filter_.correct(column(-filter_.velocity()),h,cv::Mat::eye(3,3,CV_64F)*(.02*.02),11.34);
@@ -559,16 +588,16 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
     for (auto& p:shifted_x) p.x+=.01;
     for (auto& p:shifted_y) p.y+=.01;
     const auto rx=camera.undistort(shifted_x),ry=camera.undistort(shifted_y);
-    std::vector<cv::Vec2d> measured,residuals; std::vector<cv::Matx22d> noises;
+    std::vector<cv::Vec2d> residuals; std::vector<cv::Matx22d> noises;
     std::vector<double> residual_x,residual_y;
+    const double pixel_rate_variance=std::pow(1.5/duration,2);
     for (int i=0;i<used;++i) {
         const int n=indices[i];
         const Vec diff=(previous_rays[n]-rays[n])/duration,dx=(rx[n]-previous_rays[n])/.01,dy=(ry[n]-previous_rays[n])/.01;
         const cv::Matx22d j(dx[0],dy[0],dx[1],dy[1]);
-        measured.emplace_back(diff[0],diff[1]);
         residuals.emplace_back(diff[0]-predicted[2*i],diff[1]-predicted[2*i+1]);
         residual_x.push_back(residuals.back()[0]); residual_y.push_back(residuals.back()[1]);
-        noises.push_back(j*j.t()*std::pow(1.5/duration,2));
+        noises.push_back(j*j.t()*pixel_rate_variance);
     }
     const cv::Vec2d center(median(residual_x),median(residual_y));
     cv::Mat h=cv::Mat::zeros(2,15,CV_64F),information=cv::Mat::zeros(2,2,CV_64F),innovation=cv::Mat::zeros(2,1,CV_64F);
@@ -577,10 +606,11 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
         const auto& covariance=noises[i]; const cv::Vec2d delta=residuals[i]-center;
         const double determinant=cv::determinant(covariance);
         if (!std::isfinite(determinant) || determinant<=0.) return false;
-        const double score=delta.dot(covariance.inv()*delta);
+        const auto inverse=covariance.inv();
+        const double score=delta.dot(inverse*delta);
         if (!std::isfinite(score) || score>9.21) continue;
         ++kept;
-        const cv::Mat weight=cv::Mat(covariance.inv());
+        const cv::Mat weight(inverse);
         h+=weight*cv::Mat(2,15,CV_64F,jacobians.data()+30*i); information+=weight;
         innovation+=weight*cv::Mat(residuals[i]);
     }

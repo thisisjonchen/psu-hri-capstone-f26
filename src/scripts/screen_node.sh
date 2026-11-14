@@ -55,7 +55,6 @@ pidrone_screen_node() {
     case "$node" in
         core) command=(roscore) ;;
         fc) command=(python -u flight_controller_node.py) ;;
-        rigid) command=(python -u rigid_transform_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u pid_controller.py) ;;
         se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch") ;;
@@ -79,7 +78,7 @@ pidrone_screen_node() {
                 command+=("port:=$PALS_UWB_PORT")
             fi
             ;;
-        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|rigid|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
+        *) echo 'Usage: bash screen_node.sh {core|fc|pid|se|vision|tof|bridge|video|tags|tagmap|uwb|shell}' >&2
            return 2 ;;
     esac
 

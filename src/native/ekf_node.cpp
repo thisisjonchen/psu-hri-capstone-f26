@@ -1,11 +1,13 @@
 #include "live_ekf.h"
 #include <ros/ros.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/Range.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/UInt32.h>
 #include <pidrone_pkg/Mode.h>
 #include <pidrone_pkg/IntegratedImu.h>
 #include <pidrone_pkg/EkfVerticalTrace.h>
@@ -68,6 +70,7 @@ public:
         state_pub_=node_.advertise<pidrone_pkg::State>("pidrone/ekf/state",1);
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
         ready_pub_=node_.advertise<std_msgs::Bool>("pidrone/ekf/local_ready",1);
+        status_pub_=node_.advertise<diagnostic_msgs::DiagnosticArray>("pidrone/ekf/status",1);
         trace_pub_=node_.advertise<pidrone_pkg::EkfVerticalTrace>("pidrone/ekf/vertical_trace",10);
         const auto transport=ros::TransportHints().tcpNoDelay();
         imu_sub_=node_.subscribe("pidrone/imu_integrated",100,&Node::imu,this,transport);
@@ -76,6 +79,7 @@ public:
         camera_sub_=node_.subscribe("raspicam_node/camera_info",1,&Node::camera,this);
         mode_sub_=node_.subscribe("pidrone/mode",10,&Node::mode,this,transport);
         uwb_sub_=node_.subscribe("pidrone/localization/uwb",10,&Node::uwb,this,transport);
+        generation_sub_=node_.subscribe("pidrone/localization/generation",1,&Node::generation,this);
         timer_=node_.createWallTimer(ros::WallDuration(.05),&Node::watchdog,this);
         worker_=std::thread(&Node::work,this);
     }
@@ -87,8 +91,8 @@ private:
     ros::NodeHandle node_,private_;
     pals::Profile profile_;
     pals::LiveEKF filter_;
-    ros::Publisher state_pub_,odom_pub_,ready_pub_,trace_pub_;
-    ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_,uwb_sub_;
+    ros::Publisher state_pub_,odom_pub_,ready_pub_,status_pub_,trace_pub_;
+    ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_,uwb_sub_,generation_sub_;
     ros::WallTimer timer_;
     std::string body_frame_,frame_;
     std::thread worker_;
@@ -97,12 +101,14 @@ private:
     std::deque<Event> queue_;
     bool stopping_=false;
     std::atomic<bool> failed_{false};
+    std::atomic<bool> invalidate_uwb_{false};
     pals::Snapshot snapshot_;
     // Only the ROS callback thread owns the current-time IMU history and output.
     struct TimedImu { std::int64_t stamp; pals::Imu sample; pals::Vec rate; };
     std::deque<TimedImu> history_;
     std::deque<sensor_msgs::Range::ConstPtr> ranges_;
     std::int64_t last_range_stamp_=0;
+    ros::Time raw_range_stamp_;
     std::int64_t last_imu_=0,last_published_=0;
     std::int64_t last_trace_stamp_=0;
     std::uint64_t last_trace_range_=0;
@@ -111,7 +117,7 @@ private:
     std::array<double,2> vertical_output_ = {};
     bool ready_sent_=false,last_ready_=false;
     std::string last_ready_reason_;
-    ros::WallTime ready_at_;
+    ros::WallTime ready_at_,status_at_;
 
     pals::Snapshot snapshot() {
         std::lock_guard<std::mutex> lock(snapshot_mutex_); return snapshot_;
@@ -134,9 +140,11 @@ private:
         else available_.notify_one();
     }
     void range(const sensor_msgs::Range::ConstPtr& msg) {
+        raw_range_stamp_=msg->header.stamp;
         const auto stamp=msg->header.stamp.toNSec();
+        if (msg->header.stamp>ros::Time::now()) return;
         if (stamp>0 && stamp>static_cast<std::uint64_t>(last_range_stamp_)
-            && stamp<=ros::Time::now().toNSec() && pals::valid_range(msg->range,msg->min_range,msg->max_range)) {
+            && pals::valid_range(msg->range,msg->min_range,msg->max_range)) {
             ranges_.push_back(msg); last_range_stamp_=stamp;
             while (ranges_.size()>64) ranges_.pop_front();
         }
@@ -147,7 +155,12 @@ private:
     void mode(const pidrone_pkg::Mode::ConstPtr& msg) { Event e; e.kind=Event::MODE; e.mode=msg; enqueue(e); }
     void uwb(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg) {
         if (msg->header.frame_id!=frame_) { ROS_WARN_THROTTLE(5.,"Ignoring UWB in frame %s",msg->header.frame_id.c_str()); return; }
+        if (msg->header.stamp>ros::Time::now()) return;
         Event e; e.kind=Event::UWB; e.uwb=msg; enqueue(e);
+    }
+    void generation(const std_msgs::UInt32::ConstPtr& msg) {
+        // Fusion increments the generation when the room layout or clock changes.
+        if (msg->data) invalidate_uwb_=true;
     }
     void imu(const pidrone_pkg::IntegratedImu::ConstPtr& msg) {
         const std::int64_t stamp=msg->header.stamp.toNSec();
@@ -176,11 +189,12 @@ private:
         while (!history_.empty() && (stamp-history_.front().stamp)/1.e9>1.) history_.pop_front();
         Event e; e.kind=Event::IMU; e.stamp=stamp; e.imu=sample; enqueue(e);
         try { publish(s,stamp); }
-        catch (const std::exception& error) { fail(error.what()); publish_ready(false,error.what()); }
+        catch (const std::exception& error) { fail(error.what()); publish_ready(false,error.what(),s); }
     }
-    void publish_ready(bool value,const std::string& reason) {
+    void publish_ready(bool value,const std::string& reason,const pals::Snapshot& s) {
         const ros::WallTime now=ros::WallTime::now();
-        if (reason!=last_ready_reason_) {
+        const bool changed=reason!=last_ready_reason_;
+        if (changed) {
             ROS_INFO("EKF: %s",reason.c_str());
             last_ready_reason_=reason;
         }
@@ -188,18 +202,52 @@ private:
             std_msgs::Bool msg; msg.data=value; ready_pub_.publish(msg);
             ready_sent_=true; last_ready_=value; ready_at_=now;
         }
+        publish_status(value,reason,s,now,changed);
+    }
+    void publish_status(bool value,const std::string& reason,const pals::Snapshot& s,
+                        const ros::WallTime& now,bool changed) noexcept {
+        try {
+            if (!status_pub_.getNumSubscribers() || (!changed && (now-status_at_).toSec()<.5)) return;
+            diagnostic_msgs::DiagnosticArray output;
+            output.header.stamp=ros::Time::now();
+            diagnostic_msgs::DiagnosticStatus status;
+            status.name="ekf_localization"; status.hardware_id="uwb+imu+tof+camera";
+            status.level=value ? status.OK : status.WARN;
+            status.message=reason;
+            const double t=output.header.stamp.toSec();
+            auto add_age=[&](const char* key,bool available,double age) {
+                diagnostic_msgs::KeyValue field;
+                field.key=key; field.value=available ? std::to_string(age) : "missing";
+                status.values.push_back(field);
+            };
+            add_age("raw_range_age_s",!raw_range_stamp_.isZero(),t-raw_range_stamp_.toSec());
+            add_age("accepted_range_age_s",s.range_aid>=0.,t-s.origin_ns/1.e9-s.range_aid);
+            add_age("ekf_odometry_age_s",last_published_>0,t-last_published_/1.e9);
+            if (s.range_trace.sequence) {
+                diagnostic_msgs::KeyValue field;
+                field.key="last_range_correction";
+                field.value=s.range_trace.accepted ? "accepted" : "rejected";
+                status.values.push_back(field);
+            }
+            output.status.push_back(status);
+            status_pub_.publish(output);
+            status_at_=now;
+        } catch (...) {}  // Diagnostics must not interrupt flight estimation.
     }
     void watchdog(const ros::WallTimerEvent&) {
         const auto s=snapshot(); std::string reason;
-        const bool ready=s.ready(ros::Time::now().toSec(),last_published_ ? last_output_ : s.filter,reason);
-        publish_ready(!failed_ && ready,reason);
+        const double now=ros::Time::now().toSec();
+        const bool ready=s.ready(now,last_published_ ? last_output_ : s.filter,reason);
+        const bool lagging=s.initialized && now-s.origin_ns/1.e9-s.filter.stamp>profile_.delay+.35;
+        if (lagging && s.fault.empty()) reason="Delayed fusion is more than 0.35 seconds behind its horizon";
+        publish_ready(!failed_ && ready && !lagging,reason,s);
     }
     void publish(const pals::Snapshot& s,std::int64_t stamp) {
         const double now=ros::Time::now().toSec(),age=now-stamp/1.e9;
         if (failed_ || !s.fault.empty() || !s.initialized || stamp<=last_published_
             || age<0. || age>.15 || !s.range_ready(now)) { watchdog(ros::WallTimerEvent()); return; }
         if ((stamp-s.origin_ns)/1.e9-s.filter.stamp>profile_.delay+.35) {
-            publish_ready(false,"Delayed fusion is more than 0.35 seconds behind its horizon"); return;
+            publish_ready(false,"Delayed fusion is more than 0.35 seconds behind its horizon",s); return;
         }
         std::vector<pals::Imu> intervals;
         const double first=last_published_ ? std::min(s.filter.stamp,last_output_.stamp) : s.filter.stamp;
@@ -221,12 +269,12 @@ private:
         // Rebuild from the delayed snapshot each time; projected corrections never feed it back.
         if (!estimate.project(intervals,ranges,profile_)) {
             fail("Invalid output IMU interval or projection");
-            publish_ready(false,"Invalid output IMU interval or projection"); return;
+            publish_ready(false,"Invalid output IMU interval or projection",s); return;
         }
         auto vertical=vertical_output_;
         if (!pals::vertical_output(estimate,last_published_ ? &last_output_ : nullptr,intervals,vertical)) {
             fail("Invalid vertical output prediction");
-            publish_ready(false,"Invalid vertical output prediction"); return;
+            publish_ready(false,"Invalid vertical output prediction",s); return;
         }
         pals::Output output=pals::body_output(estimate,history_.back().rate);
         const double height_error=vertical[0]-estimate.state[2];
@@ -250,11 +298,14 @@ private:
         if (failed_ || after-stamp/1.e9<0. || after-stamp/1.e9>.15 || !s.range_ready(after)) {
             watchdog(ros::WallTimerEvent()); return;
         }
-        pidrone_pkg::State state;
-        state.header=odom.header; state.pose_with_covariance=odom.pose; state.twist_with_covariance=odom.twist;
-        state_pub_.publish(state); odom_pub_.publish(odom);
+        if (state_pub_.getNumSubscribers()) {
+            pidrone_pkg::State state;
+            state.header=odom.header; state.pose_with_covariance=odom.pose; state.twist_with_covariance=odom.twist;
+            state_pub_.publish(state);
+        }
+        odom_pub_.publish(odom);
         last_output_=estimate; vertical_output_=vertical; last_published_=stamp;
-        std::string reason; publish_ready(s.ready(after,estimate,reason),reason);
+        std::string reason; publish_ready(s.ready(after,estimate,reason),reason,s);
         publish_trace(s,estimate,vertical,stamp);
     }
     void publish_trace(const pals::Snapshot& s,const pals::Filter& projected,
@@ -292,6 +343,7 @@ private:
             }
             if (failed_) continue;
             try {
+                if (invalidate_uwb_.exchange(false)) filter_.invalidate_uwb_reference();
                 if (e.kind==Event::IMU) {
                     filter_.imu(e.stamp,e.imu,e.received);
                 } else if (e.kind==Event::RANGE) {

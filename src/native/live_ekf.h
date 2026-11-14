@@ -112,6 +112,7 @@ public:
     void range(std::int64_t stamp, double distance, double minimum, double maximum);
     void image(std::int64_t stamp, const std::vector<unsigned char>& encoded);
     void uwb(std::int64_t stamp, double x, double y, double variance);
+    void invalidate_uwb_reference();
     void imu(std::int64_t stamp, Imu sample, double received);
     Snapshot snapshot() const;
     const Filter& filter() const { return filter_; }
@@ -123,6 +124,7 @@ private:
         Vec rate;
         cv::Mat previous, image;
         std::shared_ptr<Camera> camera;
+        cv::Vec2d xy;
     };
     struct Range { std::int64_t stamp = 0; double value = 0.; } range_;
     struct Initial { Vec force, rate; double range; std::int64_t stamp; };
@@ -143,6 +145,7 @@ private:
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;
     Vec rest_force_, stationary_angle_ = Vec(0., 0., 0.);
     bool was_stationary_ = false, reference_valid_ = true;
+    bool uwb_reference_valid_ = true;
     bool takeoff_handoff_ = false;
     std::map<std::string, double> last_aid_;
     std::string mode_, fault_;

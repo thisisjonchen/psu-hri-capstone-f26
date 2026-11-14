@@ -32,13 +32,12 @@ class VelocityController(object):
     def reset(self):
         self.integral = [0.0, 0.0]
         self.time = None
-        self.lean = (0.0, 0.0)  # radians, for logging
 
     def step(self, error, now, integrate=True):
         """Return (roll, pitch) RC values for a velocity error (m/s)."""
         dt = 0.0 if self.time is None else max(0.0, now - self.time)
         self.time = now
-        commands, leans = [], []
+        commands = []
         for axis in (0, 1):
             previous = self.integral[axis]
             if integrate:
@@ -50,7 +49,5 @@ class VelocityController(object):
                 if lean * error[axis] > 0:
                     self.integral[axis] = previous  # Anti-windup: not into the lean limit.
                 lean = math.copysign(self.max_lean, lean)
-            leans.append(lean)
             commands.append(1500.0 + lean * self.us_per_radian)
-        self.lean = tuple(leans)
         return commands

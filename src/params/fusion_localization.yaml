@@ -1,6 +1,5 @@
 # The EKF fuses UWB into horizontal position and starts facing map +Y (ekf.yaml).
 # Freshness for height and the EKF estimate.
 sensor_timeout: 0.5
-max_sensor_skew: 0.15
 # Maximum speed (m/s) at which EKF XY corrections reach the controller.
 max_correction_speed: 0.05

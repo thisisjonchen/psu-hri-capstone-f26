@@ -14,8 +14,8 @@ camera_offset_body: [0.0, 0.0, 0.0]
 # UWB tag 3.8 cm left of the IMU.
 uwb_offset_body: [0.0, 0.038, 0.0]
 # Output is projected from this horizon to the latest IMU sample.
-fusion_delay_s: 0.15
+fusion_delay_s: 0.35
 # JPEG callback delay relative to the IMU timestamps.
 camera_delay_s: 0.04
-# Assumed UWB fix delay, used only for startup initialization.
+# Assumed UWB fix delay for initialization and horizontal correction.
 uwb_delay_s: 0.3

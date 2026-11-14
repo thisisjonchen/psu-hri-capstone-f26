@@ -43,7 +43,7 @@ class ExecuteTest(unittest.TestCase):
                                     ('drone1', '../flight_controller_node.py', ''),
                                     ('drone1', 'hover_routine.py', "--fly; rm -rf ~"),
                                     ('drone1', 'hover_routine.py', '^C'),
-                                    ('drone1', 'basic_routine.py', '--fly')]:
+                                    ('drone1', 'missing_routine.py', '--fly')]:
             with self.assertRaises(ValueError):
                 drones.execute(drone, script, args)
         for drone, action in [('drone1', 'start'), ('drone1', 'align'),

@@ -84,6 +84,8 @@ change gyro sampling or PID loop rates. They are applied to drone2; drone1 is un
 
 Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
 each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
+Delayed UWB fixes initialize room position and correct horizontal position during
+flight. The EKF continues on IMU, camera and ToF between fixes.
 Both paths consume integrated IMU increments directly. Splitting an interval assumes
 constant rotation rate and uniformly distributed delta velocity in its starting axes.
 The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
@@ -108,6 +110,10 @@ estimates. Data is buffered on the Pi, downloaded, then removed there. Allow abo
 mark driver callbacks, not sensor acquisition.
 `camera_delay_s` subtracts the camera's delay relative to IMU timestamps during
 fusion; it leaves recorded timestamps unchanged.
+
+If PID reports altitude unavailable, compare state and raw range ages on
+`/pidrone/localization/fusion_status` with the last accepted range age and
+correction result on `/pidrone/ekf/status`.
 
 Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
 

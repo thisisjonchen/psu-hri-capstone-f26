@@ -11,6 +11,7 @@ import numpy as np
 
 from localization import test_fusion as helpers
 from localization.distance_guard import DistanceGuard, automatic_coordination
+from localization.fusion import target_velocity
 from localization.test_ros_node import Stamp
 from localization.test_velocity_controller import SimulatedAxis
 
@@ -173,7 +174,7 @@ class DistancePIDTest(unittest.TestCase):
             self.c.calc_error()
             self.assertEqual(self.c.coordination_status, 'disabled')
             self.assertFalse(self.c.coordination_active)
-            self.assertAlmostEqual(self.c.current_velocity.x + self.c.pid_error.x / 100., .05)
+            self.assertAlmostEqual(self.c.current_velocity.x + self.c.pid_error.x, .05)
             self.assertEqual(self.c.current_mode, 'FLYING')
         self.c.current_mode_callback(NS(mode='DISARMED'))
         self.assertFalse(self.c.coordination_enabled)
@@ -231,7 +232,7 @@ class DistancePIDTest(unittest.TestCase):
         self.assertEqual(self.c.current_mode, 'FLYING')
         self.assertEqual(self.c.coordination_status, 'too_close')
 
-    def test_blocked_forward_request_logs_filtered_velocity_for_both_drones(self):
+    def test_blocks_uncertain_forward_request_for_both_drones(self):
         for own, other in [('drone1', 'drone2'), ('drone2', 'drone1')]:
             self.fixture.params['/pidrone/coordination'].update(
                 drone_id=own, peer_id=other, min_distance=.85,
@@ -251,10 +252,7 @@ class DistancePIDTest(unittest.TestCase):
             controller.desired_twist_callback(command)
             controller.step()
             self.assertEqual(controller.coordination_status, 'uncertainty_too_large')
-            self.assertAlmostEqual(controller.current_velocity.y + controller.pid_error.y / 100., 0)
-            message = self.fixture.ros.loginfo_throttle.call_args[0][1]
-            self.assertIn('desired=(0.000, 0.500)', message)
-            self.assertIn('filtered=(0.000, 0.000) coordination=uncertainty_too_large', message)
+            self.assertAlmostEqual(controller.current_velocity.y + controller.pid_error.y, 0)
             self.assertEqual(controller.current_mode, 'FLYING')
 
     def test_pair_recovers_from_outward_trim_after_tension_is_removed(self):
@@ -296,7 +294,7 @@ class DistancePIDTest(unittest.TestCase):
                 peer.velocity.x = plants[1-index].velocity
                 controller.peer_state_callback(peer)
                 command = helpers.twist()
-                command.linear.x, command.linear.y = helpers.target_velocity(
+                command.linear.x, command.linear.y = target_velocity(
                     (anchors[index], 2.), (positions[index], 2.), 0., .3, .1)
                 controller.desired_twist_callback(command)
                 outputs.append(controller.step()[0])

@@ -438,6 +438,12 @@ extern "C" int pals_ekf_correct(double* state, double* covariance, const double*
             covariance[15*i+j]=value;
         }
     if (!finite(delta,15) || !finite(covariance,225)) return 3;
+    if (xy_only) {
+        state[0]+=delta[0];
+        state[1]+=delta[1];
+        symmetrize(covariance);
+        return finite(state,2) ? 0 : 3;
+    }
     const double angle=std::sqrt(delta[6]*delta[6]+delta[7]*delta[7]+delta[8]*delta[8]);
     const double scale=angle < 1e-6 ? .5-angle*angle/48 : std::sin(angle/2)/angle;
     const double correction[]={scale*delta[6],scale*delta[7],scale*delta[8],std::cos(angle/2)};

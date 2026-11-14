@@ -66,7 +66,10 @@ TEST(EkfOutput, RecoveryDoesNotMakeStaleRangeOrOutputReady) {
     s.range_aid=2.3; s.horizontal_aid=2.3;
     EXPECT_FALSE(s.ready(3.6,s.filter,reason));
     s.filter.stamp=2.6;
-    EXPECT_TRUE(s.ready(3.6,s.filter,reason));
+    EXPECT_TRUE(s.ready(3.59,s.filter,reason));
+    s.delay=.35;
+    s.filter.stamp=2.97;
+    EXPECT_FALSE(s.range_ready(3.97));  // Longer UWB horizon may not extend ToF expiry.
     s.filter.state[2]=std::numeric_limits<double>::quiet_NaN();
     std::array<double,2> vertical={{0.,0.}};
     EXPECT_FALSE(pals::vertical_output(s.filter,nullptr,{},vertical));
@@ -140,12 +143,12 @@ TEST(EkfOutput, ProjectionUsesSharedRangeGeometryAndPreservesImuFailure) {
     EXPECT_EQ(seed.covariance,actual.covariance);
 }
 
-TEST(EkfOutput, UwbInitializesRoomPositionWithoutChangingMotionAfterStartup) {
+TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
     pals::Profile profile{};
     profile.acceleration_scale=profile.gyro_scale=1.;
     profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
     profile.range_beam=pals::Vec(0.,0.,-1.);
-    profile.delay=.15; profile.uwb_delay=.3;
+    profile.delay=.35; profile.uwb_delay=.3;
     pals::LiveEKF filter(profile);
     auto tick=[](pals::LiveEKF& f,int i) {
         const auto ns=1000000000LL+i*10000000LL;
@@ -161,13 +164,19 @@ TEST(EkfOutput, UwbInitializesRoomPositionWithoutChangingMotionAfterStartup) {
     EXPECT_NEAR(filter.filter().position()[0],.4,1.e-9);
     EXPECT_NEAR(filter.filter().position()[1],-.2,1.e-9);
     auto baseline=filter;
-    for (int i=901;i<=1100;++i) {
-        if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.48,-.12,.01);
-        tick(filter,i); tick(baseline,i);
+    for (int i=901;i<=1010;++i) {
+        const auto ns=1000000000LL+i*10000000LL;
+        // Stop aiding both filters apart from a delayed UWB fix in one.
+        if (i==1000) filter.uwb(ns,.48,-.12,.01);
+        const pals::Imu imu{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)};
+        filter.imu(ns,imu,i*.01);
+        baseline.imu(ns,imu,i*.01);
     }
     EXPECT_TRUE(filter.snapshot().fault.empty());
-    EXPECT_EQ(filter.filter().state,baseline.filter().state);
-    EXPECT_EQ(filter.filter().covariance,baseline.filter().covariance);
+    EXPECT_GT(filter.filter().position()[0],baseline.filter().position()[0]);
+    EXPECT_GT(filter.filter().position()[1],baseline.filter().position()[1]);
+    for (std::size_t i=2;i<filter.filter().state.size();++i)
+        EXPECT_NEAR(filter.filter().state[i],baseline.filter().state[i],1.e-12);
 }
 
 int main(int argc, char** argv) {

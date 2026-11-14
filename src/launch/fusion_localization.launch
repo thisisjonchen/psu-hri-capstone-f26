@@ -2,7 +2,6 @@
   <arg name="namespace" default="/"/>
   <arg name="frame_id" default="map"/>
   <arg name="floor_z" default="0.0"/>
-  <arg name="tof_offset_z" default="0.0"/>
   <arg name="body_frame" default="pidrone_body"/>
   <arg name="ekf_calibration" default="$(find pidrone_pkg)/params/ekf.yaml"/>
   <group ns="$(arg namespace)">
@@ -11,7 +10,6 @@
       <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
-      <param name="tof_offset_z" value="$(arg tof_offset_z)"/>
       <param name="body_frame" value="$(arg body_frame)"/>
     </node>
     <include file="$(find pidrone_pkg)/launch/ekf_localization.launch">

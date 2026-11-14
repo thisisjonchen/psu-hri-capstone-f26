@@ -10,6 +10,11 @@ Fix = namedtuple('Fix', 'x y z quality stamp')
 Height = namedtuple('Height', 'z stamp')
 
 
+def valid_range(distance, minimum, maximum):
+    return (all(finite(v) for v in (distance, minimum, maximum))
+            and 0 <= minimum < maximum and minimum <= distance <= maximum)
+
+
 class PositionCombiner(object):
     def __init__(self, stale_after=0.5, max_skew=0.15, compensate_tilt=True,
                  floor_z=0.0, tof_offset_z=0.0, max_tilt_degrees=45.0):
@@ -28,9 +33,7 @@ class PositionCombiner(object):
     def update_range(self, distance, minimum, maximum, stamp, received):
         # An explicit invalid reading invalidates the previous height immediately.
         self.range = None
-        if (all(finite(v) for v in (distance, minimum, maximum, stamp, received))
-                and 0 <= minimum < maximum and minimum <= distance <= maximum
-                and stamp > 0):
+        if valid_range(distance, minimum, maximum) and finite(stamp) and finite(received) and stamp > 0:
             self.range = RangeSample(distance, stamp, received)
 
     def update_attitude(self, quaternion, stamp, received, available=True):

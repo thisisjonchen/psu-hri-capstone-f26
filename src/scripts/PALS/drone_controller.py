@@ -299,14 +299,13 @@ class Drone(object):
                 command.linear.x, command.linear.y))
         return command
 
-    def hover(self, seconds=1.0, command=None):
-        """Hover, publishing command() (default: fused X/Y hold) each cycle."""
-        command = command or self._xy_hold_command
-        self.twist_pub.publish(command())
+    def hover(self, seconds=1.0):
+        """Publish the fused XY hold command while hovering."""
+        self.twist_pub.publish(self._xy_hold_command())
         deadline = time.time() + seconds
         while time.time() < deadline:
             self._check_flight('hover')
-            self.twist_pub.publish(command())
+            self.twist_pub.publish(self._xy_hold_command())
             rospy.sleep(max(0.0, min(0.1, deadline - time.time())))
 
     def disarm(self):

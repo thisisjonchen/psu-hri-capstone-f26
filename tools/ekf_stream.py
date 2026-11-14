@@ -21,6 +21,7 @@ TOPICS = (
     '/raspicam_node/camera_info',
     '/pidrone/state', '/pidrone/ekf/odometry', '/pidrone/localization/odometry',
     '/pidrone/ekf/vertical_trace',
+    '/pidrone/ekf/status', '/pidrone/localization/fusion_status',
     '/pidrone/localization/uwb',
 )
 TELEMETRY_TOPICS = tuple(topic for topic in TOPICS if not topic.startswith('/raspicam_node/'))

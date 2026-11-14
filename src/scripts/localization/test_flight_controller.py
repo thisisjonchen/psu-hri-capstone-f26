@@ -40,6 +40,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         ros.Publisher = make_publisher
         self.commands = []
         self.missing_reply = None
+        self.incomplete_legacy = False
         self.sequence, self.previous_us = 0, None
         self.requests = {}
         self.board = MultiWii.__new__(MultiWii)
@@ -70,9 +71,12 @@ class FlightControllerLoopTest(unittest.TestCase):
                 duration = 10000 if self.previous_us is None else (end-self.previous_us) & 0xffffffff
                 self.sequence += 1
                 self.previous_us = end
+                samples = [self.board.attitude, self.board.rawIMU]
+                if self.incomplete_legacy and self.sequence == 1:
+                    samples.pop()
                 return dict(cmd=code, request=self.requests[code], valid=True, sequence=self.sequence, end_us=end, duration_us=duration,
                             rotation=(0.,0.,0.,1.), velocity=(0.,0.,9.8*duration*1e-6),
-                            timestamp=self.env.ros_now, legacy=[self.board.attitude,self.board.rawIMU])
+                            timestamp=self.env.ros_now, legacy=samples)
             return {MultiWii.SET_RAW_RC: 'Set Raw RC',
                     MultiWii.ATTITUDE: self.board.attitude,
                     MultiWii.RAW_IMU: self.board.rawIMU,
@@ -141,12 +145,12 @@ class FlightControllerLoopTest(unittest.TestCase):
     def test_height_does_not_disarm_but_heartbeat_timeouts_do(self):
         fc = self.controller()
         fc.battery_message.vbat = 16.0
-        fc.range = 2.0
         fc.heartbeat_web_interface = fc.heartbeat_pid_controller = 10.0
         fc.heartbeat_infrared = fc.heartbeat_state_estimator = 10.0
         with mock.patch.object(self.env.ros, 'Time', NS(now=lambda: 10.0)), \
                 mock.patch.object(self.env.ros, 'Duration', NS(from_sec=float), create=True), \
                 contextlib.redirect_stdout(io.StringIO()):
+            fc.heartbeat_infrared_callback(NS(range=2.0))
             self.assertFalse(fc.shouldIDisarm())
             for heartbeat in ('heartbeat_web_interface', 'heartbeat_pid_controller',
                               'heartbeat_infrared', 'heartbeat_state_estimator'):
@@ -286,6 +290,15 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertNotIn('internal error', output)
         self.assertIn('Sending DISARM command', output)
         self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
+
+    def test_missing_raw_counts_skips_legacy_telemetry_and_keeps_polling(self):
+        self.incomplete_legacy = True
+        output = self.run_loop()
+        self.assertNotIn('internal error', output)
+        self.assertTrue(self.env.ros.is_shutdown())
+        self.assertGreater(len(self.env.messages['/pidrone/imu']), 50)
+        self.assertEqual(len(self.env.messages['/pidrone/imu_msp']),
+                         len(self.env.messages['/pidrone/imu_integrated']) - 1)
 
     def test_turning_through_north_reports_the_turn_rate_not_a_spin(self):
         receive = self.board.receiveDataPacket

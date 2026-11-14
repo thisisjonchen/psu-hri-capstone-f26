@@ -7,7 +7,7 @@ through unchanged. ToF freshness remains part of controller readiness.
 """
 import math
 import threading
-from copy import deepcopy
+from copy import copy, deepcopy
 
 import numpy as np
 import rospy
@@ -19,9 +19,12 @@ from pidrone_pkg.msg import AnchorLayout, State
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, UInt32
 
-from localization.position import PositionCombiner
+from localization.position import valid_range
 from localization import monotonic
 from localization.rotations import quaternion_matrix
+
+ODOMETRY_TIMEOUT = .15
+MIN_VERTICAL = math.sqrt(.5)
 
 
 class FusionLocalizationNode(object):
@@ -32,21 +35,19 @@ class FusionLocalizationNode(object):
         self.ekf_ready, self.ekf_ready_at = False, None
         self.ekf_reference_lost = False
         self.ekf_published_stamp = None
+        self.state_stamp = None
         self.range_stamp = None
+        self.range_received = None
+        self.range_valid = False
         self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
-        self.skew = float(rospy.get_param('~max_sensor_skew', 0.15))
+        self.floor_z = float(rospy.get_param('~floor_z', 0.0))
         self.max_correction_speed = float(rospy.get_param('~max_correction_speed', 0.05))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
         if (self.frame == self.body_frame or not all((self.frame, self.body_frame))
-                or not all(np.isfinite(v) and v > 0 for v in
-                           (self.timeout, self.skew, self.max_correction_speed))):
+                or not np.isfinite(self.floor_z) or not all(np.isfinite(v) and v > 0 for v in
+                                                            (self.timeout, self.max_correction_speed))):
             raise ValueError('Invalid fusion frames, timeouts or correction speed')
-        self.height = PositionCombiner(
-            stale_after=self.timeout, max_skew=self.skew,
-            floor_z=float(rospy.get_param('~floor_z', 0.0)),
-            tof_offset_z=float(rospy.get_param('~tof_offset_z', 0.0)))
-        self.attitude_stamp = None
         self.limited = self.limited_stamp = None
         self.layout = None
         self.layout_stamp = None
@@ -89,7 +90,7 @@ class FusionLocalizationNode(object):
         with self.lock:
             now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
             if (self.ekf_reference_lost or msg.header.frame_id != self.frame
-                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, .15)):
+                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, ODOMETRY_TIMEOUT)):
                 return
             if self.ekf_odom is not None and stamp <= self.ekf_odom.header.stamp.to_sec():
                 return
@@ -100,18 +101,13 @@ class FusionLocalizationNode(object):
                          msg.pose.covariance, msg.twist.covariance))
                     or abs(np.linalg.norm(quaternion) - 1.) > .001):
                 return
-            # ToF tilt compensation uses FLU attitude; the ROS odometry body is RFU.
-            quaternion = tf.transformations.quaternion_multiply(
-                quaternion, tf.transformations.quaternion_from_euler(0, 0, math.pi / 2))
-            self.attitude_stamp = stamp
-            self.height.update_attitude(tuple(quaternion), stamp, monotonic())
             self.ekf_odom = msg
 
     def range_callback(self, msg):
         with self.lock:
             self.range_stamp = msg.header.stamp
-            self.height.update_range(msg.range, msg.min_range, msg.max_range,
-                                     msg.header.stamp.to_sec(), monotonic())
+            self.range_received = monotonic()
+            self.range_valid = valid_range(msg.range, msg.min_range, msg.max_range)
 
     def anchors_callback(self, msg):
         with self.lock:
@@ -151,22 +147,37 @@ class FusionLocalizationNode(object):
             if self.last_time is not None and now < self.last_time:
                 self.ekf_reference_lost = True
                 self.generation += 1
-                self.height.range = self.height.attitude = self.attitude_stamp = None
+                self.range_stamp = None
+                self.limited = self.limited_stamp = None
                 self.layout = self.layout_stamp = None
             self.last_time = now
-            height, height_reason = self.height.height(monotonic(), now)
-            attitude_ready = bool(self.fresh(self.attitude_stamp, now, .15) and not self.ekf_reference_lost)
-            local_ready = bool(attitude_ready and height is not None and self.ekf_ready
+            ready_at = monotonic()
+            odom_stamp = self.ekf_odom.header.stamp.to_sec() if self.ekf_odom is not None else None
+            range_stamp = self.range_stamp.to_sec() if self.range_stamp is not None else None
+            range_fresh = (self.fresh(range_stamp, now) and self.range_received is not None
+                           and 0 <= ready_at - self.range_received <= self.timeout)
+            odom_fresh = self.fresh(odom_stamp, now, ODOMETRY_TIMEOUT) and not self.ekf_reference_lost
+            # Preserve the controller's tilt limit without recomputing height from raw ToF.
+            if odom_fresh:
+                q = self.ekf_odom.pose.pose.orientation
+                quaternion = (q.x, q.y, q.z, q.w)
+                norm_sq = sum(v*v for v in quaternion)
+                tilt_ok = 1. - 2. * (q.x*q.x + q.y*q.y) / norm_sq >= MIN_VERTICAL
+            else:
+                tilt_ok = False
+            state_available = range_fresh and self.range_valid and odom_fresh and tilt_ok
+            local_ready = bool(state_available and self.ekf_ready
                                and self.fresh(self.ekf_ready_at, now, .15))
             ready = bool(local_ready and self.layout is not None and not self.layout_changed)
             reason = ('OK' if ready
                       else 'Clock changed; restart localization on the floor' if self.ekf_reference_lost
-                      else height_reason if height is None
-                      else 'EKF attitude unavailable' if not attitude_ready
+                      else 'ToF missing or stale' if not range_fresh
+                      else 'ToF invalid' if not self.range_valid
+                      else 'EKF odometry missing or stale' if not odom_fresh
+                      else 'Excessive tilt for altitude control' if not tilt_ok
                       else 'Waiting for EKF readiness' if not local_ready
                       else 'Anchor layout changed; restart localization on the floor' if self.layout_changed
                       else 'Four surveyed anchors required')
-            ready_at = monotonic()
             readiness = (local_ready, ready)
             # Send changes immediately and keep the dashboard's heartbeat fresh.
             if readiness != self.published_ready or ready_at - self.last_ready_at >= .1:
@@ -176,12 +187,9 @@ class FusionLocalizationNode(object):
             if self.generation != self.published_generation:
                 self.generation_pub.publish(UInt32(data=self.generation))
                 self.published_generation = self.generation
-            if not local_ready:
-                self.limited = None
-            if height and attitude_ready:
-                self.publish_estimates(local_ready, ready)
-            status_at = monotonic()
-            if self.last_status_at is not None and status_at - self.last_status_at < .5:
+            if state_available and odom_stamp != self.ekf_published_stamp:
+                self.publish_estimates(quaternion, local_ready, ready)
+            if self.last_status_at is not None and ready_at - self.last_status_at < .5:
                 return
             gap = (0. if self.limited is None or self.ekf_odom is None else
                    math.hypot(self.limited[0] - self.ekf_odom.pose.pose.position.x,
@@ -195,44 +203,45 @@ class FusionLocalizationNode(object):
                              KeyValue(key='height_source', value='EKF + ToF'),
                              KeyValue(key='frame_id', value=self.frame),
                              KeyValue(key='correction_gap_m', value='%.3f' % gap)]
+            for name, stamp in (('raw_range', range_stamp), ('ekf_odometry', odom_stamp),
+                                ('controller_state', self.state_stamp)):
+                status.values.append(KeyValue(key=name + '_age_s',
+                                              value='missing' if stamp is None else '%.3f' % (now - stamp)))
             diagnostics = DiagnosticArray()
             diagnostics.header.stamp = rospy.Time.from_sec(now)
             diagnostics.status = [status]
             self.status_pub.publish(diagnostics)
-            self.last_status_at = status_at
+            self.last_status_at = ready_at
 
-    def limit(self, odometry, quaternion):
+    def limit(self, odometry, body_to_map):
         """Follow EKF velocity; close the XY gap to the EKF at max_correction_speed."""
         stamp = odometry.header.stamp.to_sec()
         p, v = odometry.pose.pose.position, odometry.twist.twist.linear
-        target = np.array([p.x, p.y])
+        target = np.array([p.x, p.y], dtype=float)
         if self.limited is None:
             self.limited = target
         else:
-            dt = max(0., stamp - self.limited_stamp)
-            self.limited = self.limited + quaternion_matrix(quaternion)[:2].dot([v.x, v.y, v.z]) * dt
+            # Bound extrapolation when no estimate was published during a gap.
+            dt = min(ODOMETRY_TIMEOUT, stamp - self.limited_stamp)
+            self.limited += body_to_map[:2].dot([v.x, v.y, v.z]) * dt
             error = target - self.limited
             distance, step = np.linalg.norm(error), self.max_correction_speed * dt
             self.limited = target if distance <= step else self.limited + error * step / distance
         self.limited_stamp = stamp
         return self.limited, float(np.sum((self.limited - target) ** 2))
 
-    def publish_estimates(self, local_ready, ready):
+    def publish_estimates(self, quaternion, local_ready, ready):
         odometry = self.ekf_odom
         stamp = odometry.header.stamp.to_sec()
-        if stamp == self.ekf_published_stamp:
-            return
-        q = odometry.pose.pose.orientation
-        quaternion = (q.x, q.y, q.z, q.w)
+        body_to_map = quaternion_matrix(quaternion)
         pose = deepcopy(odometry.pose)
-        if local_ready:
-            (pose.pose.position.x, pose.pose.position.y), gap = self.limit(odometry, quaternion)
-            covariance = list(pose.covariance)
-            covariance[0] += gap
-            covariance[7] += gap
-            pose.covariance = covariance
+        (pose.pose.position.x, pose.pose.position.y), gap = self.limit(odometry, body_to_map)
+        covariance = list(pose.covariance)
+        covariance[0] += gap
+        covariance[7] += gap
+        pose.covariance = covariance
         state = State()
-        state.header = deepcopy(odometry.header)
+        state.header = copy(odometry.header)
         # Keep the existing altitude watchdog tied to a real ToF observation.
         state.header.stamp = min((odometry.header.stamp, self.range_stamp), key=lambda value: value.to_sec())
         state.pose_with_covariance = pose
@@ -240,7 +249,7 @@ class FusionLocalizationNode(object):
         yaw = tf.transformations.euler_from_quaternion(quaternion)[2]
         c, s = math.cos(yaw), math.sin(yaw)
         level = np.array([[c, s, 0.], [-s, c, 0.], [0., 0., 1.]])
-        rotation = level.dot(quaternion_matrix(quaternion))
+        rotation = level.dot(body_to_map)
         v = odometry.twist.twist.linear
         velocity = rotation.dot([v.x, v.y, v.z])
         state.twist_with_covariance.twist.linear.x = velocity[0]
@@ -253,20 +262,23 @@ class FusionLocalizationNode(object):
         state.twist_with_covariance.covariance = transform.dot(covariance).dot(transform.T).ravel().tolist()
         self.state_pub.publish(state)
         self.ekf_published_stamp = stamp
+        self.state_stamp = state.header.stamp.to_sec()
         if not local_ready:
             return
-        limited = deepcopy(odometry)
+        limited = copy(odometry)
         limited.pose = pose
         self.odom_pub.publish(limited)
         p = pose.pose.position
-        z = p.z + self.height.floor_z
+        z = p.z + self.floor_z
         self.broadcaster.sendTransform((p.x, p.y, z), quaternion, odometry.header.stamp,
                                        self.body_frame, self.frame)
         if ready:
             room = PoseWithCovarianceStamped()
-            room.header = deepcopy(odometry.header)
-            room.pose = deepcopy(pose)
-            room.pose.pose.position.z = z
+            room.header = odometry.header
+            room.pose = pose
+            if self.floor_z:
+                room.pose = deepcopy(pose)
+                room.pose.pose.position.z = z
             self.pose_pub.publish(room)
 
 

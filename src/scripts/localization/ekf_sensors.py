@@ -8,7 +8,7 @@ from __future__ import division
 import cv2
 import numpy as np
 
-from localization.camera_flow import undistort
+from localization.apriltag_geometry import undistort_pixels
 from localization.rotations import quaternion_matrix, skew
 from localization.ekf import _array
 from localization import ekf_native
@@ -111,9 +111,13 @@ class FloorCamera(object):
         self.min_height, self.max_floor_distance = min_height, max_floor_distance
         u, v = np.meshgrid(np.arange(self.columns)*16+8., np.arange(self.rows)*16+8.)
         self.centers = np.column_stack((u.ravel(), v.ravel()))
-        self.rays = undistort(self.centers, *self.camera)
+        self.rays = self._rays(self.centers)
         self.previous_image = None
         self.image_stamp = None
+
+    def _rays(self, pixels):
+        xy = undistort_pixels(pixels, *self.camera).reshape(-1, 2)
+        return np.column_stack((xy, np.ones(len(xy))))
 
     def image_pair(self, encoded, stamp):
         """Retain the actual images and timestamps used by each flow measurement."""
@@ -216,8 +220,8 @@ class FloorCamera(object):
     def _correct_flow(self, ekf, current_pixels, pixels, duration, stamp, angular_rate):
         if len(pixels) < 8:
             return ekf._reject('too_few_camera_matches')
-        rays = undistort(current_pixels, *self.camera)
-        previous_rays = undistort(pixels, *self.camera)
+        rays = self._rays(current_pixels)
+        previous_rays = self._rays(pixels)
         indices, predicted, observation = self.linearize(ekf.position, ekf.velocity, ekf.quaternion,
             ekf.gyro_bias, angular_rate, (rays+previous_rays)/2)
         if len(indices) < 8:
@@ -225,8 +229,8 @@ class FloorCamera(object):
         measured = (previous_rays[indices, :2]-rays[indices, :2])/duration
         pixels, previous_rays = pixels[indices], previous_rays[indices]
         jacobians = np.empty((len(indices), 2, 2))
-        jacobians[:, :, 0] = (undistort(pixels+[.01, 0], *self.camera)[:, :2]-previous_rays[:, :2])/.01
-        jacobians[:, :, 1] = (undistort(pixels+[0, .01], *self.camera)[:, :2]-previous_rays[:, :2])/.01
+        jacobians[:, :, 0] = (self._rays(pixels+[.01, 0])[:, :2]-previous_rays[:, :2])/.01
+        jacobians[:, :, 1] = (self._rays(pixels+[0, .01])[:, :2]-previous_rays[:, :2])/.01
         noises = (self.pixel_stddev/duration)**2*np.einsum('nik,njk->nij', jacobians, jacobians)
         residuals = measured-predicted
         centered = residuals-np.median(residuals, axis=0)

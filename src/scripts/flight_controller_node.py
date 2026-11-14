@@ -1,19 +1,14 @@
 #!/usr/bin/env python
 import traceback
-import sys
 import yaml
 import threading
 import errno
 
 import rospy
 import rospkg
-import signal
 import select
 import numpy as np
-
-print("tf import")
 import tf
-print("done tf import")
 
 
 import command_values as cmds
@@ -22,7 +17,6 @@ from sensor_msgs.msg import Imu
 from h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
-from geometry_msgs.msg import Quaternion
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
 from localization import monotonic
@@ -45,7 +39,7 @@ class FlightController(object):
     Subscribers:
     /pidrone/fly_commands
     /pidrone/desired/mode
-    /pidrone/heartbeat/range
+    /pidrone/range
     /pidrone/heartbeat/web_interface
     /pidrone/heartbeat/pid_controller
     /pidrone/state
@@ -53,9 +47,7 @@ class FlightController(object):
 
     def __init__(self):
         # Connect to the flight controller board
-        print("getboard")
         self.board = self.getBoard()
-        print("done")
         # stores the current and previous modes
         self.curr_mode = 'DISARMED'         #initialize as disarmed
         self.prev_mode = 'DISARMED'         #initialize as disarmed
@@ -96,17 +88,12 @@ class FlightController(object):
         self.battery_message = Battery()
         self.battery_message.vbat = None
         self.battery_message.amperage = None
-        # Adjust this based on how low the battery should discharge
-        self.minimum_voltage = 4.5
-
         # Accelerometer parameters
         ##########################
-        print("loading")
         rospack = rospkg.RosPack()
         path = rospack.get_path('pidrone_pkg')
         with open("%s/params/multiwii.yaml" % path) as f:
             means = yaml.load(f)
-        print("done")
         self.accRawToMss = 9.8 / means["az"]
         self.accZeroX = means["ax"] * self.accRawToMss
         self.accZeroY = means["ay"] * self.accRawToMss
@@ -281,36 +268,15 @@ class FlightController(object):
             self.last_command = command
         return command_sent, received
 
-    def update_imu_message(self, replies):
-        """Build the legacy IMU message from a fresh attitude/acceleration pair."""
-        if (not isinstance(replies, list) or len(replies) != 2
-                or any(not isinstance(reply, dict) for reply in replies)
-                or set(reply.get('cmd') for reply in replies) != set((MultiWii.ATTITUDE, MultiWii.RAW_IMU))):
-            rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
-            return False
-
-        attitude = next(reply for reply in replies if reply['cmd'] == MultiWii.ATTITUDE)
-        raw = next(reply for reply in replies if reply['cmd'] == MultiWii.RAW_IMU)
-
-        # calculate values to update imu_message:
+    def update_imu_message(self, attitude, raw):
+        """Build the legacy IMU message from a validated MSP reply."""
+        # Convert the FC's attitude to radians with counterclockwise yaw.
         roll = np.deg2rad(attitude['angx'])
         pitch = -np.deg2rad(attitude['angy'])
-        heading = np.deg2rad(attitude['heading'])
-        # Note that at pitch angles near 90 degrees, the roll angle reading can
-        # fluctuate a lot
-        # transform heading (similar to yaw) to standard math conventions, which
-        # means angles are in radians and positive rotation is CCW
-        heading = (-heading) % (2 * np.pi)
-        # When first powered up, heading should read near 0
-        # get the previous roll, pitch, heading values
+        heading = -np.deg2rad(attitude['heading']) % (2 * np.pi)
         previous_quaternion = self.imu_message.orientation
         quaternion_array = [previous_quaternion.x, previous_quaternion.y, previous_quaternion.z, previous_quaternion.w]
         previous_roll, previous_pitch, previous_heading = tf.transformations.euler_from_quaternion(quaternion_array)
-
-        # Although quaternion_from_euler takes a heading in range [0, 2pi),
-        # euler_from_quaternion returns a heading in range [0, pi] or [0, -pi).
-        # Thus need to convert the returned heading back into the range [0, 2pi).
-        previous_heading = previous_heading % (2 * np.pi)
 
         # transform euler angles into quaternion
         quaternion = tf.transformations.quaternion_from_euler(roll, pitch, heading)
@@ -326,18 +292,12 @@ class FlightController(object):
         lin_acc_y_drone_body = lin_acc_x
         lin_acc_z_drone_body = lin_acc_z
 
-        # Account for gravity's affect on linear acceleration values when roll
-        # and pitch are nonzero. When the drone is pitched at 90 degrees, for
-        # example, the z acceleration reads out as -9.8 m/s^2. This makes sense,
-        # as the IMU, when powered up / when the calibration script is called,
-        # zeros the body-frame z-axis acceleration to 0, but when it's pitched
-        # 90 degrees, the body-frame z-axis is perpendicular to the force of
-        # gravity, so, as if the drone were in free-fall (which was roughly
-        # confirmed experimentally), the IMU reads -9.8 m/s^2 along the z-axis.
+        # Remove gravity after applying the level calibration offsets.
         g = 9.8
-        lin_acc_x_drone_body = lin_acc_x_drone_body + g*np.sin(roll)*np.cos(pitch)
-        lin_acc_y_drone_body = lin_acc_y_drone_body + g*np.cos(roll)*(-np.sin(pitch))
-        lin_acc_z_drone_body = lin_acc_z_drone_body + g*(1 - np.cos(roll)*np.cos(pitch))
+        roll_cos, pitch_cos = np.cos(roll), np.cos(pitch)
+        lin_acc_x_drone_body += g*np.sin(roll)*pitch_cos
+        lin_acc_y_drone_body -= g*roll_cos*np.sin(pitch)
+        lin_acc_z_drone_body += g*(1 - roll_cos*pitch_cos)
 
         # calculate the angular velocities of roll, pitch, and yaw in rad/s
         time = rospy.Time.now()
@@ -367,7 +327,6 @@ class FlightController(object):
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
-        return True
 
     def msp_imu_sample(self, reply):
         """Build an IMU message from MSP counts and the packet receipt time."""
@@ -455,16 +414,6 @@ class FlightController(object):
         """ Set a number to zero if it is below a threshold value """
         return 0 if abs(n) < 0.0001 else n
 
-    def ctrl_c_handler(self, signal, frame):
-        """ Disarm the drone and quits the flight controller node """
-        print("\nCaught ctrl-c! About to Disarm!")
-        self.board.send_raw_command(8, MultiWii.SET_RAW_RC, cmds.disarm_cmd)
-        self.board.receiveDataPacket()
-        rospy.sleep(1)
-        self.modepub.publish('DISARMED')
-        print("Successfully Disarmed")
-        sys.exit()
-
     # Heartbeat Callbacks: These update the last time that data was received
     #                       from a node
     def heartbeat_web_interface_callback(self, msg):
@@ -478,22 +427,15 @@ class FlightController(object):
     def heartbeat_infrared_callback(self, msg):
         """Update ir sensor heartbeat"""
         self.heartbeat_infrared = rospy.Time.now()
-        self.range = msg.range
 
     def heartbeat_state_estimator_callback(self, msg):
         """Update state_estimator heartbeat"""
         self.heartbeat_state_estimator = rospy.Time.now()
 
     def shouldIDisarm(self):
-        """
-        Disarm the drone if the battery values are too low or if there is a
-        missing heartbeat
-        """
+        """Check the flight heartbeat watchdogs."""
         curr_time = rospy.Time.now()
         disarm = False
-        if self.battery_message.vbat != None and self.battery_message.vbat < self.minimum_voltage:
-            #print('\nSafety Failure: low battery\n')
-            disarm = False
         if curr_time - self.heartbeat_web_interface > rospy.Duration.from_sec(3):
             print('\nSafety Failure: web interface heartbeat\n')
             print('The web interface stopped responding. Check your browser')
@@ -519,17 +461,13 @@ def main():
     # ROS Setup
     ###########
     node_name = os.path.splitext(os.path.basename(__file__))[0]
-    print("init")
     rospy.init_node(node_name)
-    print("done")
     # create the FlightController object
     fc = FlightController()
     curr_time = rospy.Time.now()
     fc.heartbeat_infrared = curr_time
-    fc.range = None
     fc.heartbeat_web_interface= curr_time
     fc.heartbeat_pid_controller = curr_time
-    fc.heartbeat_flight_controller = curr_time
     fc.heartbeat_state_estimator = curr_time
 
     # Publishers
@@ -564,13 +502,9 @@ def main():
 
     published_mode, last_mode_at = None, None
     published_calibration = None
-    # signal.signal(signal.SIGINT, fc.ctrl_c_handler)
     try:
         calibration_pub.publish(Bool(data=False))
         while not rospy.is_shutdown():
-            # if the current mode is anything other than disarmed
-            # preform as safety check
-                # Break the loop if a safety check has failed
             if fc.curr_mode != 'DISARMED' and fc.shouldIDisarm():
                 print("mode", fc.curr_mode)
                 break
@@ -588,10 +522,19 @@ def main():
                 if not isinstance(reply, dict) or reply.get('cmd') != MultiWii.INTEGRATED_IMU:
                     rospy.logwarn_throttle(1, 'Missing integrated IMU reply; imu100001 firmware is required')
                     continue
-                if reply['publish_attitude'] and fc.update_imu_message(reply['legacy']):
+                # The decoder supplies attitude and raw counts in this order.
+                samples = reply.get('legacy')
+                if (not isinstance(samples, list) or len(samples) != 2
+                        or not all(isinstance(sample, dict) for sample in samples)
+                        or samples[0].get('cmd') != MultiWii.ATTITUDE
+                        or samples[1].get('cmd') != MultiWii.RAW_IMU):
+                    rospy.logwarn_throttle(1, 'Incomplete IMU response from flight controller; skipping sample')
+                    continue
+                attitude, raw = samples
+                if reply['publish_attitude']:
+                    fc.update_imu_message(attitude, raw)
                     imupub.publish(fc.imu_message)
                 if msp_imupub.get_num_connections() > 0:
-                    raw = next(sample for sample in reply['legacy'] if sample['cmd'] == MultiWii.RAW_IMU)
                     msp_message = fc.msp_imu_sample(raw)
                     if msp_message is not None:
                         msp_imupub.publish(msp_message)

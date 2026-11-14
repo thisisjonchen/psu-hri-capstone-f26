@@ -8,18 +8,17 @@ import signal
 import functools
 import math
 import threading
+import yaml
 import numpy as np
-import command_values as cmds
 from altitude_controller import AltitudeController
 from pid_class import PIDaxis
 from velocity_controller import VelocityController
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
-from pidrone_pkg.msg import Mode, RC, State, FlightReadiness
+from pidrone_pkg.msg import AnchorLayout, FlightReadiness, Mode, RC, State
 from std_msgs.msg import Empty, Bool, UInt32, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, automatic_coordination
-from localization.uwb_locator import monotonic
-from pidrone_pkg.msg import AnchorLayout
+from localization import monotonic
 from three_dim_vec import Position, Velocity, Error, RPY
 
 
@@ -48,19 +47,13 @@ class PIDController(object):
             settings['throttle_range'] = tuple(settings['throttle_range'])
         self.altitude = AltitudeController(**settings)
         self.measurement_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
-        rospy.loginfo('PID sources: controller=%s commands=%s', __file__, cmds.__file__)
 
         self.position_control = False
 
         self.current_position = Position()
         self.desired_position = Position(z=self.takeoff_height)
-
-        self.position_error = Error()
-
         self.current_velocity = Velocity()
         self.desired_velocity = Velocity()
-
-        self.velocity_error = Error()
 
         # Set the distance that a velocity command will move the drone (m)
         self.desired_velocity_travel_distance = 0.1
@@ -69,7 +62,7 @@ class PIDController(object):
         # Horizontal velocity -> lean angle (roll/pitch); settings from params/velocity.yaml
         self.velocity = VelocityController(**dict(rospy.get_param('/pidrone/velocity/controller', {})))
 
-        self.pid_error = Error()
+        self.pid_error = Error()  # Horizontal velocity error, m/s.
 
         self.lr_pid = PIDaxis(kp=20.0, ki=5.0, kd=10.0, midpoint=0, control_range=(-10.0, 10.0))
         self.fb_pid = PIDaxis(kp=20.0, ki=5.0, kd=10.0, midpoint=0, control_range=(-10.0, 10.0))
@@ -87,11 +80,6 @@ class PIDController(object):
         # Fall back to velocity control beyond this local-position error (m).
         self.safety_threshold = 1.5
 
-        self.lost = False
-
-        self.absolute_desired_position = False
-
-        self.use_fusion = bool(rospy.get_param('/pidrone/localization/use_fusion', True))
         self.local_estimate_ready = self.room_estimate_ready = False
         self.room_pose = self.room_target = self.room_anchors = None
         self.room_generation = None
@@ -243,13 +231,22 @@ class PIDController(object):
 
     def local_ready(self):
         # Fusion owns sensor validity. Only watchdog its published estimate here.
+        return self.local_estimate_ready and self.altitude_state_issue(rospy.get_time()) is None
+
+    def altitude_state_issue(self, now):
         stamp = self.current_state.header.stamp.to_sec()
-        return (not self.use_fusion or self.local_estimate_ready and stamp > 0
-                and 0 <= rospy.get_time() - stamp <= self.measurement_timeout)
+        if stamp <= 0:
+            return 'no state received'
+        age = now - stamp
+        if not 0 <= age <= self.measurement_timeout:
+            return 'state age %.3f s outside [0, %.3f] s' % (age, self.measurement_timeout)
+        if not np.isfinite(self.current_position.z):
+            return 'nonfinite height'
+        return None
 
     def room_ready(self, allow_prediction=True):
         timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.measurement_timeout
-        return (self.use_fusion and self.local_ready() and self.room_estimate_ready
+        return (self.local_ready() and self.room_estimate_ready
                 and self.room_pose is not None
                 and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= timeout)
 
@@ -329,20 +326,16 @@ class PIDController(object):
     def desired_pose_callback(self, msg):
         """ Update the desired pose """
         self.cancel_room_target()
-        desired_z = (msg.position.z if self.absolute_desired_position else
-                     self.desired_position.z + msg.position.z)
+        desired_z = self.desired_position.z + msg.position.z
         if not np.isfinite(desired_z) or desired_z < 0:
             rospy.logwarn('Ignoring invalid altitude target: %s', desired_z)
             return
         self.altitude.cancel_takeoff()
         self.altitude.cancel_landing()
-        if self.absolute_desired_position:
-            self.desired_position.x = msg.position.x
-            self.desired_position.y = msg.position.y
-        elif msg.position.x or msg.position.y or not self.position_control:
+        if msg.position.x or msg.position.y or not self.position_control:
             # A relative altitude-only command must not move an active X/Y hold
             # point to the drone's latest (possibly drifting) position.
-            offset = rotate((msg.position.x, msg.position.y), self.current_rpy.y) if self.use_fusion else (msg.position.x, msg.position.y)
+            offset = rotate((msg.position.x, msg.position.y), self.current_rpy.y)
             self.desired_position.x = self.current_position.x + offset[0]
             self.desired_position.y = self.current_position.y + offset[1]
         self.desired_position.z = desired_z
@@ -371,7 +364,6 @@ class PIDController(object):
         self.cancel_room_target()
         self.desired_velocity.x = msg.linear.x
         self.desired_velocity.y = msg.linear.y
-        self.desired_velocity.z = msg.linear.z
         self.desired_yaw_velocity = msg.angular.z
         now = rospy.get_time()
         speed = self.desired_velocity.planar_magnitude()
@@ -423,20 +415,12 @@ class PIDController(object):
 
     @synchronized
     def reset_callback(self, empty):
-        """ Reset the desired and current poses of the drone and set
-        desired velocities to zero """
+        """Reset the XY target to the current position and stop XY motion."""
         self.cancel_room_target()
         self.altitude.cancel_landing()
-        if not self.use_fusion:
-            self.current_position = Position(z=self.current_position.z)
         self.desired_position = Position(self.current_position.x, self.current_position.y, self.desired_position.z)
         self.desired_velocity.x = 0
         self.desired_velocity.y = 0
-
-    @synchronized
-    def lost_callback(self, msg):
-        if not self.use_fusion:
-            self.lost = msg.data
 
     @synchronized
     def step(self):
@@ -449,7 +433,7 @@ class PIDController(object):
         # calc_error already applies the spacing filter to the velocity request.
         # Keep adapting to that request so spacing corrections can unwind old trim.
         now = rospy.get_time()
-        command = self.velocity.step((self.pid_error.x / 100., self.pid_error.y / 100.), now, xy_ready)
+        command = self.velocity.step((self.pid_error.x, self.pid_error.y), now, xy_ready)
         command.append(1500 + self.desired_yaw_velocity)
         tilt_cos = np.cos(self.current_rpy.r) * np.cos(self.current_rpy.p)
         command.append(self.altitude.step(self.desired_position.z, self.current_position.z,
@@ -487,61 +471,47 @@ class PIDController(object):
 
     @synchronized
     def calc_error(self):
-        """ Calculate the error in velocity, and if in position hold, add the
-        error from lr_pid and fb_pid to the velocity error to control the
-        position of the drone
-        """
+        """Apply horizontal position and spacing corrections to the velocity error."""
         now = rospy.get_time()
         pose_dt = max(0.0, now - self.last_pose_time) if self.last_pose_time is not None else 0.0
         self.last_pose_time = now
         xy_ready = self.local_ready()
-        if not xy_ready:
-            # Hold the learned trim (the lean that cancels a constant push) rather than
-            # flying level: the push is still there while the estimate is unavailable,
-            # e.g. below the optical-flow height while landing. Learning pauses meanwhile;
-            # arming or a new flight clears it.
-            self.desired_velocity.x = self.desired_velocity.y = 0
-        if self.room_target is not None and not self.room_ready():
-            # Pause correction without replacing the target or switching modes.
+        if not xy_ready or (self.room_target is not None and not self.room_ready()):
+            # Pause motion during a gap while preserving the hold target and learned trim.
             self.desired_velocity.x = self.desired_velocity.y = 0
         elif self.room_target is not None:
             p, q = self.room_pose.pose.pose.position, self.room_pose.pose.pose.orientation
-            angle = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
-            command = target_velocity(self.room_target, (p.x, p.y), angle,
-                                      self.room_target_gain, self.room_speed_limit)
-            self.desired_velocity.x, self.desired_velocity.y = command
-        self.velocity_error = self.desired_velocity - self.current_velocity
-        self.pid_error.x = self.velocity_error.x
-        self.pid_error.y = self.velocity_error.y
-        self.pid_error.z = 0
-        # multiply by 100 to account for the fact that code was originally written using cm
-        self.pid_error = self.pid_error * 100
-        if not xy_ready:
+            yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+            self.desired_velocity.x, self.desired_velocity.y = target_velocity(
+                self.room_target, (p.x, p.y), yaw, self.room_target_gain, self.room_speed_limit)
+
+        if xy_ready:
+            self.pid_error.x = self.desired_velocity.x - self.current_velocity.x
+            self.pid_error.y = self.desired_velocity.y - self.current_velocity.y
+        else:
             self.pid_error.x = self.pid_error.y = 0
-        if self.position_control and self.room_target is None and xy_ready:
-            self.position_error = self.desired_position - self.current_position
-            if self.use_fusion:
-                error = rotate((self.position_error.x, self.position_error.y), -self.current_rpy.y)
-                self.position_error.x, self.position_error.y = error
-            if self.position_error.planar_magnitude() >= self.safety_threshold or self.lost:
+        if xy_ready and self.position_control and self.room_target is None:
+            dx = self.desired_position.x - self.current_position.x
+            dy = self.desired_position.y - self.current_position.y
+            if math.hypot(dx, dy) >= self.safety_threshold:
                 self.position_control = False
                 self.position_control_pub.publish(False)
             else:
-                # Position correction supplements, rather than removes, velocity damping.
-                self.pid_error.x += self.lr_pid.step(self.position_error.x, pose_dt)
-                self.pid_error.y += self.fb_pid.step(self.position_error.y, pose_dt)
+                # The position PIDs return cm/s; the velocity controller uses m/s.
+                right, forward = rotate((dx, dy), -self.current_rpy.y)
+                self.pid_error.x += self.lr_pid.step(right, pose_dt) / 100.
+                self.pid_error.y += self.fb_pid.step(forward, pose_dt) / 100.
         if not self.coordination_enabled:
             self.coordination_status = 'disabled'
         elif self.coordination_config is not None and self.coordination_active and self.current_mode == 'FLYING':
             # Include both room-target commands and local-position PID corrections.
             # Do not overwrite the route's requested velocity or its stored target.
-            requested = (self.current_velocity.x + self.pid_error.x / 100.,
-                         self.current_velocity.y + self.pid_error.y / 100.)
+            requested = (self.current_velocity.x + self.pid_error.x,
+                         self.current_velocity.y + self.pid_error.y)
             command, self.coordination_status = self.coordinated_velocity(requested)
             for axis, value in zip(('x', 'y'), command):
                 measured = getattr(self.current_velocity, axis)
-                setattr(self.pid_error, axis, 100 * (value - measured)
-                        if xy_ready and np.isfinite(measured) else 0)
+                setattr(self.pid_error, axis, value - measured if xy_ready and np.isfinite(measured) else 0)
         elif self.coordination_config is not None:
             self.coordination_status = 'inactive' if self.coordination_active else 'solo'
         report = self.flight_readiness() if self.preflight_pub is not None else None
@@ -559,11 +529,9 @@ class PIDController(object):
 
     def reset(self):
         """Reset targets, command deadlines and PID state for a flight mode change."""
-        self.position_error = Error(0,0,0)
         height = self.takeoff_height if self.requested_takeoff_height is None else self.requested_takeoff_height
         self.desired_position = Position(self.current_position.x, self.current_position.y, height)
         rospy.loginfo("PID reset target=%s m source=%s", self.desired_position.z, __file__)
-        self.velocity_error = Error(0,0,0)
         self.desired_velocity = Velocity(0,0,0)
         self.desired_yaw_velocity = 0
         self.velocity_deadline = self.yaw_deadline = None
@@ -592,10 +560,8 @@ def main(ControllerClass):
     node_name = os.path.splitext(os.path.basename(__file__))[0]
     rospy.init_node(node_name)
 
-    # Load defaults when no coordination settings were supplied.
+    params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
     if not rospy.has_param('/pidrone/coordination'):
-        import yaml
-        params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
         try:
             with open(os.path.join(params_dir, 'payload_geometry.yaml')) as stream:
                 geometry = yaml.safe_load(stream)
@@ -608,14 +574,10 @@ def main(ControllerClass):
             config = {}
         rospy.set_param('/pidrone/coordination', config)
     if not rospy.has_param('/pidrone/altitude/controller'):
-        import yaml
-        params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
         with open(os.path.join(params_dir, 'altitude.yaml')) as stream:
             settings = yaml.safe_load(stream)
         rospy.set_param('/pidrone/altitude/controller', settings)
     if not rospy.has_param('/pidrone/velocity/controller'):
-        import yaml
-        params_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'params')
         with open(os.path.join(params_dir, 'velocity.yaml')) as stream:
             rospy.set_param('/pidrone/velocity/controller', yaml.safe_load(stream))
 
@@ -635,50 +597,42 @@ def main(ControllerClass):
     rospy.Subscriber('/pidrone/desired/mode', Mode, pid_controller.desired_mode_callback)
     rospy.Subscriber('/pidrone/position_control', Bool, pid_controller.position_control_callback)
     rospy.Subscriber('/pidrone/reset_transform', Empty, pid_controller.reset_callback)
-    rospy.Subscriber('/pidrone/picamera/lost', Bool, pid_controller.lost_callback)
-    if pid_controller.use_fusion:
-        from pidrone_pkg.msg import PeerState
-        from std_msgs.msg import String
-        pid_controller.coordination_status_pub = rospy.Publisher('/pidrone/coordination/status', String, queue_size=1)
-        pid_controller.preflight_pub = rospy.Publisher('/pidrone/coordination/preflight', FlightReadiness, queue_size=1)
-        rospy.Subscriber('/pidrone/coordination/enabled', Bool, pid_controller.coordination_enabled_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/coordination/paired', Bool, pid_controller.coordination_selection_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/coordination/peer', PeerState, pid_controller.peer_state_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/coordination/peer_preview', PeerState, pid_controller.peer_preview_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/localization/local_ready', Bool, pid_controller.local_ready_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/localization/ready', Bool, pid_controller.room_ready_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped, pid_controller.room_pose_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/localization/anchors', AnchorLayout, pid_controller.room_anchors_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/localization/generation', UInt32, pid_controller.room_generation_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/desired/room_target', PoseStamped, pid_controller.room_target_callback, queue_size=1)
-        rospy.Subscriber('/pidrone/desired/cancel_room_target', Empty, pid_controller.cancel_room_target, queue_size=1)
+    from pidrone_pkg.msg import PeerState
+    from std_msgs.msg import String
+    pid_controller.coordination_status_pub = rospy.Publisher('/pidrone/coordination/status', String, queue_size=1)
+    pid_controller.preflight_pub = rospy.Publisher('/pidrone/coordination/preflight', FlightReadiness, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/enabled', Bool, pid_controller.coordination_enabled_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/paired', Bool, pid_controller.coordination_selection_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/peer', PeerState, pid_controller.peer_state_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/coordination/peer_preview', PeerState, pid_controller.peer_preview_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/localization/local_ready', Bool, pid_controller.local_ready_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/localization/ready', Bool, pid_controller.room_ready_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/localization/fused', PoseWithCovarianceStamped, pid_controller.room_pose_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/localization/anchors', AnchorLayout, pid_controller.room_anchors_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/localization/generation', UInt32, pid_controller.room_generation_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/desired/room_target', PoseStamped, pid_controller.room_target_callback, queue_size=1)
+    rospy.Subscriber('/pidrone/desired/cancel_room_target', Empty, pid_controller.cancel_room_target, queue_size=1)
 
     signal.signal(signal.SIGINT, pid_controller.ctrl_c_handler)
     loop_rate = rospy.Rate(60)
     print('PID Controller Started')
     while not rospy.is_shutdown():
-
-
-        stamp = pid_controller.current_state.header.stamp.to_sec()
-        age = rospy.get_time() - stamp
-        if not (np.isfinite(pid_controller.current_position.z) and stamp > 0
-                and 0 <= age <= pid_controller.measurement_timeout):
-            # Do not feed missing/stale measurements into PID or report a healthy
-            # controller heartbeat. The FC's existing timeout remains responsible.
-            rospy.logwarn_throttle(1, 'Waiting for valid, fresh altitude')
-            loop_rate.sleep()
-            continue
-        # Keep a mode change from publishing a command computed before its reset.
+        # Validate and use the same state under the callback lock.
         with pid_controller.lock:
-            pid_controller.heartbeat_pub.publish(Empty())
-            fly_command = pid_controller.step()
-            if pid_controller.current_mode == 'FLYING' and pid_controller.desired_mode == 'FLYING':
-                pid_controller.publish_cmd(fly_command)
-                # Once per second in flight, for throttle statistics after each run.
-                rospy.loginfo_throttle(1, 'Altitude target=%s estimated=%.3f m climb=%.3f m/s throttle=%.1f' % (
-                    pid_controller.altitude.target, pid_controller.current_position.z,
-                    pid_controller.current_velocity.z, fly_command[3]))
-
+            issue = pid_controller.altitude_state_issue(rospy.get_time())
+            if issue is None:
+                pid_controller.heartbeat_pub.publish(Empty())
+                fly_command = pid_controller.step()
+                if pid_controller.current_mode == 'FLYING' and pid_controller.desired_mode == 'FLYING':
+                    pid_controller.publish_cmd(fly_command)
+                    # Once per second in flight, for throttle statistics after each run.
+                    rospy.loginfo_throttle(1, 'Altitude target=%s estimated=%.3f m climb=%.3f m/s throttle=%.1f' % (
+                        pid_controller.altitude.target, pid_controller.current_position.z,
+                        pid_controller.current_velocity.z, fly_command[3]))
+        if issue is not None:
+            # The FC's existing watchdog handles the missing PID heartbeat.
+            rospy.logwarn_throttle(1, 'Altitude unavailable on /pidrone/state: %s. '
+                                   'See /pidrone/localization/fusion_status and /pidrone/ekf/status' % issue)
         loop_rate.sleep()
 
 
