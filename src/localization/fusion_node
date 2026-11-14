@@ -276,7 +276,7 @@ class FusionLocalizationNode(object):
 
 
 def main():
-    rospy.init_node('fusion_localization')
+    rospy.init_node('fusion')
     node = FusionLocalizationNode()
     while not rospy.is_shutdown():
         # Samples publish in their callback; keep checking freshness through gaps.

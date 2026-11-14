@@ -5,9 +5,9 @@
 pidrone_node_check() {
     local name nodes attempt pending=() missing=()
     local -A windows=([/flight_controller_node]='1 FC' [/pid_controller]='2 PID'
-        [/fusion_localization]='3 SE' [/ekf_localization]='3 SE' [/raspicam_node]='4 Vision' [/vl53l1x]='5 TOF'
+        [/fusion]='3 SE' [/ekf_localization]='3 SE' [/cam]='4 Vision' [/vl53l1x]='5 TOF'
         [/rosbridge_websocket]='6 rosbridge' [/web_video_server]='7 web_vid_serv'
-        [/apriltag_detection]='8 AprilTags' [/uwb_localization]='9 UWB'
+        [/apriltag_detection]='8 AprilTags' [/uwb]='9 UWB'
         [/apriltag_mapping]='12 TagMap')
     python "$package_dir/boot/wait_for_ros_master.py" || return
     echo 'Checking onboard nodes (up to 60 s)...'
@@ -59,8 +59,8 @@ pidrone_screen_node() {
         fc) command=(python -u flight/flight_controller_node.py) ;;
         shell) return 0 ;;
         pid) command=(python -u flight/pid_controller.py) ;;
-        se) launch=fusion_localization ;;
-        vision) launch=raspicam_node ;;
+        se) launch=fusion ;;
+        vision) launch=cam ;;
         tof)
             if [[ ! -r "$HOME/catkin_ws/install/setup.bash" ]]; then
                 echo 'TOF startup failed: missing ~/catkin_ws/install/setup.bash' >&2
@@ -75,7 +75,7 @@ pidrone_screen_node() {
         tags) launch=apriltag_detection ;;
         tagmap) launch=apriltag_mapping ;;
         uwb)
-            launch=uwb_localization
+            launch=uwb
             if [[ -n "${PALS_UWB_PORT:-}" ]]; then
                 launch_args+=("port:=$PALS_UWB_PORT")
             fi

@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'src' / 'perception' / 'apriltag_detection_drone'
+SCRIPT = Path(__file__).resolve().parents[1] / 'src' / 'perception' / 'apriltag_detector'
 
 
 class TagDetection:

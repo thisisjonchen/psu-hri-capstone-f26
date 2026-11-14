@@ -124,7 +124,8 @@ class Replay:
             if signature != self.camera_signature:
                 parameters = metadata.get('parameters', {})
                 settings = parameters.get('/optical_flow_node', {})
-                frame_rate = parameters.get('/raspicam_node', {}).get('framerate', settings.get('framerate'))
+                camera_params = parameters.get('/cam') or parameters.get('/raspicam_node', {})
+                frame_rate = camera_params.get('framerate', settings.get('framerate'))
                 # Camera offsets here are measured from the IMU.
                 self.camera = FloorCamera(message.K, message.D, message.distortion_model,
                     (message.width, message.height), self.camera_rotation, self.camera_offset,

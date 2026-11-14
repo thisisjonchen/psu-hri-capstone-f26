@@ -166,7 +166,7 @@ class UWBLocalizationNode(object):
 
 
 def main():
-    rospy.init_node('uwb_localization')
+    rospy.init_node('uwb')
     node = UWBLocalizationNode()
     try:
         node.run()

@@ -73,7 +73,7 @@ class NodeTest(unittest.TestCase):
         self.messages = {}
         self.ros = ModuleType('rospy')
         self.ros.get_param = lambda name, default: self.params.get(name, default)
-        self.ros.get_name = lambda: '/uwb_localization'
+        self.ros.get_name = lambda: '/uwb'
         self.ros.Time = SimpleNamespace(now=lambda: Stamp(self.ros_now), from_sec=Stamp)
         self.ros.Subscriber = mock.Mock()
         self.ros.on_shutdown = mock.Mock()
@@ -98,7 +98,7 @@ class NodeTest(unittest.TestCase):
         patched = mock.patch.dict(sys.modules, modules)
         patched.start()
         self.addCleanup(patched.stop)
-        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'uwb_localization_node')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'uwb_node')
         node_globals = runpy.run_path(script)
         self.node_class = node_globals['UWBLocalizationNode']
         # Class methods retain the run_path globals dictionary.

@@ -599,7 +599,7 @@ source "$1" restart
                 modules = {
                     'time': SimpleNamespace(sleep=sleep, monotonic=lambda: now[0]),
                     'rospy': SimpleNamespace(init_node=lambda *a, **kw: None,
-                        get_param=lambda key, default: {'/fusion_localization/sensor_timeout': 0.2}.get(key, default),
+                        get_param=lambda key, default: {'/fusion/sensor_timeout': 0.2}.get(key, default),
                         get_time=lambda: now[0], is_shutdown=lambda: False,
                         Subscriber=lambda topic, cls, callback: subscribers.update({topic: callback})),
                     'diagnostic_msgs.msg': SimpleNamespace(DiagnosticArray=object),

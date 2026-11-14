@@ -60,10 +60,11 @@ start_screen_node() {
 
 align_heading() {
     docker exec "$container" screen -S "$session" -p SE -X stuff '^C' || return 1
-    # [e] keeps pgrep -f from matching this script's own bash command line.
+    # Bracketed letters prevent pgrep -f from matching its own shell command.
     docker exec "$container" bash -ic '
-        for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
-        if pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null; then
+        pattern="fusion(_localization)?_nod[e]|ekf_localization_nod[e]|roslaunch .*fusion(_localization)?[.]launc[h]"
+        for _ in $(seq 40); do pgrep -f "$pattern" >/dev/null || break; sleep 0.5; done
+        if pgrep -f "$pattern" >/dev/null; then
             echo "Localization did not stop; check the SE window."
             exit 1
         fi' 2>/dev/null || return 1

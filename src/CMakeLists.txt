@@ -43,10 +43,10 @@ include_directories(${catkin_INCLUDE_DIRS})
 add_subdirectory(native)
 
 catkin_install_python(PROGRAMS
-  perception/apriltag_detection_drone
+  perception/apriltag_detector
   perception/apriltag_mapping_node
-  localization/uwb_localization_node
-  localization/fusion_localization_node
+  localization/uwb_node
+  localization/fusion_node
   boot/rosbridge_websocket.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

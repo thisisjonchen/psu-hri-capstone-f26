@@ -423,7 +423,7 @@ def stop_all_nodes(port):
                 screen -S pidrone -p "$window" -X stuff '^C' >/dev/null 2>&1 || :
             done
             for _ in $(seq 40); do
-                pgrep -f '[r]oslaunch .*\.launch|[f]light_controller_node.py|[p]id_controller.py|[f]usion_localization_node|[e]kf_localization_node|[r]aspicam_node|[v]l53l1x_node|[t]of_node.py|[u]wb_localization_node|[w]eb_video_server|[a]priltag|(^|[ /])[r]outines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)' >/dev/null
+                pgrep -f '[r]oslaunch .*\.launch|[f]light_controller_node.py|[p]id_controller.py|[f]usion(_localization)?_node|[e]kf_localization_node|[r]aspicam_node|[v]l53l1x_node|[t]of_node.py|[u]wb(_localization)?_node|[w]eb_video_server|[a]priltag|(^|[ /])[r]outines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)' >/dev/null
                 status=$?
                 [[ $status == 1 ]] && exit 0
                 [[ $status == 0 ]] || exit 1
@@ -458,7 +458,7 @@ def warm_reboot(restart=False):
         require(environment.is_file(), 'Missing resolved serial-port configuration.')
         stop_fc()
         localization = ['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
-                        '(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]']
+                        'fusion(_localization)?_nod[e]|ekf_localization_nod[e]|roslaunch .*fusion(_localization)?[.]launc[h]']
         running = run(localization)
         require(running.returncode in (0, 1), 'Could not check localization: ' + running.stdout)
         if running.returncode == 0:

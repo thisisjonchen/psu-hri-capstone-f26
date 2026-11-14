@@ -75,7 +75,7 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
         sys.modules['geometry_msgs.msg'].Pose = sys.modules['geometry_msgs.msg'].Twist = NS
         sys.modules['geometry_msgs.msg'].Point = sys.modules['geometry_msgs.msg'].Vector3 = vector
-        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'fusion_localization_node')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'fusion_node')
         self.ros.Subscriber.reset_mock()
         self.node = runpy.run_path(script)['FusionLocalizationNode']()
         self.node.step.__globals__['monotonic'] = lambda: self.now

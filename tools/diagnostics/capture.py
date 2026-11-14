@@ -108,7 +108,7 @@ def stream_ros(seconds, images=True):
     metadata = dict(started_ns=rospy.Time.now().to_nsec(),
                     multiwii_yaml=calibration_yaml,
                     parameters=dict((name, rospy.get_param(name, {})) for name in
-                                    ('/ekf_localization', '/fusion_localization', '/raspicam_node',
+                                    ('/ekf_localization', '/fusion', '/cam',
                                      '/pidrone/altitude')),
                     integrated_imu=True,
                     imu_stamp='FC interval clock anchored to host request time; raw MSP stamps are packet receipt',

@@ -5,9 +5,9 @@
   <arg name="body_frame" default="pidrone_body"/>
   <arg name="ekf_calibration" default="$(find pidrone_pkg)/params/ekf.yaml"/>
   <group ns="$(arg namespace)">
-    <node pkg="pidrone_pkg" type="fusion_localization_node" name="fusion_localization" output="screen"
+    <node pkg="pidrone_pkg" type="fusion_node" name="fusion" output="screen"
           required="true">
-      <rosparam command="load" file="$(find pidrone_pkg)/params/fusion_localization.yaml"/>
+      <rosparam command="load" file="$(find pidrone_pkg)/params/fusion.yaml"/>
       <param name="frame_id" value="$(arg frame_id)"/>
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="body_frame" value="$(arg body_frame)"/>

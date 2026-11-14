@@ -622,10 +622,10 @@ class RoutineControlTest(unittest.TestCase):
 
     def test_ready_uses_current_ground_height_and_rejects_legacy_publisher(self):
         self.drone.mode = 'DISARMED'
-        self.nodes.get_node_names.return_value = ['/state_estimator', '/fusion_localization']
+        self.nodes.get_node_names.return_value = ['/state_estimator', '/fusion']
         with self.assertRaisesRegex(RuntimeError, 'legacy /state_estimator'):
             self.drone.ready()
-        self.nodes.get_node_names.return_value = ['/fusion_localization']
+        self.nodes.get_node_names.return_value = ['/fusion']
         drone = self.drone
         for publisher in (drone.mode_pub, drone.twist_pub, drone.pose_pub, drone.landing_pub, drone.takeoff_pub,
                           drone.position_mode_pub, drone.heartbeat_pub):

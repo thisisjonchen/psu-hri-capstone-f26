@@ -16,7 +16,7 @@ from localization.position import valid_range
 
 def main():
     rospy.init_node('restart_readiness', anonymous=True)
-    range_timeout = float(rospy.get_param('/fusion_localization/sensor_timeout', 0.5))
+    range_timeout = float(rospy.get_param('/fusion/sensor_timeout', 0.5))
     ready = [False]
     reason = ['No localization diagnostics received; check the SE window']
     range_stamp = [None]
