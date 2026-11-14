@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PALS: Paired Aerial Lift System</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="images/partner-favicon.png">
   <link rel="stylesheet" href="css/bootstrap.css">
   <link rel="stylesheet" href="css/xterm.css">
   <link rel="stylesheet" href="css/main.css?v=20261109-position-uniform-units">
@@ -67,8 +68,8 @@
           <p class="detection-status"><strong id="drone2-detection" data-state="offline" role="status" aria-live="polite">No tag data</strong></p>
         </div></div></article>
       </div>
-      <section class="control-map" aria-label="Shared XY map">
-        <div class="panel-header"><div class="section-title"><h3>XY map</h3><details class="section-help"><summary aria-label="Map help">?</summary><div class="help-content" id="target-help"><p>Select a drone, then click or drag a destination. Focus the map and use arrow keys to adjust it; Send target confirms.</p><p>Scan for anchors, assign them to the room corners, then measure and save the layout.</p></div></details></div><div class="map-actions">
+      <section class="control-map" aria-label="Shared map">
+        <div class="panel-header"><div class="section-title"><h3>Map</h3><details class="section-help"><summary aria-label="Map help">?</summary><div class="help-content" id="target-help"><p>Select a drone, then click or drag a destination. Focus the map and use arrow keys to adjust it; Send target confirms.</p><p>Scan for anchors, assign them to the room corners, then measure and save the layout.</p></div></details></div><div class="map-actions">
           <button class="btn btn-outline-secondary icon-button" id="room-fit" disabled aria-label="Fit room" title="Fit room"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></button>
           <button class="btn btn-outline-secondary" id="room-zoom-in" aria-label="Zoom in on room" disabled>+</button>
           <button class="btn btn-outline-secondary" id="room-zoom-out" aria-label="Zoom out of room" disabled>−</button>
@@ -112,8 +113,8 @@
             <strong>Layout saved</strong>
           </div>
           </div>
-          <canvas id="fleet-xyChart" aria-label="Both drones XY map" aria-describedby="target-help" aria-hidden="true" tabindex="0"></canvas>
-          <div class="map-placeholder" id="map-placeholder" role="img" aria-label="XY map unavailable">
+          <canvas id="fleet-xyChart" aria-label="Map of both drones" aria-describedby="target-help" aria-hidden="true" tabindex="0"></canvas>
+          <div class="map-placeholder" id="map-placeholder" role="img" aria-label="Map unavailable">
             <div class="map-placeholder-icon"><svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
               <path d="m5 12 10-4 10 4 10-4v23l-10 4-10-4-10 4V12Zm10-4v23m10-19v23"/>
               <path d="M26 15a6 6 0 0 0-12 0c0 5 6 11 6 11s6-6 6-11Z"/>
