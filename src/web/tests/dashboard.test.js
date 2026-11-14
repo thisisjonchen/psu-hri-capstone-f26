@@ -663,31 +663,27 @@ test('room targets require live fused localization and explicit send, stay isola
 
 test('fusion gaps and resets retain display markers without live control data and permit a new ROS clock epoch', () => {
   const app = dashboard(), a = app.connect('drone1');
-  const pose = secs => ({ header: { stamp: { secs, nsecs: 0 }, frame_id: 'map' },
-    pose: { pose: { position: { x: .5, y: 1, z: .4 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } } });
+  const pose = (secs, x = .5) => localizationAt(secs, x, 1, .4);
   app.receive(a, '/pidrone/localization/generation', { data: 0 });
   app.receive(a, '/pidrone/localization/fused', pose(100));
   app.receive(a, '/pidrone/localization/fusion_status', { status: [{ level: 1, message: 'UWB innovation rejected' }] });
   assert.equal(a.fusedPose, null);
-  assert.equal(a.series.fused0.length, 0);
   assert.deepEqual(['X', 'Y', 'Z'].map(axis => a.field('fused' + axis).textContent), ['0.50 m', '1.00 m', '0.40 m']);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').borderColor, '#0072b2');
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1').borderColor, '#0072b2');
+  assert.equal(sharedMarker(app, 'drone1').data.length, 2);
   assert.equal(app.elements.get('map-stream-status').textContent, '');
   app.receive(a, '/pidrone/localization/fused', pose(100));
   assert.equal(a.fusedPose, null);
   app.receive(a, '/pidrone/localization/generation', { data: 1 });
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1').data.length, 2);
   assert.equal(a.fusedPose, null);
   assert.equal(app.elements.get('target-send').disabled, true);
   app.receive(a, '/pidrone/localization/anchors', anchorsAt(50));
   assert.equal(app.fleetMap.layoutUsable, true);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
-  app.receive(a, '/pidrone/localization/fused', pose(50));
+  assert.equal(app.fleetMap.markerPosition('drone1').x, .5);
+  app.receive(a, '/pidrone/localization/fused', pose(50, .75));
   assert.equal(a.fusedStamp, 50);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, false);
+  assert.equal(app.fleetMap.markerPosition('drone1').x, .75);
 });
 
 test('two connections keep telemetry, clocks, and cameras isolated', () => {
@@ -1327,37 +1323,27 @@ test('vertical speed clears on stale, invalid, or interrupted range data and rec
   assert.equal(a.field('verticalSpeed').textContent, '—');
 });
 
-const poseAt = (x, y) => ({ position: { x, y, z: 0 }, orientation: { w: 1, x: 0, y: 0, z: 0 } });
-const sharedMarker = (app, droneId, key) => app.fleetMap.chart.data.datasets.find(dataset => dataset.droneId === droneId && dataset.key === key);
+const sharedMarker = (app, droneId) => app.fleetMap.chart.data.datasets.find(dataset => dataset.droneId === droneId && dataset.segment === 0);
 
 const localizationAt = (seconds, x, y, z) => ({
   header: { stamp: { secs: seconds, nsecs: 0 }, frame_id: 'map' },
   pose: { pose: { position: { x, y, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } }, covariance: Array(36).fill(0) }
 });
 
-test('shared map isolates pose streams and clears only the disconnected drone', () => {
-  const app = dashboard();
+test('shared map clears only the disconnected drone and accepts a fresh pose on reconnect', () => {
+  const app = dashboard(), map = app.fleetMap;
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.receive(a, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(-0.5, 0.2) });
-  app.receive(b, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(0.5, -0.2) });
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.5);
-  assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.5);
-  app.receive(a, '/pidrone/state/ground_truth', { header: { ...stamp(100).header, frame_id: 'map' }, pose: poseAt(-0.4, 0.3) });
-  assert.equal(sharedMarker(app, 'drone1', 'groundTruth2').data[0].x, -0.4);
-  app.receive(a, '/pidrone/picamera/pose', { pose: poseAt(NaN, 0) });
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.5);
-  const send = (drone, x) => app.receive(drone, '/pidrone/picamera/pose', { header: { frame_id: 'map' }, pose: poseAt(x, 0) });
-  send(a, -0.4);
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.4);
+  app.receive(a, '/pidrone/localization/fused', localizationAt(100, -0.5, 0.2, 0.4));
+  app.receive(b, '/pidrone/localization/fused', localizationAt(100, 0.5, -0.2, 0.4));
+  assert.equal(map.markerPosition('drone1').x, -0.5);
+  assert.equal(map.markerPosition('drone2').x, 0.5);
   a.disconnect();
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
-  assert.equal(sharedMarker(app, 'drone2', 'camera2').data[0].x, 0.5);
-  a.connect();
-  a.ros.open();
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
-  app.receive(a, '/pidrone/localization/anchors', anchorsAt(1));
-  send(a, -0.2);
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, -0.2);
+  assert.equal(map.markerPosition('drone1'), null);
+  assert.equal(map.markerPosition('drone2').x, 0.5);
+  app.connect('drone1');
+  assert.equal(map.markerPosition('drone1'), null);
+  app.receive(a, '/pidrone/localization/fused', localizationAt(1, 0.25, 0, 0.4));
+  assert.equal(map.markerPosition('drone1').x, 0.25);
 });
 
 const tags = (tag_ids, zones, camera_online = true) => ({ tag_ids, zones, camera_online });
@@ -1397,13 +1383,14 @@ test('room previews stay separate from telemetry, reject invalid targets and nev
   const target = id => map.chart.data.datasets.find(d => d.targetDrone === id).data;
   assert.equal(target('drone1')[0].x, 1);
   assert.deepEqual([a, b].map(drone => Object.values(drone.publishers).map(topic => topic.messages.length)), sent);
-  app.receive(a, '/pidrone/picamera/pose', { header: { frame_id: 'odom' }, pose: poseAt(1, 2) });
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
-  assert.match(app.elements.get('map-stream-status').textContent, /Hidden until aligned to map: Drone 1 Camera pose \(odom\)/);
-  app.receive(a, '/pidrone/picamera/pose', { header: { frame_id: '/map' }, pose: poseAt(1, 2) });
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data[0].x, 1);
-  app.receive(a, '/pidrone/picamera/pose', { pose: poseAt(1, 2) });
-  assert.equal(sharedMarker(app, 'drone1', 'camera2').data.length, 0);
+  const pose = localizationAt(100, 1, 2, 0.4);
+  app.receive(a, '/pidrone/localization/fused', { ...pose, header: { ...pose.header, frame_id: 'odom' } });
+  assert.equal(map.markerPosition('drone1'), null);
+  assert.match(app.elements.get('map-stream-status').textContent, /Hidden until aligned to map: Drone 1 fused position \(odom\)/);
+  const aligned = localizationAt(101, 1, 2, 0.4);
+  aligned.header.frame_id = '/map';
+  app.receive(a, '/pidrone/localization/fused', aligned);
+  assert.equal(map.markerPosition('drone1').x, 1);
   a.disconnect();
   assert.equal(app.elements.get('map-stream-status').textContent, '');
   assert.equal(target('drone1').length, 1);
@@ -1452,8 +1439,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.room, original);
   assert.equal(map.layoutUsable, false);
   assert.equal(app.elements.get('map-placeholder').hidden, true);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 2);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1').data.length, 2);
   assert.match(app.elements.get('room-status').textContent, /disagree/);
   assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   send(a, changed);
@@ -1461,7 +1447,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(map.room.xMax, 4);
   assert.equal(map.zoom, 1);
   assert.equal(Object.keys(map.targets).length, 0);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').data.length, 0);
+  assert.equal(sharedMarker(app, 'drone1').data.length, 0);
   app.receive(a, '/pidrone/localization/fused', localizationAt(101, 2, 3, 0.5));
   const agreed = map.room;
   app.advanceTime(1000);
@@ -1480,8 +1466,7 @@ test('anchor discovery waits for four, matches hardware IDs, and freezes on stal
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('map-frame').classList.contains('map-unavailable'), false);
   assert.equal(app.elements.get('fleet-xyChart').getAttribute('aria-hidden'), 'false');
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').data[0].x, 1.91);
-  assert.equal(sharedMarker(app, 'drone1', 'fused0').stale, true);
+  assert.equal(sharedMarker(app, 'drone1').data[0].x, 1.91);
   assert.equal(app.elements.get('target-send').disabled, true);
   assert.equal(app.elements.get('fleet-xyChart')['aria-disabled'], 'true');
   assert.equal(app.elements.get('room-fit').disabled, false);
@@ -1522,7 +1507,7 @@ test('verified calibration displays the room before a complete tag report and us
   app.receive(drone, '/pidrone/localization/anchors', {
     ...report, anchor_ids: report.anchor_ids.slice(0, 3), positions: report.positions.slice(0, 3) });
   app.receive(drone, '/pidrone/localization/fused', localizationAt(100, 1, 2, .4));
-  assert.equal(sharedMarker(app, 'drone2', 'fused0').data.length, 2);
+  assert.equal(sharedMarker(app, 'drone2').data.length, 2);
   map.sendTarget();
   assert.equal(drone.publishers.roomTarget.messages.length, 1);
   app.anchorCalibration.update(state);
@@ -1531,7 +1516,6 @@ test('verified calibration displays the room before a complete tag report and us
   app.maintenanceTimers.forEach(callback => callback());
   assert.equal(app.elements.get('map-placeholder').hidden, true);
   assert.equal(app.elements.get('target-send').disabled, true);
-  assert.equal(sharedMarker(app, 'drone2', 'fused0').stale, true);
   const changed = anchorsAt(101, [[0, 0, 0], [4, 0, 0], [4, 6, 0], [0, 6, 0]]);
   app.receive(drone, '/pidrone/localization/anchors', changed);
   assert.equal(map.room.xMax, 3);
@@ -1542,7 +1526,7 @@ test('verified calibration displays the room before a complete tag report and us
   assert.equal(map.room.xMax, 4);
   assert.equal(map.layoutUsable, true);
   assert.equal(Object.keys(map.targets).length, 0);
-  assert.equal(sharedMarker(app, 'drone2', 'fused0').data.length, 0);
+  assert.equal(sharedMarker(app, 'drone2').data.length, 0);
 });
 
 test('ROS tag results stay isolated and include tag zero and multiple tags', () => {
@@ -1574,8 +1558,13 @@ test('ROS tag results stay isolated and include tag zero and multiple tags', () 
   app.receive(a, topic, { ...detected, ...stamp(103), corner_x: [NaN] });
   assert.equal(a.field('tagOverlay').visibility, 'hidden');
   app.receive(a, topic, { ...detected, ...stamp(104) });
+  app.receive(a, '/pidrone/battery', { vbat: 16.8 });
+  const batteryTitle = a.field('batteryStatus').title;
   a.field('camera').listeners.error();
   assert.equal(a.field('tagOverlay').visibility, 'hidden');
+  assert.equal(a.field('camera').src, 'nocamera.svg');
+  assert.equal(Number(a.field('batteryFill').getAttribute('width')), 13);
+  assert.equal(a.field('batteryStatus').title, batteryTitle);
   a.disconnect();
   assert.equal(a.field('tagOverlay').visibility, 'hidden');
 });
@@ -1771,7 +1760,7 @@ test('dragging a drone previews its own target and sends only after explicit con
   app.receive(b, '/pidrone/mode', { mode: 'FLYING' });
   app.receive(b, '/pidrone/localization/fused', pose);
   app.receive(b, '/pidrone/localization/ready', { data: true });
-  const telemetry = JSON.stringify(b.series.fused0);
+  const telemetry = JSON.stringify(map.markerPosition('drone2'));
   const canvas = app.elements.get('fleet-xyChart');
   canvas.listeners.pointerdown(mapPointer(map, 1, 2));
   assert.equal(map.selectedTarget, 'drone2', 'the marker determines the drone, not the connection selector');
@@ -1787,7 +1776,7 @@ test('dragging a drone previews its own target and sends only after explicit con
   assert.ok(Math.abs(map.targets.drone2.x - 2) < 1e-9);
   assert.ok(Math.abs(map.targets.drone2.y - 4) < 1e-9);
   assert.equal(b.publishers.roomTarget.messages.length, 0, 'dropping never publishes');
-  assert.equal(JSON.stringify(b.series.fused0), telemetry, 'telemetry stays at the measured position');
+  assert.equal(JSON.stringify(map.markerPosition('drone2')), telemetry, 'telemetry stays at the measured position');
   assert.equal(app.elements.get('target-send').disabled, false);
   app.elements.get('target-send').listeners.click();
   assert.equal(b.publishers.roomTarget.messages.length, 1);

@@ -53,20 +53,45 @@ class PansBLE:
 
     @asynccontextmanager
     async def connect(self, board, guard):
-        from bleak import BleakClient, BleakScanner
+        from bleak import BleakClient, BleakError, BleakScanner
+
         guard()
-        device = self.devices.get(board['ble'])
+        address = board['ble']
+        label = board.get('id', address)
+        device = self.devices.get(address)
         if device is None:
-            device = await BleakScanner.find_device_by_address(board['ble'], timeout=5)
+            device = await BleakScanner.find_device_by_address(address, timeout=5)
         if device is None:
-            raise ValueError('Anchor %s is not visible from the laptop; scan again' % board.get('id', board['ble']))
-        self.devices[board['ble']] = device
-        # Bleak otherwise applies its own 10-second connection deadline.
-        client = BleakClient(device, timeout=None)
-        try:
-            await client.connect()
+            raise ValueError('Anchor %s is not visible from the laptop; scan again' % label)
+        self.devices[address] = device
+        timeout = 30
+        for retrying in (False, True):
             guard()
-            yield client
+            phase = 'connecting'
+            try:
+                client = BleakClient(device, timeout=timeout)
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=timeout)
+                    guard()
+                    phase = 'reading board identity'
+                    actual = await asyncio.wait_for(self.inspect(client), timeout=timeout)
+                    guard()
+                except BaseException:
+                    await self.cleanup(client.disconnect)
+                    raise
+            except (BleakError, OSError, asyncio.TimeoutError) as error:
+                detail = str(error) or 'operation timed out'
+                if retrying:
+                    raise RuntimeError('Bluetooth anchor %s (%s): %s' % (label, phase, detail)) from error
+                guard()
+                logging.warning('Retrying Bluetooth anchor %s (%s): %s', label, phase, detail)
+                self.progress('Retrying Bluetooth anchor %s…' % label)
+                await asyncio.sleep(0.5)
+            else:
+                break
+        # Once the caller starts ranging or saving, writes may already have reached the board.
+        try:
+            yield client, actual
         finally:
             await self.cleanup(client.disconnect)
 
@@ -80,7 +105,7 @@ class PansBLE:
             raise
 
     async def _scan(self, guard):
-        from bleak import BleakScanner, BleakError
+        from bleak import BleakError, BleakScanner
         self.scan_warnings = []
         self.devices.clear()
         self.progress('Scanning…')
@@ -107,9 +132,9 @@ class PansBLE:
             self.progress('Checking %s · %d found…' %
                           (device.address, len(boards)))
             try:
-                async with self.connect(board, guard) as client:
-                    board.update(await self.inspect(client))
-            except (BleakError, TimeoutError, ValueError) as error:
+                async with self.connect(board, guard) as (_, actual):
+                    board.update(actual)
+            except (BleakError, RuntimeError, OSError, ValueError) as error:
                 guard()
                 self.scan_warnings.append('%s: %s' % (device.address, error))
                 continue
@@ -117,8 +142,7 @@ class PansBLE:
                 boards.append(board)
         return sorted(boards, key=lambda board: board['id'])
 
-    async def verify(self, client, board):
-        actual = await self.inspect(client)
+    def verify(self, actual, board):
         if any(actual[key] != board[key] for key in ('address', 'id', 'pan', 'initiator')):
             raise ValueError('Anchor identity, role or network changed; scan again')
         if not actual['anchor'] or not actual['active']:
@@ -136,8 +160,8 @@ class PansBLE:
         # Verify each board in the same connection used to read its ranges.
         # Measurement does not write coordinates; save retains its full preflight.
         self.progress('Connecting to %s (1/4)…' % initiator['id'])
-        async with self.connect(initiator, guard) as client:
-            await self.verify(client, initiator)
+        async with self.connect(initiator, guard) as (client, actual):
+            self.verify(actual, initiator)
             cluster = await client.read_gatt_char(CLUSTER)
             if len(cluster) != 5 or cluster[0] != 0:
                 raise ValueError('Selected initiator is not the network initiator (cluster seat must be 0)')
@@ -174,8 +198,8 @@ class PansBLE:
                 continue
             self.progress('Reading %s (%d/4)…' %
                           (board['id'], len(rows) + 1))
-            async with self.connect(board, guard) as client:
-                await self.verify(client, board)
+            async with self.connect(board, guard) as (client, actual):
+                self.verify(actual, board)
                 _, rows[board['id']] = decode_location(await self.read_location(client, b'\x01', guard))
         return rows
 
@@ -195,8 +219,8 @@ class PansBLE:
             clients = []
             for index, board in enumerate(positions, 1):
                 self.progress('Checking %s (%d/4)…' % (board['id'], index))
-                client = await connections.enter_async_context(self.connect(board, guard))
-                await self.verify(client, board)
+                client, actual = await connections.enter_async_context(self.connect(board, guard))
+                self.verify(actual, board)
                 clients.append(client)
             guard()
             # One durable checkpoint covers every write in this save.

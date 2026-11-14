@@ -69,6 +69,33 @@ class ExecuteTest(unittest.TestCase):
                     'drone1', drones.START + ' restart 2>&1', timeout=240))
 
 
+@unittest.skipUnless(shutil.which('sh'), 'requires a POSIX shell')
+class RoutineStatusTest(unittest.TestCase):
+    def test_status_batches_the_listing_and_both_checks(self):
+        for listed, nodes, running in ((True, True, False), (True, False, True),
+                                       (True, False, False), (False, False, False)):
+            with self.subTest(listed=listed, nodes=nodes, running=running):
+                def run(drone, command):
+                    listing = "printf '%s\\n' z.py README.md 'invalid a.py' a.py" if listed else 'return 2'
+                    stubs = (
+                        "printf '%%s\\n' 'SSH login banner'\n"
+                        'ls() { %s; }\n'
+                        "bash() { echo 'Node check output'; return %d; }\n"
+                        "docker() { echo '1234'; return %d; }\n" % (listing, not nodes, not running)
+                    )
+                    result = subprocess.run(['sh', '-c', stubs + command], capture_output=True, text=True, timeout=5)
+                    return result.returncode, result.stdout
+
+                with mock.patch.object(drones, 'run', side_effect=run) as ssh:
+                    if listed:
+                        self.assertEqual(drones.status('drone1'),
+                                         {'scripts': ['a.py', 'z.py'], 'nodes': nodes, 'running': running})
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'drone1 has no .*routines'):
+                            drones.status('drone1')
+                    ssh.assert_called_once()
+
+
 @unittest.skipUnless(shutil.which('git'), 'requires git')
 class BranchTest(unittest.TestCase):
     def setUp(self):

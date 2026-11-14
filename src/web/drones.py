@@ -18,6 +18,8 @@ SESSION = 'pidrone'
 PACKAGE = '~/catkin_ws/src/pidrone_pkg'
 ROUTINES = PACKAGE + '/routines'
 START = 'bash ' + PACKAGE + '/boot/pals-start.sh'
+LIST_ROUTINES = 'ls -1 ' + ROUTINES
+CHECK_ROUTINE = 'docker exec %s pgrep -f "(^|[ /])[r]outines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)"' % CONTAINER
 SCRIPT = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]*\.py$')
 # Arguments are typed into a screen window, so exclude quotes and screen/shell escapes.
 ARGS = re.compile(r'^[A-Za-z0-9 _.,:=+/@%-]*$')
@@ -218,23 +220,37 @@ def run(drone, command, timeout=10):
 
 
 def list_scripts(drone):
-    status, output = run(drone, 'ls -1 ' + ROUTINES)
+    status, output = run(drone, LIST_ROUTINES)
     if status:
         raise RuntimeError('%s has no %s' % (drone, ROUTINES))
-    return sorted(name for name in output.split() if SCRIPT.match(name))
+    return script_names(output)
+
+
+def script_names(output):
+    return sorted(name for name in output.splitlines() if SCRIPT.fullmatch(name))
 
 
 def routine_running(drone):
-    status, _ = run(drone, 'docker exec %s pgrep -f "(^|[ /])routines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)"' % CONTAINER)
-    return status == 0
-
-
-def nodes_running(drone):
-    return run(drone, START + ' status')[0] == 0
+    return run(drone, CHECK_ROUTINE)[0] == 0
 
 
 def status(drone):
-    return {'scripts': list_scripts(drone), 'nodes': nodes_running(drone), 'running': routine_running(drone)}
+    marker = '\nPALS routine status '
+    command = (
+        'scripts=$(' + LIST_ROUTINES + ') || exit 1\n'
+        'nodes=0; ' + START + ' status >/dev/null && nodes=1\n'
+        'running=0; ' + CHECK_ROUTINE + ' >/dev/null && running=1\n'
+        'printf ' + shlex.quote(marker + '%s %s\n%s\n') + ' "$nodes" "$running" "$scripts"'
+    )
+    code, output = run(drone, command)
+    if code:
+        raise RuntimeError('%s has no %s' % (drone, ROUTINES))
+    _, separator, report = output.partition(marker)
+    flags, _, scripts = report.partition('\n')
+    if not separator or flags not in ('0 0', '0 1', '1 0', '1 1'):
+        raise RuntimeError('Invalid routine status from %s' % drone)
+    nodes, running = flags.split()
+    return {'scripts': script_names(scripts), 'nodes': nodes == '1', 'running': running == '1'}
 
 
 def node_action(drone, action):

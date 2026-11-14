@@ -243,23 +243,59 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             if device.address == 'failed':
                 raise RuntimeError('connection rejected')
             return client
-        fake = NS(BleakScanner=mock.Mock(return_value=scanner), BleakClient=create, BleakError=RuntimeError)
+        fake = NS(BleakScanner=mock.Mock(return_value=scanner), BleakClient=mock.Mock(side_effect=create),
+                  BleakError=RuntimeError)
         with mock.patch.dict(sys.modules, {'bleak': fake}), mock.patch('calibration.pans_ble.asyncio.sleep', new=mock.AsyncMock()):
             boards = await ble._scan(lambda: None)
         self.assertEqual([(b['ble'], b['id']) for b in boards], [('anchor-uuid', '0001')])
         self.assertIsNone(boards[0]['pan'])
         self.assertNotIn('tag', ble.devices)
         self.assertNotIn('stale', ble.devices)
-        self.assertIn('failed', ble.scan_warnings[0])
+        self.assertEqual([call.args[0].address for call in fake.BleakClient.call_args_list],
+                         ['failed', 'failed', 'anchor-uuid'])
+        self.assertRegex(ble.scan_warnings[0], r'failed.*connecting.*connection rejected')
         client.disconnect.assert_awaited_once()
+
+    async def test_reconnects_after_read_error_before_save_and_does_not_replay_write(self):
+        class GATTError(Exception):
+            pass
+
+        ble = PansBLE.__new__(PansBLE)
+        ble.progress = mock.Mock()
+        boards = [dict(board, x=x, y=y) for board, (x, y, _) in zip(BOARDS, POINTS)]
+        devices = [object() for _ in boards]
+        ble.devices = {board['ble']: device for board, device in zip(boards, devices)}
+        ble.inspect = mock.AsyncMock(side_effect=[GATTError('Unreachable'), *boards])
+        failed, *clients = [mock.AsyncMock() for _ in range(5)]
+        clients[0].write_gatt_char.side_effect = GATTError('GATT write outcome unknown')
+        on_write = mock.Mock()
+        def create(device, **kwargs):
+            if device is devices[0] and failed.connect.await_count == 0:
+                return failed
+            if device is devices[0]:
+                failed.disconnect.assert_awaited_once()
+            return clients[devices.index(device)]
+        fake = NS(BleakClient=mock.Mock(side_effect=create), BleakError=GATTError, BleakScanner=mock.Mock())
+        with mock.patch.dict(sys.modules, {'bleak': fake}), \
+                mock.patch('calibration.pans_ble.asyncio.sleep', new=mock.AsyncMock()):
+            with self.assertLogs(level='WARNING') as logs:
+                with self.assertRaisesRegex(GATTError, 'GATT write outcome unknown'):
+                    await ble._save(boards, on_write, lambda: None)
+        self.assertIn('Retrying Bluetooth anchor 0001 (reading board identity): Unreachable', logs.output[0])
+        self.assertEqual(fake.BleakClient.call_count, 5)
+        failed.write_gatt_char.assert_not_awaited()
+        on_write.assert_called_once()
+        clients[0].write_gatt_char.assert_awaited_once()
+        for client in clients:
+            client.disconnect.assert_awaited_once()
 
     async def test_pans_ranging_and_save_use_notifications_and_verify_readback_and_cleanup(self):
         from calibration.anchor_calibration import POSITION, encode_position
         ble = PansBLE.__new__(PansBLE)
         ble.progress = mock.Mock()
         ble.loop, ble.timeout = asyncio.get_running_loop(), 1
-        ble.verify = mock.AsyncMock()
         clients, modes, saved = {}, {}, {}
+        actual = {board['id']: dict(board) for board in BOARDS}
         for board in BOARDS:
             key = board['id']
             client = mock.AsyncMock()
@@ -282,7 +318,7 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
             connections.append(board['id'])
             active.add(board['id'])
             try:
-                yield clients[board['id']]
+                yield clients[board['id']], actual[board['id']]
             finally:
                 active.remove(board['id'])
         ble.connect = connect
@@ -292,13 +328,16 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
                 callback(None, payload(row))
         clients['0001'].start_notify.side_effect = notify
         boards = [dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 0, None])]
+        for board in boards:
+            actual[board['id']]['pan'] = board['pan']
         rows = await ble._measure(boards, lambda: None)
         self.assertEqual(rows, ROWS)
         self.assertEqual(connections, [board['id'] for board in boards])
-        self.assertEqual(ble.verify.await_count, 4)
         with self.assertRaisesRegex(ValueError, 'same PAN'):
             await ble._measure([dict(board, pan=pan) for board, pan in zip(BOARDS, [0, None, 1, None])], lambda: None)
         clients['0001'].stop_notify.assert_awaited_with(LOCATION)
+        for board in BOARDS:
+            actual[board['id']]['pan'] = board['pan']
         positions = solve_layout(BOARDS, rows)['positions']
         on_write = mock.Mock(side_effect=lambda: self.assertEqual(len(active), 4))
         connections.clear()
@@ -324,9 +363,9 @@ class LaptopBLETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(modes.values()), {b'\x02'})
 
         # All anchors must pass preflight before the first coordinate write.
-        ble.verify.side_effect = [None, ValueError('Anchor identity changed')]
+        actual['0002']['pan'] = 1
         on_write.reset_mock()
-        with self.assertRaisesRegex(ValueError, 'identity changed'):
+        with self.assertRaisesRegex(ValueError, 'identity, role or network changed'):
             await ble._save(positions, on_write, lambda: None)
         on_write.assert_not_called()
         self.assertFalse(active)
@@ -346,12 +385,13 @@ class LaptopCancellationTest(unittest.TestCase):
         client.read_gatt_char.side_effect = read
         ble.devices[BOARDS[0]['ble']] = object()
         async def stalled(guard):
-            async with ble.connect(BOARDS[0], guard) as connected:
+            async with ble.connect(BOARDS[0], guard) as (connected, _):
                 await ble.read_location(connected, b'\x01', guard)
         ble._measure = stalled
         def guard():
             if started.is_set(): raise ValueError('Calibration cancelled')
-        fake = NS(BleakClient=mock.Mock(return_value=client), BleakScanner=mock.Mock())
+        ble.inspect = mock.AsyncMock(return_value=BOARDS[0])
+        fake = NS(BleakClient=mock.Mock(return_value=client), BleakScanner=mock.Mock(), BleakError=RuntimeError)
         with mock.patch.dict(sys.modules, {'bleak': fake}):
             with self.assertRaisesRegex(ValueError, 'Calibration cancelled'):
                 ble.call('measure', guard)

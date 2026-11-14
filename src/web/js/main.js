@@ -1,11 +1,5 @@
 'use strict';
 
-const xySources = [
-  ['groundTruth', 'Ground truth', []],
-  ['camera', 'Camera pose', [2, 3]],
-  ['fused', 'Fused position', []]
-];
-
 const roomFrame = frame => typeof frame === 'string' ? frame.replace(/^\/+/, '') : '';
 const droneColor = id => id === 'drone1' ? '#0072b2' : '#d55e00';
 function roomTick(value, index, ticks) {
@@ -30,12 +24,10 @@ class FleetMap {
     this.anchorStamps = {};
     this.tagReports = {};
     this.layoutUsable = false;
-    const datasets = Object.values(drones).flatMap(drone => xySources.flatMap(([key, label, dash]) =>
-      [0, 1, 2].map(i => ({
-        droneId: drone.id, source: key, key: key + i, label: 'Drone ' + drone.id.slice(-1) + ' · ' + label,
-        data: [], borderColor: drone.id === 'drone1' ? '#0072b2' : '#d55e00',
-        borderDash: dash, borderWidth: 2.5, pointRadius: 0, fill: false, lineTension: 0
-      }))));
+    const datasets = Object.keys(drones).flatMap(id => [0, 1, 2].map(segment => ({
+      droneId: id, segment, label: 'Drone ' + id.slice(-1) + ' · Fused position',
+      data: [], borderColor: droneColor(id), borderWidth: 2.5, pointRadius: 0, fill: false, lineTension: 0
+    })));
     datasets.push({ key: 'apriltags', label: 'Mapped floor AprilTags', data: [], showLine: false,
       backgroundColor: '#198a71', borderColor: '#198a71', pointStyle: 'rectRot',
       pointRadius: 7, pointHoverRadius: 9, fill: false });
@@ -197,10 +189,8 @@ class FleetMap {
         if (this.room) {
           Object.values(drones).forEach(drone => drone.publish('cancelRoomTarget', {}));
           // Do not carry measured markers or target drafts across a layout change.
-          Object.values(drones).forEach(drone => xySources.forEach(([key]) => {
-            [0, 1, 2].forEach(i => { drone.series[key + i] = []; });
-          }));
-          this.chart.data.datasets.forEach(dataset => { dataset.lastData = []; });
+          Object.values(drones).forEach(drone => { drone.fusedMarker = []; });
+          this.chart.data.datasets.filter(dataset => dataset.droneId).forEach(dataset => { dataset.data = []; });
           this.tagReports = {};
         }
         this.room = candidate;
@@ -354,10 +344,8 @@ class FleetMap {
   }
 
   markerPosition(id) {
-    // Prefer the fused position, then the other displayed pose sources.
-    const marker = [...this.chart.data.datasets].reverse().find(dataset =>
-      dataset.droneId === id && dataset.key === dataset.source + '0' && dataset.data.length === 2);
-    if (!marker) return null;
+    const marker = this.chart.data.datasets.find(dataset => dataset.droneId === id && dataset.segment === 0);
+    if (!marker || !marker.data.length) return null;
     return { x: (marker.data[0].x + marker.data[1].x) / 2,
       y: (marker.data[0].y + marker.data[1].y) / 2 };
   }
@@ -554,27 +542,23 @@ class FleetMap {
           ? '#b84339' : droneColor(dataset.targetDrone);
       } else {
         const drone = drones[dataset.droneId];
-        const aligned = this.room && drone.connected && roomFrame(drone.xyFrames[dataset.source]) === this.room.frame;
-        const points = drone.series[dataset.key];
-        const receivedAt = drone.xyReceivedAt[dataset.source];
-        const live = aligned && this.layoutUsable && this.hasMatchingReport(drone.id) && points.length > 0 &&
-          receivedAt !== undefined && Date.now() - receivedAt <= 500;
+        const aligned = this.room && drone.connected && roomFrame(drone.fusedFrame) === this.room.frame;
+        const points = drone.fusedMarker[dataset.segment];
+        const live = aligned && this.layoutUsable && this.hasMatchingReport(drone.id) && points &&
+          drone.fusedReceivedAt !== null && Date.now() - drone.fusedReceivedAt <= 500;
         // Keep display-only coordinates through gaps; never renew flight freshness.
-        if (!aligned) dataset.lastData = [];
-        else if (live) dataset.lastData = points.map(point => ({ ...point }));
-        dataset.data = dataset.lastData || [];
-        dataset.stale = dataset.data.length > 0 && !live;
-        dataset.borderColor = droneColor(drone.id);
+        if (!aligned) dataset.data = [];
+        else if (live) dataset.data = points;
       }
     });
     document.getElementById('target-status').textContent = this.targetFeedback;
-    const omitted = this.room ? Object.values(drones).flatMap(drone => xySources.filter(([key]) =>
-      drone.series[key + '0'].length && roomFrame(drone.xyFrames[key]) !== this.room.frame).map(([key, label]) =>
-      'Drone ' + drone.id.slice(-1) + ' ' + label + ' (' + (drone.xyFrames[key] || 'frame unknown') + ')')) : [];
+    const omitted = this.room ? Object.values(drones)
+      .filter(drone => drone.fusedMarker.length && roomFrame(drone.fusedFrame) !== this.room.frame)
+      .map(drone => 'Drone ' + drone.id.slice(-1) + ' fused position (' + drone.fusedFrame + ')') : [];
     this.chart.update();
     const xTicks = this.chart.options.scales.xAxes[0].ticks;
     const yTicks = this.chart.options.scales.yAxes[0].ticks;
-    const outside = this.chart.data.datasets.filter(dataset => dataset.droneId && dataset.key === dataset.source + '0' && dataset.data.length)
+    const outside = this.chart.data.datasets.filter(dataset => dataset.segment === 0 && dataset.data.length)
       .filter(dataset => {
         const x = (dataset.data[0].x + dataset.data[1].x) / 2;
         const y = (dataset.data[0].y + dataset.data[1].y) / 2;
@@ -588,8 +572,7 @@ class FleetMap {
 
   clearDrone(id) {
     // Remove measured markers while preserving this drone's proposed destination.
-    xySources.forEach(([key]) => { [0, 1, 2].forEach(i => { drones[id].series[key + i] = []; }); });
-    this.chart.data.datasets.filter(dataset => dataset.droneId === id).forEach(dataset => { dataset.lastData = []; });
+    this.chart.data.datasets.filter(dataset => dataset.droneId === id).forEach(dataset => { dataset.data = []; });
     delete this.anchorReports[id];
     delete this.anchorStamps[id];
     delete this.tagReports[id];
@@ -608,6 +591,8 @@ class DroneSession {
     this.fusedPose = null;
     this.fusedStamp = null;
     this.fusedReceivedAt = null;
+    this.fusedFrame = null;
+    this.fusedMarker = [];
     this.fusionReadyAt = null;
     this.fusionGeneration = null;
     this.modeReceivedAt = null;
@@ -628,19 +613,11 @@ class DroneSession {
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.rangeStamp = null;
-    this.series = {};
-    this.xyFrames = {};
-    this.xyReceivedAt = {};
-    xySources.forEach(([key]) => {
-      [0, 1, 2].forEach(i => { this.series[key + i] = []; });
-    });
     this.field('camera').addEventListener('error', () => {
       this.clearTagOverlay();
       // Stop retrying a missing stream until the next connection.
       if (this.field('camera').getAttribute('src') !== 'nocamera.svg') {
-        this.field('batteryFill').setAttribute('width', 0);
-    this.field('batteryStatus').title = 'Battery voltage unavailable';
-    this.field('camera').src = 'nocamera.svg';
+        this.field('camera').src = 'nocamera.svg';
       }
     });
   }
@@ -751,7 +728,7 @@ class DroneSession {
     this.fusedPose = null;
     this.fusedReceivedAt = this.fusionReadyAt = null;
     // Retain the displayed coordinates through gaps; control must use fresh data.
-    [0, 1, 2].forEach(i => { this.series['fused' + i] = []; });
+    this.fusedMarker = [];
     if (fleetMap) fleetMap.requestRender();
   }
 
@@ -770,9 +747,17 @@ class DroneSession {
     ['x', 'y', 'z'].forEach(axis => {
       this.field('fused' + axis.toUpperCase()).textContent = p[axis].toFixed(2) + ' m';
     });
-    this.updateXY('fused', message.pose.pose, message.header.frame_id);
+    this.fusedFrame = message.header.frame_id;
+    const rotation = new Quaternion([q.w, q.x, q.y, q.z]);
+    this.fusedMarker = [[0.09, 0.09, 0], [0.09, -0.09, 0], [0, 0.15, 0]].map((vector, i) => {
+      const [x, y] = rotation.rotateVector(vector);
+      return [
+        { x: p.x - (i === 2 ? 0 : x), y: p.y - (i === 2 ? 0 : y) },
+        { x: p.x + x, y: p.y + y }
+      ];
+    });
+    if (fleetMap) fleetMap.requestRender();
   }
-
 
   setStatus(text, connected = false) {
     const state = connected ? 'connected' : ['Connecting…', 'Waiting for nodes…', 'Restarting…'].includes(text) ? 'connecting'
@@ -802,8 +787,7 @@ class DroneSession {
 
   resetTelemetry() {
     this.tagOverlayStamp = null;
-    this.xyFrames = {};
-    this.xyReceivedAt = {};
+    this.fusedFrame = null;
     this.startTime = null;
     this.positionMode = false;
     this.verticalHeightSamples = [];
@@ -827,7 +811,6 @@ class DroneSession {
     this.field('batteryFill').setAttribute('width', 0);
     this.field('batteryStatus').title = 'Battery voltage unavailable';
     this.field('camera').src = 'nocamera.svg';
-    Object.keys(this.series).forEach(key => { this.series[key] = []; });
     if (fleetMap) fleetMap.clearDrone(this.id);
   }
 
@@ -945,7 +928,6 @@ class DroneSession {
       if (!Number.isInteger(message.data)) return;
       if (this.fusionGeneration !== null && this.fusionGeneration !== message.data) {
         this.fusedStamp = null;
-        this.xyReceivedAt = {};
         this.clearFusion();
         // A generation change invalidates control data. A confirmed anchor-layout
         // change clears display-only markers in refreshAnchors().
@@ -1046,12 +1028,6 @@ class DroneSession {
       const speed = Math.hypot(velocity.x, velocity.y);
       this.field('speed').textContent = Number.isFinite(speed) ? speed.toFixed(2) + ' m/s' : '—';
     }, { throttle_rate: 200, queue_length: 1 });
-    subscribe('/pidrone/state/ground_truth', 'pidrone_pkg/StateGroundTruth', message => {
-      this.updateXY('groundTruth', message.pose, message.header && message.header.frame_id);
-    }, { throttle_rate: 200, queue_length: 1 });
-    subscribe('/pidrone/picamera/pose', 'geometry_msgs/PoseStamped', message => {
-      this.updateXY('camera', message.pose, message.header && message.header.frame_id);
-    }, { throttle_rate: 200, queue_length: 1 });
   }
 
   time(message) {
@@ -1096,22 +1072,6 @@ class DroneSession {
     const rounded = Math.round(Math.abs(velocity) * 100) / 100;
     const direction = rounded === 0 ? '' : velocity > 0 ? ' ↑' : ' ↓';
     this.field('verticalSpeed').textContent = rounded.toFixed(2) + ' m/s' + direction;
-  }
-
-  updateXY(key, pose, frame) {
-    const { position: p, orientation: q } = pose;
-    if (![p.x, p.y, q.w, q.x, q.y, q.z].every(Number.isFinite)) return;
-    this.xyFrames[key] = frame;
-    this.xyReceivedAt[key] = Date.now();
-    const rotation = new Quaternion([q.w, q.x, q.y, q.z]);
-    [[0.09, 0.09, 0], [0.09, -0.09, 0], [0, 0.15, 0]].forEach((vector, i) => {
-      const rotated = rotation.rotateVector(vector);
-      this.series[key + i] = [
-        { x: p.x - (i === 2 ? 0 : rotated[0]), y: p.y - (i === 2 ? 0 : rotated[1]) },
-        { x: p.x + rotated[0], y: p.y + rotated[1] }
-      ];
-    });
-    if (fleetMap) fleetMap.requestRender();
   }
 
   publish(key, data) {
