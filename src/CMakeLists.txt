@@ -47,7 +47,6 @@ catkin_install_python(PROGRAMS
   perception/apriltag_mapping_node
   localization/uwb_localization_node
   localization/fusion_localization_node
-  localization/tof_node.py
   boot/rosbridge_websocket.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

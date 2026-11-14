@@ -18,7 +18,8 @@ def _validate_positive(settings):
 
 def load_flight_settings():
     settings = _load_settings('flight.yaml')
-    _validate_positive({name: value for name, value in settings.items() if name not in ('altitude', 'velocity')})
+    _validate_positive({name: value for name, value in settings.items()
+                        if name not in ('altitude', 'velocity', 'rc')})
     if not 8.0 <= settings['low_flight_v'] <= settings['min_start_v'] <= 20.0:
         raise ValueError('Battery thresholds must fit the accepted voltage range')
     if settings['max_floor_height_m'] + settings['land_disarm_clearance_m'] > settings['max_disarm_height_m']:

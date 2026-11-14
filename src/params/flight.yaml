@@ -14,6 +14,12 @@ max_disarm_height_m: 0.30
 # Time to wait for the dashboard's synchronized start (s).
 start_timeout_s: 30.0
 
+# Betaflight RC presets (us), in roll, pitch, yaw, throttle, AUX1–AUX4 order.
+rc:
+  disarm: [1500, 1500, 1500, 1000, 1000, 1000, 1000, 1000]
+  arm:    [1500, 1500, 1500, 1000, 1800, 1000, 1000, 1000]
+  idle:   [1500, 1500, 1500, 1000, 1800, 1800, 1000, 1000]
+
 altitude:
   # Throttle (us) at hover and takeoff, ramp time to hover (s), and limits (us).
   hover_throttle: 1550.0

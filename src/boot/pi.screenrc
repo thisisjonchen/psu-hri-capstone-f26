@@ -1,4 +1,3 @@
-# Derived from the Paradox pair programming screenrc, UChicago 2010.
 shell /bin/bash
 startup_message off
 

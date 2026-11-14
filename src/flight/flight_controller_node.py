@@ -17,8 +17,8 @@ from serial import SerialException
 from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Header, Empty, Bool, String
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
-from flight import command_values as cmds
 from flight.multiwii import MultiWii
+from flight.settings import load_flight_settings
 from localization import monotonic
 from flight.distance_guard import fresh, STATE_TIMEOUT, SELECTION_TIMEOUT
 from flight.imu_clock import ImuClock
@@ -31,6 +31,17 @@ class FlightController(object):
     """Send RC commands over MSP and publish flight-controller telemetry."""
 
     def __init__(self):
+        presets = load_flight_settings()['rc']
+        if not isinstance(presets, dict):
+            raise ValueError('RC presets must be a mapping')
+        for name in ('disarm', 'arm', 'idle'):
+            channels = presets.get(name)
+            if (not isinstance(channels, list) or len(channels) != 8
+                    or any(type(value) is not int or not 1000 <= value <= 2000 for value in channels)):
+                raise ValueError('RC preset {} must contain eight integer values from 1000 to 2000 us'.format(name))
+        self.disarm_command = presets['disarm']
+        self.arm_command = presets['arm']
+        self.idle_command = presets['idle']
         self.board = self.getBoard()
         self.curr_mode = 'DISARMED'
         self.mode_lock = threading.RLock()
@@ -41,8 +52,7 @@ class FlightController(object):
         self.calibration_request = ''
         # Clear the retired flight lock when upgrading an existing ROS session.
         rospy.set_param('/pidrone/localization/calibration_lock', False)
-        self.command = cmds.disarm_cmd
-        self.last_command = cmds.disarm_cmd
+        self.command = self.last_command = self.disarm_command
         now = monotonic()
         self.next_rc = self.next_imu = self.next_attitude = self.next_battery = now
         self.imu_pending = self.battery_pending = None
@@ -94,9 +104,9 @@ class FlightController(object):
                 self.preflight = self.preflight_received = self.preflight_stamp = None
             if msg.mode == 'DISARMED':
                 self.flight_paired = None
-                self.command = cmds.disarm_cmd
+                self.command = self.disarm_command
             elif msg.mode == 'ARMED':
-                self.command = cmds.arm_cmd if previous == 'DISARMED' else cmds.idle_cmd
+                self.command = self.arm_command if previous == 'DISARMED' else self.idle_command
             self.curr_mode = msg.mode
 
     def coordination_selection_callback(self, msg):
@@ -162,7 +172,7 @@ class FlightController(object):
     def fly_commands_callback(self, msg):
         with self.mode_lock:
             if self.curr_mode == 'FLYING':
-                self.command = [msg.roll, msg.pitch, msg.yaw, msg.throttle] + cmds.idle_cmd[4:]
+                self.command = [msg.roll, msg.pitch, msg.yaw, msg.throttle] + self.idle_command[4:]
 
     @staticmethod
     def next_poll(deadline, now, hz):
@@ -499,7 +509,7 @@ def main():
     finally:
         print('Shutdown received')
         print('Sending DISARM command')
-        fc.board.send_commands([(MultiWii.SET_RAW_RC, cmds.disarm_cmd)])
+        fc.board.send_commands([(MultiWii.SET_RAW_RC, fc.disarm_command)])
         fc.board.receiveDataPacket()
 
 

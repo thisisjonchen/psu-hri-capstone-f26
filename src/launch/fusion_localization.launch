@@ -12,10 +12,11 @@
       <param name="floor_z" value="$(arg floor_z)"/>
       <param name="body_frame" value="$(arg body_frame)"/>
     </node>
-    <include file="$(find pidrone_pkg)/launch/ekf_localization.launch">
-      <arg name="calibration" value="$(arg ekf_calibration)"/>
-      <arg name="body_frame" value="$(arg body_frame)"/>
-      <arg name="frame_id" value="$(arg frame_id)"/>
-    </include>
+    <node pkg="pidrone_pkg" type="ekf_localization_node" name="ekf_localization" output="screen"
+          required="true">
+      <rosparam command="load" file="$(arg ekf_calibration)" ns="calibration"/>
+      <param name="frame_id" value="$(arg frame_id)"/>
+      <param name="body_frame" value="$(arg body_frame)"/>
+    </node>
   </group>
 </launch>

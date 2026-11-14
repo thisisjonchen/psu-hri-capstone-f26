@@ -12,8 +12,10 @@ from threading import Lock
 from unittest import mock
 
 from flight.multiwii import MultiWii
-from flight.command_values import disarm_cmd
 import test_fusion as fusion_helpers
+
+
+DISARM_COMMAND = [1500, 1500, 1500, 1000, 1000, 1000, 1000, 1000]
 
 
 class MspPacketTest(unittest.TestCase):
@@ -48,7 +50,7 @@ class MspPacketTest(unittest.TestCase):
         self.assertEqual(code, MultiWii.ANALOG)
         self.assertEqual((battery['vbat'], battery['amperage']), (120, 42))
 
-        board.send_commands([(MultiWii.SET_RAW_RC, disarm_cmd)])
+        board.send_commands([(MultiWii.SET_RAW_RC, DISARM_COMMAND)])
         self.assertEqual(board.receiveDataPacket(), 'Set Raw RC')
         self.assertEqual(writes, [
             bytes.fromhex('244d3c0eff00017f0800010000000000000060e6 244d3c006e6e0a'),
@@ -198,6 +200,18 @@ class FlightControllerLoopTest(unittest.TestCase):
                     self.assertTrue(fc.shouldIDisarm())
                     setattr(fc, heartbeat, 10.0)
 
+    def test_invalid_disarm_preset_is_rejected_before_opening_serial(self):
+        namespace = self.main.__globals__
+        settings = namespace['load_flight_settings']()
+        for invalid in ([1500] * 7, [1500] * 7 + [1000.0], [1500] * 7 + [999]):
+            with self.subTest(invalid=invalid), \
+                    mock.patch.dict(namespace, {'load_flight_settings': lambda: settings}), \
+                    mock.patch.object(self.controller_class, 'getBoard') as open_board:
+                settings['rc']['disarm'] = invalid
+                with self.assertRaisesRegex(ValueError, 'RC preset disarm'):
+                    self.controller()
+                open_board.assert_not_called()
+
     def test_arm_and_takeoff_require_readiness_but_disarm_does_not(self):
         fc = self.controller()
         fc.coordination_selection_callback(NS(data=True))
@@ -212,9 +226,9 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(fc.curr_mode, 'DISARMED', 'direct takeoff cannot bypass arming')
         fc.desired_mode_callback(NS(mode='ARMED'))
         self.assertEqual(fc.curr_mode, 'ARMED')
-        self.assertEqual(fc.command, self.main.__globals__['cmds'].arm_cmd)
+        self.assertEqual(fc.command, [1500, 1500, 1500, 1000, 1800, 1000, 1000, 1000])
         fc.desired_mode_callback(NS(mode='ARMED'))
-        self.assertEqual(fc.command, self.main.__globals__['cmds'].idle_cmd)
+        self.assertEqual(fc.command, [1500, 1500, 1500, 1000, 1800, 1800, 1000, 1000])
         fc.preflight_callback(ground)
         fc.desired_mode_callback(NS(mode='FLYING'))
         self.assertEqual(fc.curr_mode, 'ARMED', 'ground report cannot authorize takeoff')
@@ -224,6 +238,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(fc.curr_mode, 'FLYING')
         fc.fly_commands_callback(NS(roll=1502., pitch=1498., yaw=1500., throttle=1540.))
         flight_command = list(fc.command)
+        self.assertEqual(flight_command, [1502, 1498, 1500, 1540, 1800, 1800, 1000, 1000])
         fc.desired_mode_callback(NS(mode='ARMED'))
         self.assertEqual(fc.curr_mode, 'FLYING', 'an arm request must not end flight control')
         self.assertEqual(fc.command, flight_command)
@@ -231,7 +246,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertEqual(fc.curr_mode, 'FLYING', 'readiness loss must not disarm in flight')
         fc.desired_mode_callback(NS(mode='DISARMED'))
         fc.fly_commands_callback(NS(roll=1502., pitch=1498., yaw=1500., throttle=1540.))
-        self.assertEqual(fc.command, self.main.__globals__['cmds'].disarm_cmd)
+        self.assertEqual(fc.command, DISARM_COMMAND)
         self.assertEqual(self.commands, [], 'mode callbacks should not send serial commands')
 
     def test_stale_or_repeated_reports_do_not_restore_readiness(self):
@@ -319,7 +334,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         # Preserve the baseline disarm on actual node shutdown.
         self.assertEqual([(kind, code) for kind, code, _ in self.events[-2:]],
                          [('send', MultiWii.SET_RAW_RC), ('read', MultiWii.SET_RAW_RC)])
-        self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
+        self.assertEqual(self.commands[-1], DISARM_COMMAND)
         self.assertEqual(self.pending, [])
 
     def test_shutdown_interrupt_exits_cleanly_and_disarms(self):
@@ -330,7 +345,7 @@ class FlightControllerLoopTest(unittest.TestCase):
         output = self.run_loop()
         self.assertNotIn('internal error', output)
         self.assertIn('Sending DISARM command', output)
-        self.assertEqual(self.commands[-1], self.main.__globals__['cmds'].disarm_cmd)
+        self.assertEqual(self.commands[-1], DISARM_COMMAND)
 
     def test_missing_raw_counts_skips_legacy_telemetry_and_keeps_polling(self):
         self.incomplete_legacy = True
