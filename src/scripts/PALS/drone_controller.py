@@ -34,6 +34,7 @@ class Drone(object):
     # Control Variables
     ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
     LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
+    MAX_DISARM_HEIGHT_M = 0.30 # Highest disarm height a routine may request (free drop)
     START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
 
     def __init__(self):
@@ -312,14 +313,20 @@ class Drone(object):
         self._set_mode('DISARMED')
         self.unlock_xy()
 
-    def takeoff(self, hold_xy=False, continue_after=None, height=None):
-        """Take off; optionally continue after a timed climb instead of settling."""
+    def takeoff(self, hold_xy=False, continue_after=None, height=None, continue_above=None):
+        """Take off; optionally continue after a timed climb, or once the measured
+        height reaches continue_above, instead of settling. The climb toward
+        height carries on either way."""
         height = self.takeoff_height if height is None else height
         if math.isnan(height) or math.isinf(height) or height <= 0:
             raise ValueError('Takeoff height must be finite and positive')
         if continue_after is not None and (math.isnan(continue_after) or
                 math.isinf(continue_after) or not 0 < continue_after < 10):
             raise ValueError('Continue delay must be between 0 and 10 seconds')
+        if continue_above is not None and (continue_after is not None or math.isnan(continue_above)
+                or math.isinf(continue_above) or not 0 < continue_above <= height):
+            raise ValueError('Continue height must be positive, at most the takeoff height, '
+                             'and not combined with a continue delay')
         if self.ground_height is None or self.mode != 'DISARMED':
             raise RuntimeError('Call ready() while the drone is disarmed before takeoff')
         self.wait_for_start(hold_xy=hold_xy)
@@ -357,6 +364,13 @@ class Drone(object):
                     return
                 rospy.sleep(min(0.1, remaining))
                 continue
+            if continue_above is not None:
+                if self.height >= continue_above:
+                    rospy.loginfo('Takeoff reached %.2f m (continue at %.2f m, target %.2f m)',
+                                  self.height, continue_above, height)
+                    return
+                rospy.sleep(0.1)
+                continue
             now = time.time()
             settled_since = self._settled_since(height, 0.05, settled_since, now)
             if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
@@ -366,6 +380,9 @@ class Drone(object):
             rospy.sleep(0.1)
         if continue_after is not None:
             raise RuntimeError('Timed takeoff exceeded 10 seconds')
+        if continue_above is not None:
+            raise RuntimeError('Takeoff did not reach {:.2f} m within {:.1f} seconds'.format(
+                continue_above, timeout))
         raise RuntimeError('Takeoff altitude did not settle within {:.1f} seconds'.format(timeout))
 
     def move(self, x=0.0, y=0.0, z=0.0, speed_limit=0.15, timeout=15.0,
@@ -500,11 +517,11 @@ class Drone(object):
             raise ValueError('meters must be positive')
         self.move(y=-meters)
 
-    def finish(self, hold_xy=False):
+    def finish(self, hold_xy=False, disarm_height=None):
         """End a routine, keeping the heartbeat active if landing needs recovery."""
         if self.mode == 'FLYING':
             try:
-                self.land(hold_xy=hold_xy)
+                self.land(hold_xy=hold_xy, disarm_height=disarm_height)
             except Exception as error:
                 rospy.logerr('Landing needs manual recovery: %s', error)
                 # Keep the heartbeat active for manual landing.
@@ -513,8 +530,12 @@ class Drone(object):
         else:
             self.disarm()
 
-    def land(self, hold_xy=False):
-        """Descend and disarm at the ground threshold, optionally holding X/Y."""
+    def land(self, hold_xy=False, disarm_height=None):
+        """Descend and disarm at the ground threshold, optionally holding X/Y.
+
+        disarm_height raises that threshold (measured range, meters) up to
+        MAX_DISARM_HEIGHT_M; other values keep the default so landing still runs.
+        """
         if not hold_xy:
             self.unlock_xy()
         if self.ground_height is None:
@@ -527,7 +548,12 @@ class Drone(object):
             raise RuntimeError('Invalid preflight floor height')
         # Allow a slower-than-commanded descent before requiring manual recovery.
         deadline = time.time() + max(20.0, max(0.0, self.height - self.ground_height) / 0.05 + 5.0)
-        disarm_height = self.ground_height + self.LAND_DISARM_CLEARANCE_M
+        default_disarm = self.ground_height + self.LAND_DISARM_CLEARANCE_M
+        if disarm_height is not None and not (
+                not math.isnan(disarm_height) and default_disarm <= disarm_height <= self.MAX_DISARM_HEIGHT_M):
+            rospy.logwarn('Ignoring disarm height %s m; using %.3f m', disarm_height, default_disarm)
+            disarm_height = None
+        disarm_height = default_disarm if disarm_height is None else disarm_height
         self.landing_pub.publish(Float32(data=self.ground_height))
         self.target_height = self.ground_height
         rospy.loginfo('Landing toward preflight floor height %.3f m', self.ground_height)

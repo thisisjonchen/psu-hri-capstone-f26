@@ -674,6 +674,10 @@ def main(ControllerClass):
             fly_command = pid_controller.step()
             if pid_controller.current_mode == 'FLYING' and pid_controller.desired_mode == 'FLYING':
                 pid_controller.publish_cmd(fly_command)
+                # Once per second in flight, for throttle statistics after each run.
+                rospy.loginfo_throttle(1, 'Altitude target=%s estimated=%.3f m climb=%.3f m/s throttle=%.1f' % (
+                    pid_controller.altitude.target, pid_controller.current_position.z,
+                    pid_controller.current_velocity.z, fly_command[3]))
 
         loop_rate.sleep()
 
