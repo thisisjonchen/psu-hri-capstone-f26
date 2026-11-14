@@ -7,7 +7,7 @@
 set -u
 container=pidrone_pkg
 session=pidrone
-ports=$HOME/catkin_ws/pals.ports # by-id names from tools/pals.py provision
+ports=$HOME/catkin_ws/pals.ports # hardware-specific serial device assignments
 env_file=$HOME/catkin_ws/pals.env # resolved ports, read by screen_node.sh
 worker=$(dirname "$(readlink -f "$0")")/../../tools/warm_reboot_fc.py
 

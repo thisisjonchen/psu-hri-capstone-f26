@@ -198,7 +198,7 @@ def worker(folder, user_home):
              list(Path('/dev/serial/by-id').glob('*Betaflight*SPEEDYBEEF405V3*')))
     require(len(ports) == 1 and ports[0].parent == Path('/dev/serial/by-id')
             and 'SPEEDYBEEF405V3' in ports[0].name and ports[0].exists(),
-            'Expected one SpeedyBee F405 V3 flight controller; check tools/pals.py provision.')
+            'Expected one SpeedyBee F405 V3 flight controller; check PALS_FC_ID in ~/catkin_ws/pals.ports.')
     port = ports[0]
     usb = usb_device(port)
     print('Using %s on USB %s.' % (port, usb.name), flush=True)

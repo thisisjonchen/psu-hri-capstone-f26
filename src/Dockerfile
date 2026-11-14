@@ -1,11 +1,3 @@
-# This image allows you to have a Ubuntu 16.04 + ROS Kinetic setup.
-# You can mount the path to the 'robotdev' repository in your host
-# machine to the same path in the container. We ask you to use the
-# same username in the container as in your host machine. This
-# simplifies the maintenance of the 'robotdev' repository.
-# This setup relies on the nice ros:kinetic image provided
-# on Docker Hub.
-# /author: Kaiyu Zheng
 FROM ros:kinetic
 
 # Install software
@@ -36,13 +28,8 @@ RUN apt-get update && apt-get install -y --allow-unauthenticated --no-install-re
     ros-kinetic-web-video-server \
     nano
 
-# check out the version that has the buggy port of libmmal to 64 bit.
-# this didn't actually work sadly, got a weird mmal error when trying
-# to open picamera, but I think I still need it for raspicam_node.
+# Raspberry Pi camera libraries used by raspicam_node.
 RUN git clone https://github.com/raspberrypi/userland && cd userland && git checkout 4a57ea4107a4d48564242b21608ab259da5ced35 && ./buildme --aarch64
-
-#RUN pip install picamera
-
 
 ARG hostuser
 ARG hostgroup
@@ -77,16 +64,12 @@ RUN mkdir $HOME/repo
 RUN mkdir -p $HOME/catkin_ws/src
 RUN rosdep update
 
-# print some info on start
 RUN echo "echo -e 'Welcome! You are now in a docker container ().'" >> $HOME/.bashrc
 RUN echo "echo -e \"Docker ID: $(basename $(cat /proc/1/cpuset))\"" >> $HOME/.bashrc
 
 run echo "export LD_LIBRARY_PATH=/opt/vc/lib/:/home/$USER/raspicam_node_ws/devel/lib:\$LD_LIBRARY_PATH" >> $HOME/.bashrc
 
 run echo "export PYTHONPATH=\$PYTHONPATH:/home/$USER/raspicam_node_ws/devel/python2.7/dist-packages" >> $HOME/.bashrc
-
-run echo "export PYTHONPATH=\$PYTHONPATH:/home/$USER/catkin_ws/src/pidrone_pkg" >> $HOME/.bashrc
-
 
 RUN echo "export ROS_MASTER_URI=http://$hostname:11311" >> $HOME/.bashrc
 RUN echo "cd $HOME/catkin_ws/src/pidrone_pkg && source setup.sh" >> $HOME/.bashrc

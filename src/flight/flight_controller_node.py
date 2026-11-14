@@ -26,31 +26,12 @@ import os
 
 
 class FlightController(object):
-    """A class that sends the current [r,p,y,t] commands to the flight
-    controller board and then reads and publishes all of the data received
-    from the flight controller.
-
-    Publishers:
-    /pidrone/imu
-    /pidrone/imu_msp (MSP accelerometer and gyro counts)
-    /pidrone/battery
-    /pidrone/mode
-
-    Subscribers:
-    /pidrone/fly_commands
-    /pidrone/desired/mode
-    /pidrone/range
-    /pidrone/heartbeat/web_interface
-    /pidrone/heartbeat/pid_controller
-    /pidrone/state
-    """
+    """Send RC commands over MSP and publish flight-controller telemetry."""
 
     def __init__(self):
-        # Connect to the flight controller board
         self.board = self.getBoard()
-        # stores the current and previous modes
-        self.curr_mode = 'DISARMED'         #initialize as disarmed
-        self.prev_mode = 'DISARMED'         #initialize as disarmed
+        self.curr_mode = 'DISARMED'
+        self.prev_mode = 'DISARMED'
         self.mode_lock = threading.RLock()
         self.preflight = self.preflight_received = self.preflight_stamp = None
         self.coordination_selection = self.selection_received = None
@@ -59,8 +40,7 @@ class FlightController(object):
         self.calibration_request = ''
         # Clear the retired flight lock when upgrading an existing ROS session.
         rospy.set_param('/pidrone/localization/calibration_lock', False)
-        # store the command to send to the flight controller
-        self.command = cmds.disarm_cmd      #initialize as disarmed
+        self.command = cmds.disarm_cmd
         self.last_command = cmds.disarm_cmd
         now = monotonic()
         self.next_rc = self.next_imu = self.next_attitude = self.next_battery = now
@@ -69,13 +49,9 @@ class FlightController(object):
         self.imu_request = self.imu_ack = 0
         self.integrated_started = False
         self.last_rc_ack = now
-        # store the mode publisher
         self.modepub = None
-        # store the time for angular velocity calculations
         self.time = rospy.Time.now()
 
-        # Initialize the Imu Message
-        ############################
         header = Header()
         header.frame_id = 'Body'
         header.stamp = rospy.Time.now()
@@ -83,13 +59,9 @@ class FlightController(object):
         self.imu_message = Imu()
         self.imu_message.header = header
 
-        # Initialize the Battery Message
-        ################################
         self.battery_message = Battery()
         self.battery_message.vbat = None
         self.battery_message.amperage = None
-        # Accelerometer parameters
-        ##########################
         rospack = rospkg.RosPack()
         path = rospack.get_path('pidrone_pkg')
         with open("%s/params/multiwii.yaml" % path) as f:
@@ -99,9 +71,6 @@ class FlightController(object):
         self.accZeroY = means["ay"] * self.accRawToMss
         self.accZeroZ = means["az"] * self.accRawToMss
 
-
-    # ROS subscriber callback methods:
-    ##################################
     def desired_mode_callback(self, msg):
         """Check readiness before accepting an arm or takeoff request."""
         with self.mode_lock:
@@ -197,9 +166,6 @@ class FlightController(object):
             t = msg.throttle
             self.command = [r, p, y, t] + cmds.idle_cmd[4:8]
 
-
-    # Update methods:
-    #################
     @staticmethod
     def next_poll(deadline, now, hz):
         return deadline + (int(max(0., now - deadline) * hz) + 1) / hz
@@ -214,7 +180,7 @@ class FlightController(object):
                     self.last_rc_ack = now
                 else:
                     rospy.logwarn_throttle(1, 'Invalid RC acknowledgment from flight controller')
-            elif code in (MultiWii.INTEGRATED_IMU, 255):
+            elif code == MultiWii.INTEGRATED_IMU:
                 if self.imu_pending is not None and code == self.imu_pending[0]:
                     if isinstance(reply, dict):
                         if reply.get('request') != self.imu_pending[4]:
@@ -278,16 +244,12 @@ class FlightController(object):
         quaternion_array = [previous_quaternion.x, previous_quaternion.y, previous_quaternion.z, previous_quaternion.w]
         previous_roll, previous_pitch, previous_heading = tf.transformations.euler_from_quaternion(quaternion_array)
 
-        # transform euler angles into quaternion
         quaternion = tf.transformations.quaternion_from_euler(roll, pitch, heading)
-        # calculate the linear accelerations
         lin_acc_x = raw['ax'] * self.accRawToMss - self.accZeroX
         lin_acc_y = raw['ay'] * self.accRawToMss - self.accZeroY
         lin_acc_z = raw['az'] * self.accRawToMss - self.accZeroZ
 
-        # Rotate the IMU frame to align with our convention for the drone's body
-        # frame. IMU: x is forward, y is left, z is up. We want: x is right,
-        # y is forward, z is up.
+        # Convert forward/left/up to right/forward/up.
         lin_acc_x_drone_body = -lin_acc_y
         lin_acc_y_drone_body = lin_acc_x
         lin_acc_z_drone_body = lin_acc_z
@@ -299,7 +261,6 @@ class FlightController(object):
         lin_acc_y_drone_body -= g*roll_cos*np.sin(pitch)
         lin_acc_z_drone_body += g*(1 - roll_cos*pitch_cos)
 
-        # calculate the angular velocities of roll, pitch, and yaw in rad/s
         time = rospy.Time.now()
         dt = time.to_sec() - self.time.to_sec()
         dr = roll - previous_roll
@@ -311,19 +272,14 @@ class FlightController(object):
         angvz = self.near_zero(dh / dt)
         self.time = time
 
-        # Update the imu_message:
-        # header stamp
         self.imu_message.header.stamp = time
-        # orientation
         self.imu_message.orientation.x = quaternion[0]
         self.imu_message.orientation.y = quaternion[1]
         self.imu_message.orientation.z = quaternion[2]
         self.imu_message.orientation.w = quaternion[3]
-        # angular velocities
         self.imu_message.angular_velocity.x = angvx
         self.imu_message.angular_velocity.y = angvy
         self.imu_message.angular_velocity.z = angvz
-        # linear accelerations
         self.imu_message.linear_acceleration.x = lin_acc_x_drone_body
         self.imu_message.linear_acceleration.y = lin_acc_y_drone_body
         self.imu_message.linear_acceleration.z = lin_acc_z_drone_body
@@ -388,12 +344,8 @@ class FlightController(object):
             elif self.prev_mode == 'ARMED':
                 self.command = cmds.idle_cmd
 
-    # Helper Methods:
-    #################
     def getBoard(self):
         """ Connect to the flight controller board """
-        # (if the flight cotroll usb is unplugged and plugged back in,
-        #  it becomes .../USB1)
         # Provisioned drones pin the board's /dev/serial/by-id path.
         port = os.environ.get('PALS_FC_PORT')
         if port:
@@ -414,8 +366,6 @@ class FlightController(object):
         """ Set a number to zero if it is below a threshold value """
         return 0 if abs(n) < 0.0001 else n
 
-    # Heartbeat Callbacks: These update the last time that data was received
-    #                       from a node
     def heartbeat_web_interface_callback(self, msg):
         """Update web_interface heartbeat"""
         self.heartbeat_web_interface = rospy.Time.now()
@@ -458,20 +408,15 @@ class FlightController(object):
 
 
 def main():
-    # ROS Setup
-    ###########
     node_name = os.path.splitext(os.path.basename(__file__))[0]
     rospy.init_node(node_name)
-    # create the FlightController object
     fc = FlightController()
     curr_time = rospy.Time.now()
     fc.heartbeat_infrared = curr_time
-    fc.heartbeat_web_interface= curr_time
+    fc.heartbeat_web_interface = curr_time
     fc.heartbeat_pid_controller = curr_time
     fc.heartbeat_state_estimator = curr_time
 
-    # Publishers
-    ###########
     imupub = rospy.Publisher('/pidrone/imu', Imu, queue_size=1, tcp_nodelay=False)
     msp_imupub = rospy.Publisher('/pidrone/imu_msp', MspImu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
@@ -484,15 +429,12 @@ def main():
     print('/pidrone/mode')
     print('/pidrone/battery')
 
-    # Subscribers
-    ############
     rospy.Subscriber("/pidrone/desired/mode", Mode, fc.desired_mode_callback)
     rospy.Subscriber('/pidrone/coordination/paired', Bool, fc.coordination_selection_callback, queue_size=1)
     rospy.Subscriber('/pidrone/coordination/preflight', FlightReadiness, fc.preflight_callback, queue_size=1)
     rospy.Subscriber('/pidrone/localization/calibration_owner/request', String, fc.calibration_owner_callback, queue_size=1)
     rospy.Subscriber('/pidrone/fly_commands', RC, fc.fly_commands_callback,
                      queue_size=1, tcp_nodelay=True)
-    # heartbeat subscribers
     rospy.Subscriber("/pidrone/range", Range, fc.heartbeat_infrared_callback)
     rospy.Subscriber("/pidrone/heartbeat/web_interface", Empty, fc.heartbeat_web_interface_callback)
     rospy.Subscriber("/pidrone/heartbeat/pid_controller", Empty, fc.heartbeat_pid_controller_callback)
@@ -508,7 +450,7 @@ def main():
             if fc.curr_mode != 'DISARMED' and fc.shouldIDisarm():
                 print("mode", fc.curr_mode)
                 break
-                
+
             fc.update_command()
             command_sent, replies = fc.poll(integral_pub.publish)
             for code, reply in replies:
@@ -564,7 +506,7 @@ def main():
                 # Python 2 interrupts select on signals. Recheck ROS shutdown above.
                 if not error.args or error.args[0] != errno.EINTR:
                     raise
-            
+
     except SerialException:
         print('\nCannot connect to the flight controller board.')
         print('The USB is unplugged. Please check connection.')
@@ -574,7 +516,7 @@ def main():
     finally:
         print('Shutdown received')
         print('Sending DISARM command')
-        fc.board.send_raw_command(8, MultiWii.SET_RAW_RC, cmds.disarm_cmd)
+        fc.board.send_commands([(MultiWii.SET_RAW_RC, cmds.disarm_cmd)])
         fc.board.receiveDataPacket()
 
 

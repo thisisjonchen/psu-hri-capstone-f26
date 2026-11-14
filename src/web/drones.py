@@ -23,7 +23,7 @@ SCRIPT = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]*\.py$')
 ARGS = re.compile(r'^[A-Za-z0-9 _.,:=+/@%-]*$')
 
 SSH_CONFIG = '''
-# PALS drones (tools/pals.py ssh-setup)
+# PALS drones
 Host drone1 drone2
     HostName %h.local
     User duckie
@@ -127,7 +127,7 @@ def create_ssh_key(key):
 def connect(drone, timeout=5):
     """Open a key-authenticated connection; unknown host keys are rejected."""
     if not KEY.exists():
-        raise RuntimeError('%s: no SSH key at %s (run tools/pals.py ssh-setup)' % (drone, KEY))
+        raise RuntimeError('%s: no SSH key at %s. Use Connect in the dashboard to set up SSH.' % (drone, KEY))
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
@@ -138,7 +138,7 @@ def connect(drone, timeout=5):
         client.get_transport().set_keepalive(15)
     except (paramiko.SSHException, EOFError) as error:
         client.close()
-        raise RuntimeError('%s: %s (run tools/pals.py ssh-setup)' % (drone, error))
+        raise RuntimeError('%s: %s' % (drone, error))
     except OSError as error:
         client.close()
         raise RuntimeError('%s is unreachable: %s' % (drone, error))
@@ -148,8 +148,7 @@ def connect(drone, timeout=5):
 def setup_ssh(drone):
     """Connect with a key, installing it with the default password if needed.
 
-    Only an explicit Connect or CLI ssh-setup request uses this bootstrap path.
-    Serialize setup so simultaneous Connect clicks cannot race SSH file writes.
+    Serialize dashboard Connect requests so they cannot race SSH file writes.
     """
     hostname = host(drone)
     with _setup_lock:

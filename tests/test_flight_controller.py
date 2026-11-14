@@ -12,7 +12,48 @@ from threading import Lock
 from unittest import mock
 
 from flight.h2rMultiWii import MultiWii
+from flight.command_values import disarm_cmd
 import test_fusion as fusion_helpers
+
+
+class MspPacketTest(unittest.TestCase):
+    def test_poll_and_shutdown_packets_on_a_fake_serial_port(self):
+        ack = bytes.fromhex('244d3e00c8c8')
+        imu = bytes.fromhex(
+            '24 4d 3e 46 ff 00 01 7f 40 00 01 01 01 00 00 00 09 00 00 00 '
+            '10 27 00 00 10 27 00 00 00 00 00 00 00 00 00 00 00 00 00 00 '
+            '00 00 80 3f 00 00 00 00 00 00 00 00 39 b4 c8 3d 00 00 00 00 '
+            '00 08 00 00 00 00 00 00 00 00 00 00 67 01 3c 1a'
+        )
+        analog = bytes.fromhex('244d3e096e78000000002a00000035')
+        short_analog = bytes.fromhex('244d3e016e7817')
+        unsupported = bytes.fromhex('244d3e006464')
+        incoming = io.BytesIO(imu + short_analog + unsupported + analog + ack)
+        writes = []
+        serial = NS(write=writes.append, read=incoming.read,
+                    inWaiting=lambda: len(incoming.getvalue()) - incoming.tell())
+        with mock.patch('flight.h2rMultiWii.serial.Serial', return_value=serial):
+            board = MultiWii('fake')
+        board.send_commands([(MultiWii.INTEGRATED_IMU, [1, 0]), (MultiWii.ANALOG, [])])
+        replies = board.receive_available()
+        code, sample = next(replies)
+        self.assertEqual(code, MultiWii.INTEGRATED_IMU)
+        self.assertEqual((sample['request'], sample['sequence'], sample['duration_us']), (1, 9, 10000))
+        self.assertAlmostEqual(sample['velocity'][2], .098)
+        attitude, raw = sample['legacy']
+        self.assertEqual((attitude['heading'], raw['az']), (359, 2048))
+        self.assertEqual(next(replies), (MultiWii.ANALOG, None))
+        self.assertEqual(next(replies), (100, None))
+        code, battery = next(replies)
+        self.assertEqual(code, MultiWii.ANALOG)
+        self.assertEqual((battery['vbat'], battery['amperage']), (120, 42))
+
+        board.send_commands([(MultiWii.SET_RAW_RC, disarm_cmd)])
+        self.assertEqual(board.receiveDataPacket(), 'Set Raw RC')
+        self.assertEqual(writes, [
+            bytes.fromhex('244d3c0eff00017f0800010000000000000060e6 244d3c006e6e0a'),
+            bytes.fromhex('244d3c10c8dc05dc05dc05e803e803e803e803e803ea'),
+        ])
 
 
 class FlightControllerLoopTest(unittest.TestCase):
@@ -49,7 +90,7 @@ class FlightControllerLoopTest(unittest.TestCase):
                                  gx=0, gy=0, gz=0, timestamp=0)
         self.board.analog = dict(vbat=120, amperage=0)
 
-        def send(size, code, data):
+        def send(code, data):
             self.events.append(('send', code, self.env.ros_now))
             if code == MultiWii.INTEGRATED_IMU:
                 self.assertEqual(data[1], self.sequence, 'Received interval must be acknowledged before the next request')
@@ -82,8 +123,7 @@ class FlightControllerLoopTest(unittest.TestCase):
                     MultiWii.RAW_IMU: self.board.rawIMU,
                     MultiWii.ANALOG: self.board.analog}.get(code)
 
-        self.board.send_raw_command = send
-        self.board.create_packet = lambda size, code, data: send(size, code, data) or ''
+        self.board.create_packet = lambda code, data: send(code, data) or b''
         self.board.serial_port_write_lock = Lock()
         self.board.ser = NS(write=lambda packet: None)
         self.board.receiveDataPacket = receive

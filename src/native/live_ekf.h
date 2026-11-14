@@ -81,7 +81,7 @@ struct Snapshot {
     RangeTrace range_trace;
     std::int64_t origin_ns = 0;
     bool initialized = false, reference_valid = true;
-    // Aid ages are measured from the fusion horizon, now minus delay.
+    // Aid stamps are relative to origin_ns, in seconds.
     double delay = 0.;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
     double takeoff_deadline = -1.e100;

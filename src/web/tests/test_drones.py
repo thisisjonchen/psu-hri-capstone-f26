@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import drones
 import drone_git
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
-import pals
 import warm_reboot_fc
 
 
@@ -592,6 +591,41 @@ class ConnectTest(unittest.TestCase):
             drones.create_ssh_key(key)
             self.assertEqual(key.read_bytes(), original)
 
+    def test_dashboard_installs_key_only_after_key_authentication_fails(self):
+        existing, rejected, password = mock.Mock(), mock.Mock(), mock.Mock()
+        rejected.connect.side_effect = drones.paramiko.AuthenticationException('key rejected')
+        stdout = mock.Mock()
+        stdout.channel.recv_exit_status.return_value = 0
+        password.exec_command.return_value = (None, stdout, None)
+        with TemporaryDirectory() as directory, \
+                mock.patch.object(drones, 'KEY', Path(directory) / 'pals_ed25519'), \
+                mock.patch.object(drones.paramiko, 'SSHClient', side_effect=[existing, rejected, password]), \
+                mock.patch.object(drones, 'connect') as verify:
+            self.assertIs(drones.setup_ssh('drone1'), existing)
+            self.assertIs(drones.setup_ssh('drone2'), verify.return_value)
+        existing.exec_command.assert_not_called()
+        existing.get_transport.return_value.set_keepalive.assert_called_once_with(15)
+        password.exec_command.assert_called_once()
+        verify.assert_called_once_with('drone2')
+        rejected.close.assert_called_once()
+        password.close.assert_called_once()
+
+    def test_dashboard_does_not_try_password_after_connection_errors(self):
+        key = drones.paramiko.RSAKey.generate(1024)
+        for error in (OSError('offline'), EOFError('connection closed'),
+                      drones.paramiko.BadHostKeyException('drone1.local', key, key)):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory, \
+                    mock.patch.object(drones, 'KEY', Path(directory) / 'pals_ed25519'), \
+                    mock.patch.object(drones.paramiko, 'SSHClient') as ssh:
+                client = ssh.return_value
+                client.connect.side_effect = error
+                with self.assertRaisesRegex(RuntimeError, 'SSH setup failed'):
+                    drones.setup_ssh('drone1')
+                self.assertNotIn('password', client.connect.call_args.kwargs)
+                client.connect.assert_called_once()
+                client.exec_command.assert_not_called()
+                client.close.assert_called_once()
+
     def test_failed_command_closes_cached_connection_without_retry(self):
         for error in (OSError('connection lost'), EOFError('connection closed'),
                       drones.paramiko.SSHException('session inactive')):
@@ -649,52 +683,6 @@ class ConnectTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, '\033]777;1\007')
         self.assertEqual(result.stderr, '')
-
-
-class SetupTest(unittest.TestCase):
-    def setUp(self):
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        patch = mock.patch.object(drones, 'KEY', Path(directory.name) / '.ssh' / 'pals_ed25519')
-        patch.start()
-        self.addCleanup(patch.stop)
-
-    def test_installs_key_only_when_key_authentication_fails(self):
-        existing, rejected, password = mock.Mock(), mock.Mock(), mock.Mock()
-        rejected.connect.side_effect = drones.paramiko.AuthenticationException('key rejected')
-        stdout = mock.Mock()
-        stdout.channel.recv_exit_status.return_value = 0
-        password.exec_command.return_value = (None, stdout, None)
-        with mock.patch.object(drones.paramiko, 'SSHClient', side_effect=[existing, rejected, password]), \
-                mock.patch.object(drones, 'connect') as verify:
-            self.assertTrue(pals.ssh_setup(['drone1', 'drone2']))
-        existing.exec_command.assert_not_called()
-        existing.get_transport.return_value.set_keepalive.assert_called_once_with(15)
-        password.exec_command.assert_called_once()
-        password.get_transport.return_value.set_keepalive.assert_called_once_with(15)
-        self.assertNotIn('password', existing.connect.call_args.kwargs)
-        self.assertEqual(password.connect.call_args.kwargs['password'], 'quackquack')
-        verify.assert_called_once_with('drone2')
-        verify.return_value.close.assert_called_once()
-        for client in (existing, rejected, password):
-            client.close.assert_called_once()
-
-    def test_connection_errors_do_not_try_password_or_block_other_drone(self):
-        key = drones.paramiko.RSAKey.generate(1024)
-        for error in (OSError('offline'), EOFError('connection closed'),
-                      drones.paramiko.BadHostKeyException('drone1.local', key, key)):
-            with self.subTest(error=type(error).__name__):
-                failed, working = mock.Mock(), mock.Mock()
-                failed.connect.side_effect = error
-                with mock.patch.object(drones.paramiko, 'SSHClient', side_effect=[failed, working]):
-                    self.assertFalse(pals.ssh_setup(['drone1', 'drone2']))
-                failed.exec_command.assert_not_called()
-                working.exec_command.assert_not_called()
-                self.assertNotIn('password', failed.connect.call_args.kwargs)
-                self.assertEqual(working.connect.call_args.args[0], 'drone2.local')
-                failed.close.assert_called_once()
-                working.close.assert_called_once()
-
 
 
 if __name__ == '__main__':
