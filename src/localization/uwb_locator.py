@@ -1,4 +1,4 @@
-"""Nonblocking DWM1001/PANS serial reader, compatible with ROS Kinetic Python 2.
+"""Nonblocking DWM1001/PANS serial reader.
 
 Position timestamps are host monotonic receipt times, not UWB measurement times.
 """

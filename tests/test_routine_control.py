@@ -83,17 +83,27 @@ class RoutineControlTest(unittest.TestCase):
         drone.lock_xy()
         self.assertEqual(drone.xy_anchor, (1, 2))
         self.assertFalse(self.fusion.messages['/pidrone/position_control'][-1].data)
-        for yaw, expected in [(0, (-.1, 0)), (math.pi / 2, (0, .1))]:
-            pose = copy.deepcopy(drone.local_pose)
-            pose.pose.pose.position.x = 2
+        controller = self.fusion.controller()
+        controller.position_control_callback(NS(data=True))
+        start = drone.local_pose
+        for offset, yaw, expected in [(.2, 0, (-.06, 0)),
+                                      (1, math.pi / 2, (0, .1)),
+                                      (1, math.pi / 4, (-.1 / math.sqrt(2), .1 / math.sqrt(2)))]:
+            pose = copy.deepcopy(start)
+            pose.pose.pose.position.x += offset
             q = pose.pose.pose.orientation
             q.x, q.y, q.z, q.w = quaternion(yaw=yaw)
             drone._local_received(pose)
             command = drone._xy_hold_command()
             self.assertAlmostEqual(command.linear.x, expected[0])
             self.assertAlmostEqual(command.linear.y, expected[1])
-            self.assertAlmostEqual(math.hypot(command.linear.x, command.linear.y), .1)
             self.assertEqual(command.linear.z, 0)
+            state = copy.deepcopy(controller.current_state)
+            state.pose_with_covariance.pose = pose.pose.pose
+            controller.current_state_callback(state)
+            controller.calc_error()
+            self.assertAlmostEqual(controller.pid_error.x, command.linear.x)
+            self.assertAlmostEqual(controller.pid_error.y, command.linear.y)
         drone.unlock_xy()
         self.assertIsNone(drone.xy_anchor)
         self.assertEqual(drone._xy_hold_command().linear.x, 0)
@@ -536,7 +546,7 @@ class RoutineControlTest(unittest.TestCase):
                     controller.takeoff_height_callback(NS(data=invalid))
                 self.assertEqual(controller.desired_position.z, .6)
                 controller.altitude.step(.6, .05, 0, 1, ramp[0] + 1)
-                self.assertAlmostEqual(controller.altitude.target, .15)
+                self.assertAlmostEqual(controller.altitude.target, .05 + controller.altitude.takeoff_rate)
                 controller.altitude.step(.6, .6, 0, 1, ramp[0] + 6)
                 self.assertEqual(controller.altitude.target, .6)
                 controller.current_mode_callback(NS(mode='DISARMED'))

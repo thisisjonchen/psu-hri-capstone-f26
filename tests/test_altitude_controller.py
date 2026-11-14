@@ -120,7 +120,8 @@ class AltitudeControllerTest(unittest.TestCase):
 
     def test_invalid_settings_are_rejected(self):
         for settings in (dict(thrust_expo=1), dict(hover_throttle=1100), dict(rate_p=float('nan')),
-                         dict(throttle_range=(1600, 1500))):
+                         dict(rate_i=float('nan')), dict(throttle_range=(1600, 1500)),
+                         dict(takeoff_throttle_ramp_s=0), dict(landing_final_rate=.2)):
             with self.assertRaises(ValueError):
                 AltitudeController(**settings)
 

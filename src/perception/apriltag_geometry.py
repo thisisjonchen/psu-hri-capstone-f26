@@ -2,7 +2,6 @@
 
 Coordinate frames: map (+Z up); drone controller body (+X right, +Y forward,
 +Z up); OpenCV optical camera (+X image right, +Y image down, +Z forward).
-This module has no ROS dependency and works with Python 2.7 and older NumPy.
 """
 from __future__ import division
 

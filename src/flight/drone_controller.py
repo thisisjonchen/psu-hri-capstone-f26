@@ -4,6 +4,7 @@ import logging
 import math
 import time
 
+import numpy as np
 import rosnode
 import rospy
 import tf
@@ -13,6 +14,7 @@ from nav_msgs.msg import Odometry
 from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty, Float32
+from flight.settings import load_flight_settings, load_position_settings
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
 
 
@@ -26,30 +28,29 @@ class _RoutineConsoleFilter(logging.Filter):
 
 
 class Drone(object):
-
-    # Battery Limits
-    MIN_START_V = 15.2 # Minimum voltage to start
-    LOW_FLIGHT_V = 14.0 # Lowest acceptable voltage during flight
-
-    # Control Variables
-    ALTITUDE_SETTLE_SECONDS = 1.0 # How long drone should settle at target alt
-    LAND_DISARM_CLEARANCE_M = 0.05 # Disarm this far above the measured ground
-    MAX_DISARM_HEIGHT_M = 0.30 # Highest disarm height a routine may request (free drop)
-    START_TIMEOUT_S = 30.0 # Wait this long for the dashboard's synchronized start
-
     def __init__(self):
         # Routines initialize rospy first. Quiet this exact console warning while
         # retaining it in the node's log file and on /rosout for diagnosis.
         for handler in logging.getLogger('rosout').handlers:
             if isinstance(handler, RosStreamHandler):
                 handler.addFilter(_RoutineConsoleFilter())
-        self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout', 0.5))
-        self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', 0.25))
-        self.xy_hold_gain = float(rospy.get_param('/pidrone/localization/target_gain', 0.30))
-        self.xy_speed_limit = float(rospy.get_param('/pidrone/localization/target_speed_limit', 0.10))
-        if any(math.isnan(v) or math.isinf(v) or v <= 0
-               for v in (self.xy_hold_gain, self.xy_speed_limit)):
-            raise ValueError('Room target gain and speed must be positive')
+        flight = load_flight_settings()
+        self.estimate_timeout = float(rospy.get_param('/pidrone/altitude/measurement_timeout',
+                                                      flight['measurement_timeout_s']))
+        self.takeoff_height = float(rospy.get_param('/pidrone/altitude/takeoff_height', flight['takeoff_height_m']))
+        settings = load_position_settings()
+        self.xy_hold_gain = settings['hold_gain']
+        self.xy_speed_limit = settings['hold_speed_limit_m_s']
+        self.move_gain = settings['move_gain']
+        self.move_tolerance = settings['move_tolerance_m']
+        self.altitude_tolerance = settings['altitude_tolerance_m']
+        self.altitude_settle = settings['altitude_settle_s']
+        self.max_floor_height = flight['max_floor_height_m']
+        self.min_start_v = flight['min_start_v']
+        self.low_flight_v = flight['low_flight_v']
+        self.land_disarm_clearance = flight['land_disarm_clearance_m']
+        self.max_disarm_height = flight['max_disarm_height_m']
+        self.start_timeout = flight['start_timeout_s']
         self.mode = None
         self.mode_at = 0
         self.height = None
@@ -137,7 +138,7 @@ class Drone(object):
             now = time.time()
             self.voltage = voltage
             self.battery_at = now
-            if voltage < self.LOW_FLIGHT_V:
+            if voltage < self.low_flight_v:
                 self.low_voltage_at = self.low_voltage_at or now
             else:
                 self.low_voltage_at = None
@@ -181,8 +182,8 @@ class Drone(object):
         self.pose_pub.publish(pose)
         self.target_height = height
 
-    def _settled_since(self, target, tolerance, since, now):
-        if abs(self.height - target) > tolerance:
+    def _settled_since(self, target, since, now):
+        if abs(self.height - target) > self.altitude_tolerance:
             return None
         return now if since is None else since
 
@@ -207,9 +208,10 @@ class Drone(object):
                 if missing:
                     raise RuntimeError('Waiting for subscribers: ' + ', '.join(missing))
                 self._check_battery()
-                if self.height > 0.12:
-                    raise RuntimeError('Waiting for ground height <= 0.12 m (received: {:.3f})'.format(self.height))
-                if self.voltage < self.MIN_START_V:
+                if self.height > self.max_floor_height:
+                    raise RuntimeError('Waiting for ground height <= {:.2f} m (received: {:.3f})'.format(
+                        self.max_floor_height, self.height))
+                if self.voltage < self.min_start_v:
                     raise ValueError('Battery voltage is too low to start ({:.1f} V)'.format(self.voltage))
                 self.ground_height = self.height
                 rospy.loginfo('Flight nodes ready; ground height %.3f m', self.ground_height)
@@ -223,8 +225,9 @@ class Drone(object):
             time.sleep(0.1)
         raise RuntimeError('Readiness timed out: ' + reason)
 
-    def wait_for_start(self, timeout=START_TIMEOUT_S, hold_xy=False):
+    def wait_for_start(self, timeout=None, hold_xy=False):
         """Report readiness and wait for the dashboard to release this run."""
+        timeout = self.start_timeout if timeout is None else timeout
         rospy.loginfo('Waiting for synchronized start (up to %.0f s)', timeout)
         self.start_at = None
         started = time.time()
@@ -236,7 +239,7 @@ class Drone(object):
                 raise RuntimeError('Mode changed to {} while waiting for synchronized start'.format(self.mode))
             self._check_sensors()
             self._check_battery()
-            if self.voltage < self.MIN_START_V:
+            if self.voltage < self.min_start_v:
                 raise RuntimeError('Battery voltage is too low for synchronized start')
             if hold_xy:
                 self._hold_pose(local=True)
@@ -300,7 +303,7 @@ class Drone(object):
         return command
 
     def hover(self, seconds=1.0):
-        """Publish the fused XY hold command while hovering."""
+        """Publish the local XY hold command while hovering."""
         self.twist_pub.publish(self._xy_hold_command())
         deadline = time.time() + seconds
         while time.time() < deadline:
@@ -333,7 +336,7 @@ class Drone(object):
         self._check_battery()
         if abs(self.height - self.ground_height) > 0.02:
             raise RuntimeError('Drone is no longer at the measured ground height')
-        if self.voltage < self.MIN_START_V:
+        if self.voltage < self.min_start_v:
             raise RuntimeError('Battery voltage is too low to start ({:.1f} V)'.format(
                 self.voltage))
         timeout = 10.0 if continue_after is not None else 20.0
@@ -371,10 +374,10 @@ class Drone(object):
                 rospy.sleep(0.1)
                 continue
             now = time.time()
-            settled_since = self._settled_since(height, 0.05, settled_since, now)
-            if settled_since is not None and now - settled_since >= self.ALTITUDE_SETTLE_SECONDS:
+            settled_since = self._settled_since(height, settled_since, now)
+            if settled_since is not None and now - settled_since >= self.altitude_settle:
                 rospy.loginfo('Takeoff altitude %.2f m held for %.1f seconds; continuing routine',
-                              height, self.ALTITUDE_SETTLE_SECONDS)
+                              height, self.altitude_settle)
                 return
             rospy.sleep(0.1)
         if continue_after is not None:
@@ -388,12 +391,13 @@ class Drone(object):
              room_target=None, check=None):
         """Move relative to the drone: x right, y forward, z up (meters).
 
-        Relative moves use local IMU/flow odometry; room_target waypoints use
-        the UWB room pose. Use speed_limit=None for an uncapped proportional
-        velocity request.
+        Relative moves use local odometry and room waypoints use the fused pose.
+        Use speed_limit=None for an uncapped proportional velocity request.
         """
         if self.mode != 'FLYING':
             raise RuntimeError('Drone must be flying before moving')
+        if not np.all(np.isfinite((x, y, z))):
+            raise ValueError('Relative movement coordinates must be finite')
         limits = (timeout,) if speed_limit is None else (speed_limit, timeout)
         if any(math.isnan(v) or math.isinf(v) or v <= 0 for v in limits):
             raise ValueError('Movement speed and timeout must be finite and positive')
@@ -403,28 +407,28 @@ class Drone(object):
             return
         horizontal = math.hypot(x, y)
         local = room_target is None
-        if room_target is not None:
+        if not local:
             msg = self._hold_pose()
             if msg.header.frame_id != room_target[2]:
                 raise RuntimeError('Waypoint frame does not match fused position')
             p = msg.pose.pose.position
-            horizontal = math.hypot(room_target[0] - p.x, room_target[1] - p.y)
+            target_xy = np.asarray(room_target[:2])
+            displacement = target_xy - (p.x, p.y)
+            horizontal = math.hypot(*displacement)
         if horizontal and self.xy_anchor is not None:
             raise ValueError('Unlock X/Y before commanding horizontal movement')
         self._check_sensors()
         start_z = self.height
         target_z = start_z + z
         if horizontal:
-            msg = self._hold_pose(local=local)
+            if local:
+                msg = self._hold_pose(local=True)
+                p, q = msg.pose.pose.position, msg.pose.pose.orientation
+                yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
+                displacement = rotate((x, y), yaw)
+                target_xy = displacement + (p.x, p.y)
             frame = msg.header.frame_id
-            p, q = msg.pose.pose.position, msg.pose.pose.orientation
             start_xy = (p.x, p.y)
-            yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
-            displacement = rotate((x, y), yaw)
-            target_xy = displacement + start_xy
-            if room_target is not None:
-                target_xy = rotate(room_target[:2], 0)
-                displacement = target_xy - start_xy
             self.position_mode_pub.publish(Bool(False))
         if z:
             self._set_altitude(target_z)
@@ -454,29 +458,29 @@ class Drone(object):
                     yaw = tf.transformations.euler_from_quaternion((q.x, q.y, q.z, q.w))[2]
                     ex, ey = rotate(target_xy - (p.x, p.y), -yaw)
                 ez = target_z - self.height
-                horizontal_done = (not horizontal or
-                                   (abs(ex) <= 0.06 and abs(ey) <= 0.06))
+                horizontal_done = not horizontal or max(abs(ex), abs(ey)) <= self.move_tolerance
                 if z:
                     progress_z = (self.height - start_z) * (1 if z > 0 else -1)
                     best_vertical_progress = max(best_vertical_progress, progress_z)
-                    settled_since = self._settled_since(target_z, 0.05, settled_since, now)
+                    settled_since = self._settled_since(target_z, settled_since, now)
                 vertical_done = (not z or (settled_since is not None and
-                                 now - settled_since >= self.ALTITUDE_SETTLE_SECONDS))
+                                 now - settled_since >= self.altitude_settle))
                 if horizontal_done and vertical_done:
                     return
                 if now - started > 3.0:
                     if horizontal:
                         progress_xy = ((p.x - start_xy[0]) * displacement[0] +
                                        (p.y - start_xy[1]) * displacement[1])
-                        if progress_xy / horizontal < 0.03:
+                        progress_xy /= horizontal
+                        if progress_xy < 0.03:
                             raise RuntimeError('No horizontal movement detected: {:.3f} m forward progress'.format(
-                                progress_xy / horizontal))
+                                progress_xy))
                     if z and abs(ez) > 0.03 and best_vertical_progress < 0.02:
                         raise RuntimeError('No vertical movement detected')
                 command = self._xy_hold_command()
                 if horizontal and not horizontal_done:
                     command.linear.x, command.linear.y = target_velocity(
-                        target_xy, (p.x, p.y), yaw, 0.5, speed_limit)
+                        target_xy, (p.x, p.y), yaw, self.move_gain, speed_limit)
                 planar_speed = self._limit_planar_speed(command, speed_limit)
                 self.twist_pub.publish(command)
                 last_command_speed = planar_speed
@@ -511,11 +515,6 @@ class Drone(object):
             raise ValueError('meters must be positive')
         self.move(y=meters, speed_limit=speed_limit, timeout=timeout)
 
-    def move_back(self, meters):
-        if meters <= 0:
-            raise ValueError('meters must be positive')
-        self.move(y=-meters)
-
     def finish(self, hold_xy=False, disarm_height=None):
         """End a routine, keeping the heartbeat active if landing needs recovery."""
         if self.mode == 'FLYING':
@@ -532,8 +531,7 @@ class Drone(object):
     def land(self, hold_xy=False, disarm_height=None):
         """Descend and disarm at the ground threshold, optionally holding X/Y.
 
-        disarm_height raises that threshold (measured range, meters) up to
-        MAX_DISARM_HEIGHT_M; other values keep the default so landing still runs.
+        disarm_height may raise the default threshold up to the configured limit.
         """
         if not hold_xy:
             self.unlock_xy()
@@ -543,13 +541,12 @@ class Drone(object):
             self.unlock_xy()
             return
         self._check_flight('landing', check_battery=False)
-        if not 0 <= self.ground_height <= 0.12:
+        if not 0 <= self.ground_height <= self.max_floor_height:
             raise RuntimeError('Invalid preflight floor height')
         # Allow a slower-than-commanded descent before requiring manual recovery.
         deadline = time.time() + max(20.0, max(0.0, self.height - self.ground_height) / 0.05 + 5.0)
-        default_disarm = self.ground_height + self.LAND_DISARM_CLEARANCE_M
-        if disarm_height is not None and not (
-                not math.isnan(disarm_height) and default_disarm <= disarm_height <= self.MAX_DISARM_HEIGHT_M):
+        default_disarm = self.ground_height + self.land_disarm_clearance
+        if disarm_height is not None and not default_disarm <= disarm_height <= self.max_disarm_height:
             rospy.logwarn('Ignoring disarm height %s m; using %.3f m', disarm_height, default_disarm)
             disarm_height = None
         disarm_height = default_disarm if disarm_height is None else disarm_height

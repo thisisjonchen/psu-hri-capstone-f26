@@ -1,4 +1,4 @@
-"""Route-independent horizontal distance control. Compatible with Python 2.7."""
+"""Route-independent horizontal distance control."""
 from __future__ import division
 
 import math
@@ -8,12 +8,12 @@ except ImportError:
     from urlparse import urlparse
 
 STATE_TIMEOUT = 0.5
+SELECTION_TIMEOUT = 2.0
 
 
-def automatic_coordination(geometry, settings, master_uri):
+def automatic_coordination(settings, master_uri):
     """Get the drone identities from ROS_MASTER_URI."""
-    config = dict(geometry)
-    config.update(settings)
+    config = dict(settings)
     # Ignore the old switch for disabling paired protection.
     config.pop('enabled', None)
     host = urlparse(master_uri).hostname

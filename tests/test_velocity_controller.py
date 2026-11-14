@@ -101,7 +101,7 @@ class VelocityControllerTest(unittest.TestCase):
 
     def test_invalid_settings_are_rejected(self):
         for settings in (dict(max_lean_deg=0), dict(max_lean_deg=60), dict(gain_i=-1),
-                         dict(i_limit_deg=6), dict(gain_p=float('nan'))):
+                         dict(gain_i=float('inf')), dict(i_limit_deg=6), dict(gain_p=float('nan'))):
             with self.assertRaises(ValueError):
                 VelocityController(**settings)
 

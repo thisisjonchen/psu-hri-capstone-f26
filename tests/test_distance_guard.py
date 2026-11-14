@@ -191,11 +191,11 @@ class DistancePIDTest(unittest.TestCase):
         self.assertLess(self.c.pid_error.x, 0)
 
     def test_automatic_identity_and_legacy_flag_cannot_disable_paired_protection(self):
-        geometry = {'nominal_separation_m': 1.5, 'payload_drop_m': .5}
-        settings = {'enabled': False, 'min_distance': 1.2, 'max_distance': 1.8}
+        settings = {'enabled': False, 'min_distance': 1.2, 'nominal_separation_m': 1.5,
+                    'max_distance': 1.8}
         for own, peer in [('drone1', 'drone2'), ('drone2', 'drone1')]:
             for suffix in ('', '.local'):
-                config = automatic_coordination(geometry, settings, 'http://%s%s:11311' % (own, suffix))
+                config = automatic_coordination(settings, 'http://%s%s:11311' % (own, suffix))
                 self.assertEqual((config['drone_id'], config['peer_id']), (own, peer))
                 self.fixture.params['/pidrone/coordination'] = config
                 controller = self.guarded_controller()
@@ -204,7 +204,7 @@ class DistancePIDTest(unittest.TestCase):
                 self.assertAlmostEqual(controller.distance_guard.speed_limit, .1 * 2. / 3. if own == 'drone1' else .1)
         for uri in ('', 'http://localhost:11311', 'http://container-id:11311'):
             with self.assertRaises(ValueError):
-                automatic_coordination(geometry, settings, uri)
+                automatic_coordination(settings, uri)
         # Also check parameters left over from an older ROS session.
         config['enabled'] = False
         self.fixture.params['/pidrone/coordination'] = config

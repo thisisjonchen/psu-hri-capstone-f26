@@ -1,3 +1,7 @@
-# Horizontal center-to-center distance limits (meters).
+# Horizontal center-to-center spacing (m).
 min_distance: 0.85
+nominal_separation_m: 1.0
 max_distance: 1.15
+# Vertical drop between the drone and payload attachment points (m), for planning.
+# Taut equal ropes meeting below the midpoint are about 0.707 m each before knots.
+payload_drop_m: 0.5

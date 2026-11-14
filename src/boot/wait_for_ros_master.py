@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Wait for ROS 1's XML-RPC API before starting a node (Python 2/3)."""
+"""Wait for ROS 1's XML-RPC API before starting a node."""
 from __future__ import print_function
 
 import os

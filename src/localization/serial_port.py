@@ -1,4 +1,4 @@
-"""Exclusive POSIX serial access for the Pi's UWB tag (Python 2 compatible)."""
+"""Exclusive POSIX serial access for the Pi's UWB tag."""
 import errno
 import fcntl
 import glob

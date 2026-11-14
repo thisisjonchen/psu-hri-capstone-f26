@@ -15,7 +15,6 @@ TAG_ZONES = {0: 'PAYLOAD', 1: 'DROP_OFF'}
 
 
 def make_detector():
-    # ROS Kinetic uses Python 2; newer drone environments can use AprilTag 3.
     try:
         from pupil_apriltags import Detector
     except ImportError:

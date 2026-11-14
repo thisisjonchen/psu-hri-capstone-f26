@@ -6,7 +6,7 @@ import math
 
 try:
     from time import monotonic
-except ImportError:  # Python 2.7 on the DD24's ROS Kinetic image
+except ImportError:
     from monotonic import monotonic
 
 

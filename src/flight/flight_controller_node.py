@@ -1,28 +1,30 @@
 #!/usr/bin/env python
-import traceback
-import yaml
-import threading
+from collections import namedtuple
 import errno
+import json
+import os
+import select
+import threading
+import traceback
 
+import numpy as np
 import rospy
 import rospkg
-import select
-import numpy as np
 import tf
+import yaml
 
-
-from flight import command_values as cmds
-import json
-from sensor_msgs.msg import Imu
-from flight.h2rMultiWii import MultiWii
 from serial import SerialException
+from sensor_msgs.msg import Imu, Range
 from std_msgs.msg import Header, Empty, Bool, String
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
-from sensor_msgs.msg import Range
+from flight import command_values as cmds
+from flight.h2rMultiWii import MultiWii
 from localization import monotonic
-from flight.distance_guard import fresh, STATE_TIMEOUT
+from flight.distance_guard import fresh, STATE_TIMEOUT, SELECTION_TIMEOUT
 from flight.imu_clock import ImuClock
-import os
+
+
+ImuRequest = namedtuple('ImuRequest', 'started sent publish_attitude request_id')
 
 
 class FlightController(object):
@@ -31,7 +33,6 @@ class FlightController(object):
     def __init__(self):
         self.board = self.getBoard()
         self.curr_mode = 'DISARMED'
-        self.prev_mode = 'DISARMED'
         self.mode_lock = threading.RLock()
         self.preflight = self.preflight_received = self.preflight_stamp = None
         self.coordination_selection = self.selection_received = None
@@ -49,7 +50,6 @@ class FlightController(object):
         self.imu_request = self.imu_ack = 0
         self.integrated_started = False
         self.last_rc_ack = now
-        self.modepub = None
         self.time = rospy.Time.now()
 
         header = Header()
@@ -64,8 +64,8 @@ class FlightController(object):
         self.battery_message.amperage = None
         rospack = rospkg.RosPack()
         path = rospack.get_path('pidrone_pkg')
-        with open("%s/params/multiwii.yaml" % path) as f:
-            means = yaml.load(f)
+        with open(os.path.join(path, 'params', 'multiwii.yaml')) as stream:
+            means = yaml.safe_load(stream)
         self.accRawToMss = 9.8 / means["az"]
         self.accZeroX = means["ax"] * self.accRawToMss
         self.accZeroY = means["ay"] * self.accRawToMss
@@ -89,13 +89,15 @@ class FlightController(object):
                     return
                 if self.curr_mode == 'DISARMED':
                     self.flight_paired = self.preflight.paired
-            self.prev_mode = self.curr_mode
-            self.curr_mode = msg.mode
-            if self.prev_mode != self.curr_mode:
+            previous = self.curr_mode
+            if previous != msg.mode:
                 self.preflight = self.preflight_received = self.preflight_stamp = None
-            if self.curr_mode == 'DISARMED':
+            if msg.mode == 'DISARMED':
                 self.flight_paired = None
-            self.update_command()
+                self.command = cmds.disarm_cmd
+            elif msg.mode == 'ARMED':
+                self.command = cmds.arm_cmd if previous == 'DISARMED' else cmds.idle_cmd
+            self.curr_mode = msg.mode
 
     def coordination_selection_callback(self, msg):
         with self.mode_lock:
@@ -123,7 +125,7 @@ class FlightController(object):
                 or report.mode != self.curr_mode):
             return 'preflight_unavailable'
         if self.curr_mode == 'DISARMED':
-            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= 2.:
+            if self.selection_received is None or not 0 <= monotonic() - self.selection_received <= SELECTION_TIMEOUT:
                 return 'flight_setup_unavailable'
             paired = self.coordination_selection
         else:
@@ -158,13 +160,9 @@ class FlightController(object):
             return
 
     def fly_commands_callback(self, msg):
-        """ Store and send the flight commands if the current mode is FLYING """
-        if self.curr_mode == 'FLYING':
-            r = msg.roll
-            p = msg.pitch
-            y = msg.yaw
-            t = msg.throttle
-            self.command = [r, p, y, t] + cmds.idle_cmd[4:8]
+        with self.mode_lock:
+            if self.curr_mode == 'FLYING':
+                self.command = [msg.roll, msg.pitch, msg.yaw, msg.throttle] + cmds.idle_cmd[4:]
 
     @staticmethod
     def next_poll(deadline, now, hz):
@@ -181,12 +179,13 @@ class FlightController(object):
                 else:
                     rospy.logwarn_throttle(1, 'Invalid RC acknowledgment from flight controller')
             elif code == MultiWii.INTEGRATED_IMU:
-                if self.imu_pending is not None and code == self.imu_pending[0]:
+                pending = self.imu_pending
+                if pending is not None:
                     if isinstance(reply, dict):
-                        if reply.get('request') != self.imu_pending[4]:
+                        if reply.get('request') != pending.request_id:
                             continue
-                        reply['sent'] = self.imu_pending[2]
-                        reply['publish_attitude'] = self.imu_pending[3]
+                        reply['sent'] = pending.sent
+                        reply['publish_attitude'] = pending.publish_attitude
                         # Acknowledge this interval before scheduling the next request.
                         integrated = self.integrated_imu_sample(reply)
                         if integrated is not None:
@@ -198,7 +197,7 @@ class FlightController(object):
                 received.append((code, reply))
 
         now = monotonic()
-        if self.imu_pending is not None and now - self.imu_pending[1] >= .05:
+        if self.imu_pending is not None and now - self.imu_pending.started >= .05:
             rospy.logwarn_throttle(1, 'IMU response timed out; skipping sample')
             self.imu_pending = None
         if self.battery_pending is not None and now - self.battery_pending >= 1.:
@@ -221,8 +220,8 @@ class FlightController(object):
             if attitude_due:
                 self.next_attitude = self.next_poll(self.next_attitude, now, 60.)
             self.imu_request = (self.imu_request+1) & 0xffffffff
-            requests.append((MultiWii.INTEGRATED_IMU, [self.imu_request,self.imu_ack]))
-            self.imu_pending = (MultiWii.INTEGRATED_IMU, now, rospy.Time.now().to_sec(), attitude_due,self.imu_request)
+            requests.append((MultiWii.INTEGRATED_IMU, [self.imu_request, self.imu_ack]))
+            self.imu_pending = ImuRequest(now, rospy.Time.now().to_sec(), attitude_due, self.imu_request)
             self.next_imu = self.next_poll(self.next_imu, now, 100.)
         if now >= self.next_battery and self.battery_pending is None:
             requests.append((MultiWii.ANALOG, []))
@@ -230,7 +229,7 @@ class FlightController(object):
             self.next_battery = now + .5
         if requests:
             self.board.send_commands(requests)
-        if command_sent and command != self.last_command:
+        if command_sent:
             self.last_command = command
         return command_sent, received
 
@@ -267,9 +266,8 @@ class FlightController(object):
         dp = pitch - previous_pitch
         # Wrap to [-pi, pi]: crossing north must not read as a full-turn spin.
         dh = np.arctan2(np.sin(heading - previous_heading), np.cos(heading - previous_heading))
-        angvx = self.near_zero(dr / dt)
-        angvy = self.near_zero(dp / dt)
-        angvz = self.near_zero(dh / dt)
+        rates = (0.0, 0.0, 0.0) if dt <= 0 else (dr / dt, dp / dt, dh / dt)
+        angvx, angvy, angvz = (0.0 if abs(rate) < 0.0001 else rate for rate in rates)
         self.time = time
 
         self.imu_message.header.stamp = time
@@ -334,16 +332,6 @@ class FlightController(object):
         self.battery_message.vbat = reply['vbat'] * 0.10
         self.battery_message.amperage = reply['amperage']
 
-    def update_command(self):
-        ''' Set command values if the mode is ARMED or DISARMED '''
-        if self.curr_mode == 'DISARMED':
-            self.command = cmds.disarm_cmd
-        elif self.curr_mode == 'ARMED':
-            if self.prev_mode == 'DISARMED':
-                self.command = cmds.arm_cmd
-            elif self.prev_mode == 'ARMED':
-                self.command = cmds.idle_cmd
-
     def getBoard(self):
         """ Connect to the flight controller board """
         # Provisioned drones pin the board's /dev/serial/by-id path.
@@ -361,10 +349,6 @@ class FlightController(object):
                 print('The USB is unplugged. Please check connection.')
                 raise
         return board
-
-    def near_zero(self, n):
-        """ Set a number to zero if it is below a threshold value """
-        return 0 if abs(n) < 0.0001 else n
 
     def heartbeat_web_interface_callback(self, msg):
         """Update web_interface heartbeat"""
@@ -421,7 +405,7 @@ def main():
     msp_imupub = rospy.Publisher('/pidrone/imu_msp', MspImu, queue_size=1, tcp_nodelay=False)
     batpub = rospy.Publisher('/pidrone/battery', Battery, queue_size=1, tcp_nodelay=False)
     integral_pub = rospy.Publisher('/pidrone/imu_integrated', IntegratedImu, queue_size=100, tcp_nodelay=True)
-    fc.modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
+    modepub = rospy.Publisher('/pidrone/mode', Mode, queue_size=1, tcp_nodelay=False)
     calibration_pub = rospy.Publisher('/pidrone/localization/calibration_locked', Bool, queue_size=1, latch=True)
     calibration_owner_pub = rospy.Publisher('/pidrone/localization/calibration_owner/status', String, queue_size=1, latch=True)
     print('Publishing:')
@@ -451,7 +435,6 @@ def main():
                 print("mode", fc.curr_mode)
                 break
 
-            fc.update_command()
             command_sent, replies = fc.poll(integral_pub.publish)
             for code, reply in replies:
                 if code == MultiWii.ANALOG:
@@ -486,7 +469,7 @@ def main():
                     now = monotonic()
                     # Report the ROS control mode, not Betaflight's arming or Angle flags.
                     if fc.curr_mode != published_mode or now - last_mode_at >= .1:
-                        fc.modepub.publish(fc.curr_mode)
+                        modepub.publish(fc.curr_mode)
                         published_mode, last_mode_at = fc.curr_mode, now
                     calibration = (fc.calibration_owner, fc.calibration_request)
                     if calibration != published_calibration:
@@ -503,7 +486,7 @@ def main():
             try:
                 select.select([fc.board.ser], [], [], max(0., min(.005, deadline - monotonic())))
             except (select.error, OSError) as error:
-                # Python 2 interrupts select on signals. Recheck ROS shutdown above.
+                # Recheck ROS shutdown on the next iteration after an interrupted wait.
                 if not error.args or error.args[0] != errno.EINTR:
                     raise
 

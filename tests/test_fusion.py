@@ -32,8 +32,8 @@ def euler(q):
             math.asin(max(-1, min(1, 2*(w*y-z*x)))), math.atan2(2*(w*z+x*y), 1-2*(y*y+z*z)))
 
 
-def vector():
-    return NS(x=0., y=0., z=0.)
+def vector(x=0., y=0., z=0.):
+    return NS(x=x, y=y, z=z)
 
 
 def twist():
@@ -74,6 +74,7 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
         sys.modules['geometry_msgs.msg'].Pose = sys.modules['geometry_msgs.msg'].Twist = NS
+        sys.modules['geometry_msgs.msg'].Point = sys.modules['geometry_msgs.msg'].Vector3 = vector
         script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'fusion_localization_node')
         self.ros.Subscriber.reset_mock()
         self.node = runpy.run_path(script)['FusionLocalizationNode']()
@@ -222,7 +223,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertLess(climbing, level, 'brake the measured climb')
         controller.current_state.pose_with_covariance.pose.orientation = NS(
             **dict(zip('xyzw', quaternion(roll=math.radians(20)))))
-        controller.state_to_three_dim_vec_structs()
+        controller.current_state_callback(controller.current_state)
         controller.current_velocity.z = 0
         self.assertGreater(controller.step()[3], level, 'angle boost while leaning')
 
@@ -358,6 +359,11 @@ class FusionNodeTest(unittest.TestCase):
         controller.room_target_callback(target)
         controller.calc_error()
         self.assertAlmostEqual(controller.desired_velocity.x, .06)
+        controller.desired_pose_callback(NS(position=vector(z=float('nan'))))
+        invalid_twist = twist()
+        invalid_twist.angular.z = float('inf')
+        controller.desired_twist_callback(invalid_twist)
+        np.testing.assert_array_equal(controller.room_target, (1.2, 2))
         target.pose.position.x = 2
         controller.room_target_callback(target)
         controller.calc_error()
@@ -367,7 +373,7 @@ class FusionNodeTest(unittest.TestCase):
         controller.room_ready_callback(NS(data=False))
         controller.calc_error()
         np.testing.assert_array_equal(controller.room_target, (2, 2))
-        self.assertEqual(controller.desired_velocity.planar_magnitude(), 0)
+        self.assertEqual((controller.desired_velocity.x, controller.desired_velocity.y), (0, 0))
         self.assertTrue(controller.position_control)
         controller.room_ready_callback(NS(data=True))
         controller.calc_error()
@@ -416,7 +422,7 @@ class FusionNodeTest(unittest.TestCase):
         current.twist_with_covariance.twist.linear.z = .03
         controller.current_state_callback(current)
         command = controller.step()
-        self.assertLess(controller.pid_error.y, -.20)
+        self.assertAlmostEqual(controller.pid_error.y, -.23, msg='routine hold gain plus velocity damping')
         self.assertLess(command[1], 1490)
         # 0.15 m above the 0.35 m target and climbing: the cascade reduces throttle.
         self.assertAlmostEqual(controller.altitude.target, .35)

@@ -134,10 +134,9 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.board.receive_available = available
         # Use the real command batching and FC main loop.
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))
-        rospkg, yaml = ModuleType('rospkg'), ModuleType('yaml')
+        rospkg = ModuleType('rospkg')
         rospkg.RosPack = lambda: NS(get_path=lambda name: root)
-        yaml.load = lambda stream: dict(az=2048., ax=0., ay=0.)
-        patches = mock.patch.dict(sys.modules, {'rospkg': rospkg, 'yaml': yaml})
+        patches = mock.patch.dict(sys.modules, {'rospkg': rospkg})
         patches.start()
         self.addCleanup(patches.stop)
         sys.modules['std_msgs.msg'].Header = sys.modules['std_msgs.msg'].String = NS
@@ -214,6 +213,8 @@ class FlightControllerLoopTest(unittest.TestCase):
         fc.desired_mode_callback(NS(mode='ARMED'))
         self.assertEqual(fc.curr_mode, 'ARMED')
         self.assertEqual(fc.command, self.main.__globals__['cmds'].arm_cmd)
+        fc.desired_mode_callback(NS(mode='ARMED'))
+        self.assertEqual(fc.command, self.main.__globals__['cmds'].idle_cmd)
         fc.preflight_callback(ground)
         fc.desired_mode_callback(NS(mode='FLYING'))
         self.assertEqual(fc.curr_mode, 'ARMED', 'ground report cannot authorize takeoff')
@@ -224,12 +225,12 @@ class FlightControllerLoopTest(unittest.TestCase):
         fc.fly_commands_callback(NS(roll=1502., pitch=1498., yaw=1500., throttle=1540.))
         flight_command = list(fc.command)
         fc.desired_mode_callback(NS(mode='ARMED'))
-        fc.update_command()
         self.assertEqual(fc.curr_mode, 'FLYING', 'an arm request must not end flight control')
         self.assertEqual(fc.command, flight_command)
         self.readiness(fc, ready=False, reason='peer_state_stale')
         self.assertEqual(fc.curr_mode, 'FLYING', 'readiness loss must not disarm in flight')
         fc.desired_mode_callback(NS(mode='DISARMED'))
+        fc.fly_commands_callback(NS(roll=1502., pitch=1498., yaw=1500., throttle=1540.))
         self.assertEqual(fc.command, self.main.__globals__['cmds'].disarm_cmd)
         self.assertEqual(self.commands, [], 'mode callbacks should not send serial commands')
 
@@ -356,6 +357,12 @@ class FlightControllerLoopTest(unittest.TestCase):
         self.assertGreater(len(rates), 30)
         self.assertLess(max(abs(r) for r in rates), 3, 'heading wrap read as a spin')
         self.assertTrue(all(r < 0 for r in rates if abs(r) > 1e-3), 'one steady turning direction')
+
+    def test_attitude_with_no_ros_time_elapsed_keeps_rates_finite(self):
+        fc = self.controller()
+        fc.update_imu_message(dict(angx=1., angy=-2., heading=3.), self.board.rawIMU)
+        rate = fc.imu_message.angular_velocity
+        self.assertEqual((rate.x, rate.y, rate.z), (0., 0., 0.))
 
 
 if __name__ == '__main__':

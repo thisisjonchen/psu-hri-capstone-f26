@@ -329,7 +329,7 @@ def command_report(data, t0):
         extreme = max(abs(c[i] - 1500) for c in commands)
         pinned = sum(1 for c in commands if abs(c[i] - 1500) >= extreme - 0.5) / len(commands)
         print('  %-8s at its largest lean (%.1f us) %.0f%% of the time' % (name, extreme, 100 * pinned))
-    print('  The steady throttle in a level hover approximates hover_throttle (params/altitude.yaml).')
+    print('  The steady throttle in a level hover approximates altitude.hover_throttle (params/flight.yaml).')
     battery = [b for b in series(data.get('battery', []), t0, 'field.vbat') if not math.isnan(b[1])]
     if battery:
         start, end = commands[0][0], commands[-1][0]

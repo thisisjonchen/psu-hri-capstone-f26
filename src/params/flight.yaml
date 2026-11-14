@@ -1,0 +1,46 @@
+# Standard gravity used by the altitude and velocity loops (m/s^2).
+gravity_m_s2: 9.80665
+# Default takeoff height (m) and maximum estimate age (s).
+takeoff_height_m: 0.25
+measurement_timeout_s: 0.5
+# Highest downward range accepted as a preflight floor measurement (m).
+max_floor_height_m: 0.12
+# Routine battery thresholds (V).
+min_start_v: 15.2
+low_flight_v: 14.0
+# Disarm clearance above the measured floor and maximum routine disarm range (m).
+land_disarm_clearance_m: 0.05
+max_disarm_height_m: 0.30
+# Time to wait for the dashboard's synchronized start (s).
+start_timeout_s: 30.0
+
+altitude:
+  # Throttle (us) at hover and takeoff, ramp time to hover (s), and limits (us).
+  hover_throttle: 1550.0
+  takeoff_throttle: 1490.0
+  takeoff_throttle_ramp_s: 2.0
+  throttle_range: [1200.0, 1900.0]
+  # Height P (1/s), climb-rate PI (1/s and 1/s^2), and integral limit (m/s^2).
+  height_p: 0.8
+  rate_p: 1.43
+  rate_i: 0.55
+  rate_i_limit: 0.71
+  # Vertical rates (m/s) and final approach transition height (m above the floor).
+  climb_limit: 0.3
+  descent_limit: 0.2
+  takeoff_rate: 0.15
+  landing_rate: 0.15
+  landing_final_rate: 0.10
+  landing_slow_height_m: 0.15
+  # Thrust curve and maximum tilt used for throttle compensation (degrees).
+  thrust_expo: 0.65
+  max_boost_tilt_deg: 10.0
+
+velocity:
+  # Horizontal velocity PI (1/s and 1/s^2), shared by roll and pitch.
+  gain_p: 1.2
+  gain_i: 0.4
+  i_limit_deg: 3.0
+  max_lean_deg: 5.0
+  # Match Betaflight's angle_limit.
+  angle_limit_deg: 60.0

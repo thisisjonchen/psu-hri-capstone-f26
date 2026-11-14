@@ -1,0 +1,11 @@
+# XY hold and dashboard room targets. Gain (1/s) and planar speed limit (m/s).
+hold_gain: 0.30
+hold_speed_limit_m_s: 0.10
+# Release dashboard local position hold at this error (m).
+release_distance_m: 1.5
+# Routine movement gain (1/s) and per-axis waypoint tolerance (m).
+move_gain: 0.5
+move_tolerance_m: 0.06
+# Routine altitude tolerance (m) and settle time (s).
+altitude_tolerance_m: 0.05
+altitude_settle_s: 1.0
