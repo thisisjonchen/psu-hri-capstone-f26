@@ -1,4 +1,4 @@
-"""Validation and UWB/ToF position assembly without a ROS dependency."""
+"""Validation and UWB/ToF position assembly."""
 import math
 from collections import namedtuple
 

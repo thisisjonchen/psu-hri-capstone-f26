@@ -1,5 +1,9 @@
-# The EKF fuses UWB into horizontal position and starts facing map +Y (ekf.yaml).
-# Freshness for height and the EKF estimate.
+# Maximum ages for ToF/anchor samples, EKF odometry, and EKF readiness (s).
 sensor_timeout: 0.5
+odometry_timeout: 0.15
+ekf_ready_timeout: 0.15
+# Controller-state tilt limit and allowed movement of surveyed anchors.
+max_tilt_degrees: 45.0
+anchor_change_tolerance_m: 0.02
 # Maximum speed (m/s) at which EKF XY corrections reach the controller.
 max_correction_speed: 0.05

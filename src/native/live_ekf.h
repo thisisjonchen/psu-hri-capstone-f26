@@ -21,6 +21,9 @@ Quaternion product(const Quaternion& a, const Quaternion& b);
 struct Profile {
     double acceleration_scale, gyro_scale, delay;
     double camera_delay = 0., uwb_delay = 0.;
+    double initial_rest_seconds = 8.;
+    int initial_uwb_fixes = 40;
+    double camera_min_height = .1, camera_max_floor_distance = 1.5, camera_pixel_stddev = 1.5;
     Vec acceleration_offset, range_offset, range_beam, camera_offset, uwb_offset;
     Rotation imu_rotation, camera_rotation;
     void validate() const;
@@ -57,6 +60,9 @@ struct Filter {
     void reset_height(double height, const Vec& attitude_jacobian, double variance);
     cv::Mat public_covariance() const;
     bool navigation_variance_valid() const;
+private:
+    using ImuIterator = std::vector<Imu>::const_iterator;
+    bool project(ImuIterator begin, ImuIterator end);
 };
 
 struct Output {
@@ -113,9 +119,8 @@ public:
     void image(std::int64_t stamp, const std::vector<unsigned char>& encoded);
     void uwb(std::int64_t stamp, double x, double y, double variance);
     void invalidate_uwb_reference();
-    void imu(std::int64_t stamp, Imu sample, double received);
+    void imu(std::int64_t stamp, Imu sample, double received, const Vec& force, const Vec& rate);
     Snapshot snapshot() const;
-    const Filter& filter() const { return filter_; }
 private:
     struct Measurement {
         double stamp, end = 0., value = 0.;
@@ -138,7 +143,7 @@ private:
     std::deque<AngularInterval> angular_;
     std::deque<std::pair<std::int64_t, Vec>> startup_rates_;
     std::map<std::pair<double, std::string>, Measurement> measurements_;
-    std::vector<Initial> initial_;
+    std::deque<Initial> initial_;
     std::deque<Fix> uwb_initial_;
     std::int64_t origin_ns_ = 0, last_imu_ns_ = 0, rest_since_ = 0;
     double last_imu_ = 0., closed_through_ = -1.e-9, mode_at_ = -1.e100;

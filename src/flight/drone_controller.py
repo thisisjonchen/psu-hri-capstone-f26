@@ -15,7 +15,7 @@ from pidrone_pkg.msg import Battery, Mode
 from sensor_msgs.msg import Range
 from std_msgs.msg import Bool, Empty, Float32
 from flight.settings import load_flight_settings, load_position_settings
-from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
+from localization.fusion import rotate, target_velocity
 
 
 class _RoutineConsoleFilter(logging.Filter):
@@ -41,6 +41,7 @@ class Drone(object):
         settings = load_position_settings()
         self.xy_hold_gain = settings['hold_gain']
         self.xy_speed_limit = settings['hold_speed_limit_m_s']
+        self.room_prediction_timeout = settings['room_prediction_timeout_s']
         self.move_gain = settings['move_gain']
         self.move_tolerance = settings['move_tolerance_m']
         self.altitude_tolerance = settings['altitude_tolerance_m']
@@ -119,7 +120,7 @@ class Drone(object):
     def _hold_pose(self, required=True, allow_prediction=False, local=False):
         """Local odometry (IMU/flow, no UWB) or the fused room pose (UWB)."""
         msg = self.local_pose if local else self.fused_pose
-        timeout = XY_PREDICTION_TIMEOUT if allow_prediction and not local else self.estimate_timeout
+        timeout = self.room_prediction_timeout if allow_prediction and not local else self.estimate_timeout
         if (msg is None or not msg.header.frame_id or
                 not 0 <= rospy.get_time() - msg.header.stamp.to_sec() <= timeout):
             if not required:

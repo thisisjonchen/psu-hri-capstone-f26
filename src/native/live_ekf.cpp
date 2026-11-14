@@ -9,7 +9,8 @@
 
 namespace pals {
 namespace {
-const Vec gravity(0., 0., -9.8);
+constexpr double gravity_m_s2 = 9.8;
+const Vec gravity(0., 0., -gravity_m_s2);
 std::array<double, 225> density() {
     std::array<double, 225> result = {};
     const double noise[] = {0., .3*.3, .015*.015, .02*.02, .001*.001};
@@ -69,6 +70,11 @@ void Profile::validate() const {
             "Camera delay must fit within the fusion delay");
     require(std::isfinite(uwb_delay) && uwb_delay>=0. && uwb_delay<=delay,
             "UWB delay must fit within the fusion delay");
+    require(std::isfinite(initial_rest_seconds) && initial_rest_seconds>0. && initial_uwb_fixes>0,
+            "Startup requires a positive rest duration and UWB fix count");
+    require(std::isfinite(camera_min_height) && std::isfinite(camera_max_floor_distance)
+        && camera_min_height>0. && camera_max_floor_distance>0.
+        && std::isfinite(camera_pixel_stddev) && camera_pixel_stddev>0.,"Invalid camera measurement settings");
 }
 void Filter::initialize(double x, double y, double xy_variance, double height, const Quaternion& q,
                         const Vec& ba, const Vec& bg) {
@@ -115,9 +121,13 @@ bool Filter::predict(const Imu& sample, double end) {
     return true;
 }
 bool Filter::project(const std::vector<Imu>& samples) {
-    if (samples.empty()) return true;
-    std::vector<double> intervals; intervals.reserve(samples.size()*9);
-    for (const auto& s:samples) {
+    return project(samples.begin(),samples.end());
+}
+bool Filter::project(ImuIterator begin,ImuIterator end) {
+    if (begin==end) return true;
+    std::vector<double> intervals; intervals.reserve((end-begin)*9);
+    for (auto it=begin;it!=end;++it) {
+        const Imu& s=*it;
         if (s.stamp<=stamp) continue;
         const auto packet=s.packet();
         intervals.insert(intervals.end(),packet.begin(),packet.end());
@@ -149,23 +159,21 @@ bool Filter::project(const std::vector<Imu>& samples,const std::vector<RangeSamp
                      const Profile& profile) {
     if (samples.empty()) return true;
     Filter projected=*this;
-    std::size_t next=0;
+    auto next=samples.begin();
     double last_range=stamp;
-    std::vector<Imu> batch;
     for (const auto& range:ranges) {
         if (!std::isfinite(range.stamp) || range.stamp<=last_range || range.stamp>samples.back().stamp
             || !valid_range(range.distance,range.minimum,range.maximum)) continue;
         last_range=range.stamp;
-        batch.clear();
-        while (next<samples.size() && samples[next].stamp<=range.stamp) batch.push_back(samples[next++]);
-        if (!projected.project(batch)) return false;
-        if (range.stamp>projected.stamp && (next==samples.size()
-            || !projected.predict(samples[next],range.stamp))) return false;
+        const auto begin=next;
+        while (next!=samples.end() && next->stamp<=range.stamp) ++next;
+        if (!projected.project(begin,next)) return false;
+        if (range.stamp>projected.stamp && (next==samples.end()
+            || !projected.predict(*next,range.stamp))) return false;
         // A gated range is skipped; only invalid IMU prediction fails projection.
         projected.correct_range(range.distance,profile);
     }
-    batch.assign(samples.begin()+next,samples.end());
-    if (!projected.project(batch)) return false;
+    if (!projected.project(next,samples.end())) return false;
     *this=projected;
     return true;
 }
@@ -253,7 +261,7 @@ bool Snapshot::range_ready(double now) const {
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
     if (!fault.empty()) reason=fault;
-    else if (!initialized) reason="Initializing: disarmed, still on floor, facing +Y; 8 s with UWB + ToF";
+    else if (!initialized) reason="Initializing: disarmed, still on floor, facing +Y with UWB + ToF";
     else if (!reference_valid) reason="Reference lost: restart SE on the floor before flight";
     else if (!range_ready(now)) reason="Waiting: fresh ToF height";
     else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting: fresh state estimate";
@@ -381,7 +389,7 @@ bool LiveEKF::ground_rest(std::int64_t stamp,double received,const Vec& force,co
     bool quiet=ground_rest_allowed()
         && received-mode_at_>=0. && received-mode_at_<=.5 && range_.stamp>0
         && range_age>=-.1 && range_age<=.3 && range_.value>=.015 && range_.value<=.08
-        && cv::norm(rest_rate)<.03 && std::abs(cv::norm(force)-9.8)<.5 && force[2]>9.;
+        && cv::norm(rest_rate)<.03 && std::abs(cv::norm(force)-gravity_m_s2)<.5 && force[2]>9.;
     if (quiet && origin_ns_) quiet=cv::norm(rest_rate-filter_.gyro_bias())<.015;
     if (quiet && ground_range_>=0.) quiet=std::abs(range_.value-ground_range_)<.015;
     if (quiet && rest_since_) quiet=cv::norm(force-rest_force_)<.3 && std::abs(range_.value-rest_range_)<.015;
@@ -394,9 +402,8 @@ void LiveEKF::check_reference(double stamp) {
                                  last_aid_.count("zero_velocity") ? last_aid_.at("zero_velocity") : 0.);
     if (stamp-aiding>2.) reference_valid_=false;
 }
-void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
+void LiveEKF::imu(std::int64_t ns,Imu sample,double received,const Vec& force,const Vec& rate) {
     if (!fault_.empty() || ns<=0) return;
-    Vec force,rate; sample.means(force,rate);
     require(finite(force) && finite(rate),"Invalid IMU");
     if (last_imu_ns_) {
         if (ns<=last_imu_ns_) return;
@@ -415,14 +422,12 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
     if (!origin_ns_) {
         if (!rest_since_) return;
         initial_.push_back({force,rate,range_.value,ns});
-        if ((ns-initial_.front().stamp)/1.e9<8.) return;
+        if ((ns-initial_.front().stamp)/1.e9<profile_.initial_rest_seconds) return;
         double tag_x=0.,tag_y=0.,tag_variance=0.; int fixes=0;
         for (const auto& f:uwb_initial_) if (f.stamp<=ns) {
             tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
         }
-        // Keep resting, however long it takes, until this rest period holds 40 fixes;
-        // tags set to 10 Hz have been measured delivering as few as 7 fixes per second.
-        if (fixes<40) { initial_.erase(initial_.begin()); return; }
+        if (fixes<profile_.initial_uwb_fixes) { initial_.pop_front(); return; }
         tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }
@@ -437,7 +442,8 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received) {
         const Vec tag=r*profile_.uwb_offset;
         const double height=-(r*profile_.range_offset+distance*(r*profile_.range_beam))[2];
         if (!std::isfinite(height) || height<=0.) { fault_="Invalid initial floor geometry"; return; }
-        filter_.initialize(tag_x-tag[0],tag_y-tag[1],tag_variance,height,q,mean_force-r.t()*Vec(0.,0.,9.8),mean_rate);
+        filter_.initialize(tag_x-tag[0],tag_y-tag[1],tag_variance,height,q,
+                           mean_force-r.t()*Vec(0.,0.,gravity_m_s2),mean_rate);
         origin_ns_=ns; ground_range_=distance; initial_.clear(); uwb_initial_.clear(); return;
     }
     const double dt=stamp-last_imu_;
@@ -554,11 +560,12 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
     const Rotation r=rotation(filter_.quaternion());
     const double height=(filter_.position()+r*profile_.camera_offset)[2];
     const Vec velocity=filter_.velocity()+r*((rate-filter_.gyro_bias()).cross(profile_.camera_offset));
-    if (height-std::abs(velocity[2])*duration/2.<.1) return false;
+    if (height-std::abs(velocity[2])*duration/2.<profile_.camera_min_height) return false;
     std::vector<std::int64_t> indices(camera.rays.size());
     const auto& s=filter_.state;
     const auto count=pals_camera_indices(s.data(),s.data()+6,profile_.camera_rotation.val,
-        profile_.camera_offset.val,camera.rays.front().val,camera.rays.size(),0.,.1,1.5,indices.data());
+        profile_.camera_offset.val,camera.rays.front().val,camera.rays.size(),0.,
+        profile_.camera_min_height,profile_.camera_max_floor_distance,indices.data());
     if (count<8) return false;
     std::vector<cv::Point2f> points,back,forward;
     for (int i:spread(count,48)) points.emplace_back(camera.centers[indices[i]]);
@@ -581,7 +588,8 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
     std::vector<Vec> midpoint; for (std::size_t i=0;i<rays.size();++i) midpoint.push_back((rays[i]+previous_rays[i])/2.);
     std::vector<double> predicted(2*rays.size()),jacobians(30*rays.size()); indices.resize(rays.size());
     const auto used=pals_camera_linearize(s.data(),s.data()+3,s.data()+6,s.data()+13,rate.val,
-        profile_.camera_rotation.val,profile_.camera_offset.val,midpoint.front().val,midpoint.size(),0.,.1,1.5,
+        profile_.camera_rotation.val,profile_.camera_offset.val,midpoint.front().val,midpoint.size(),0.,
+        profile_.camera_min_height,profile_.camera_max_floor_distance,
         indices.data(),predicted.data(),jacobians.data());
     if (used<8) return false;
     std::vector<cv::Point2d> shifted_x=selected_previous,shifted_y=selected_previous;
@@ -590,7 +598,7 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
     const auto rx=camera.undistort(shifted_x),ry=camera.undistort(shifted_y);
     std::vector<cv::Vec2d> residuals; std::vector<cv::Matx22d> noises;
     std::vector<double> residual_x,residual_y;
-    const double pixel_rate_variance=std::pow(1.5/duration,2);
+    const double pixel_rate_variance=std::pow(profile_.camera_pixel_stddev/duration,2);
     for (int i=0;i<used;++i) {
         const int n=indices[i];
         const Vec diff=(previous_rays[n]-rays[n])/duration,dx=(rx[n]-previous_rays[n])/.01,dy=(ry[n]-previous_rays[n])/.01;

@@ -1,6 +1,8 @@
 # XY hold and dashboard room targets. Gain (1/s) and planar speed limit (m/s).
 hold_gain: 0.30
 hold_speed_limit_m_s: 0.10
+# Maximum room-pose age while following an existing target (s).
+room_prediction_timeout_s: 1.5
 # Release dashboard local position hold at this error (m).
 release_distance_m: 1.5
 # Routine movement gain (1/s) and per-axis waypoint tolerance (m).

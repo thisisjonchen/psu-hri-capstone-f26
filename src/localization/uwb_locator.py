@@ -18,7 +18,6 @@ from localization.serial_port import ExclusiveSerial
 Position = namedtuple('Position', 'x y z quality timestamp')
 Anchor = namedtuple('Anchor', 'id x y z distance')
 AnchorSample = namedtuple('AnchorSample', 'anchors timestamp')
-SERIAL_SILENCE_TIMEOUT = 30.0
 
 
 RATE_PATTERNS = (
@@ -103,11 +102,14 @@ class UWBLocator(object):
     Resetting the tag once on connection establishes a known stream state. Sending
     lec again after a timeout would turn a slow-starting stream OFF.
     """
-    def __init__(self, port=None, baud=115200, min_quality=50, stale_after=0.5):
-        if not 0 <= min_quality <= 100 or not finite(stale_after) or stale_after <= 0:
-            raise ValueError('Invalid minimum quality or stale timeout')
+    def __init__(self, port=None, baud=115200, min_quality=50, stale_after=0.5,
+                 serial_silence_timeout=30.0):
+        if (not 0 <= min_quality <= 100 or not all(finite(v) and v > 0 for v in
+                                                  (stale_after, serial_silence_timeout))):
+            raise ValueError('Invalid minimum quality or timeout')
         self.port, self.baud = port, baud
         self.min_quality, self.stale_after = min_quality, stale_after
+        self.serial_silence_timeout = serial_silence_timeout
         self._serial = None
         self._thread = None
         self._stop = threading.Event()
@@ -148,7 +150,7 @@ class UWBLocator(object):
     @property
     def serial_timeout(self):
         # Allow three stationary intervals when a slower rate could not be changed.
-        return max(SERIAL_SILENCE_TIMEOUT, self.update_rate[1] * 0.3 if self.update_rate else 0)
+        return max(self.serial_silence_timeout, self.update_rate[1] * 0.3 if self.update_rate else 0)
 
     @property
     def running(self):
@@ -254,11 +256,12 @@ class UWBLocator(object):
             pending = b''
             while not self._stop.is_set():
                 raw = self._serial.readline()
+                now = monotonic()
                 if raw:
-                    self.last_serial_at = monotonic()
+                    self.last_serial_at = now
                 else:
                     last_received = self.last_serial_at if self.last_serial_at is not None else stream_started
-                    if monotonic() - last_received >= self.serial_timeout:
+                    if now - last_received >= self.serial_timeout:
                         raise RuntimeError('No UWB serial data for %.1f seconds; reconnecting tag' % self.serial_timeout)
                 pending += raw
                 while b'\n' in pending:

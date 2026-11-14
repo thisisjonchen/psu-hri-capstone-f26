@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from perception.apriltag_geometry import undistort_pixels
+from localization.position import valid_range
 from localization.rotations import quaternion_matrix, skew
 from localization.ekf import _array
 from localization import ekf_native
@@ -49,8 +50,7 @@ class FloorRange(object):
     def correct(self, ekf, distance, variance, stamp, min_range, max_range):
         if ekf.stamp is None:
             return ekf._reject('not_initialized')
-        if (not np.all(np.isfinite([distance, min_range, max_range]))
-                or not 0 <= min_range < max_range or not min_range <= distance <= max_range):
+        if not valid_range(distance, min_range, max_range):
             return ekf._reject('invalid_range')
         try:
             prediction, observation = self.linearize(ekf.position, ekf.quaternion)

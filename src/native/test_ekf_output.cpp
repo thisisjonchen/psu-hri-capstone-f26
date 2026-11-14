@@ -15,6 +15,11 @@ std::vector<pals::Imu> stationary_imu(double end, int count) {
         samples.push_back({end-i*.01,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)});
     return samples;
 }
+void feed_imu(pals::LiveEKF& filter,std::int64_t stamp,const pals::Imu& sample,double received) {
+    pals::Vec force, rate;
+    sample.means(force,rate);
+    filter.imu(stamp,sample,received,force,rate);
+}
 }
 
 TEST(EkfOutput, ResumesAfterOutputGapWithoutRequiringExpiredHistory) {
@@ -66,6 +71,8 @@ TEST(EkfOutput, RecoveryDoesNotMakeStaleRangeOrOutputReady) {
     s.range_aid=2.3; s.horizontal_aid=2.3;
     EXPECT_FALSE(s.ready(3.6,s.filter,reason));
     s.filter.stamp=2.6;
+    EXPECT_FALSE(s.ready(3.59,s.filter,reason));
+    s.filter.stamp=2.45;
     EXPECT_TRUE(s.ready(3.59,s.filter,reason));
     s.delay=.35;
     s.filter.stamp=2.97;
@@ -154,29 +161,32 @@ TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
         const auto ns=1000000000LL+i*10000000LL;
         f.mode("DISARMED",i*.01);
         f.range(ns,.05,0.,4.);
-        f.imu(ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},i*.01);
+        feed_imu(f,ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},i*.01);
     };
     for (int i=1;i<=900;++i) {
         tick(filter,i);
         if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.4,-.2,.01);
+        if (i==800) EXPECT_FALSE(filter.snapshot().initialized);
     }
     ASSERT_TRUE(filter.snapshot().initialized);
-    EXPECT_NEAR(filter.filter().position()[0],.4,1.e-9);
-    EXPECT_NEAR(filter.filter().position()[1],-.2,1.e-9);
+    const auto initialized=filter.snapshot().filter;
+    EXPECT_NEAR(initialized.position()[0],.4,1.e-9);
+    EXPECT_NEAR(initialized.position()[1],-.2,1.e-9);
     auto baseline=filter;
     for (int i=901;i<=1010;++i) {
         const auto ns=1000000000LL+i*10000000LL;
         // Stop aiding both filters apart from a delayed UWB fix in one.
         if (i==1000) filter.uwb(ns,.48,-.12,.01);
         const pals::Imu imu{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)};
-        filter.imu(ns,imu,i*.01);
-        baseline.imu(ns,imu,i*.01);
+        feed_imu(filter,ns,imu,i*.01);
+        feed_imu(baseline,ns,imu,i*.01);
     }
-    EXPECT_TRUE(filter.snapshot().fault.empty());
-    EXPECT_GT(filter.filter().position()[0],baseline.filter().position()[0]);
-    EXPECT_GT(filter.filter().position()[1],baseline.filter().position()[1]);
-    for (std::size_t i=2;i<filter.filter().state.size();++i)
-        EXPECT_NEAR(filter.filter().state[i],baseline.filter().state[i],1.e-12);
+    const auto result=filter.snapshot(), reference=baseline.snapshot();
+    EXPECT_TRUE(result.fault.empty());
+    EXPECT_GT(result.filter.position()[0],reference.filter.position()[0]);
+    EXPECT_GT(result.filter.position()[1],reference.filter.position()[1]);
+    for (std::size_t i=2;i<result.filter.state.size();++i)
+        EXPECT_NEAR(result.filter.state[i],reference.filter.state[i],1.e-12);
 }
 
 int main(int argc, char** argv) {

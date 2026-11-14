@@ -21,10 +21,8 @@ from std_msgs.msg import Bool, UInt32
 
 from localization.position import valid_range
 from localization import monotonic
+from localization.fusion import anchor_outline
 from localization.rotations import quaternion_matrix
-
-ODOMETRY_TIMEOUT = .15
-MIN_VERTICAL = math.sqrt(.5)
 
 
 class FusionLocalizationNode(object):
@@ -40,14 +38,21 @@ class FusionLocalizationNode(object):
         self.range_received = None
         self.range_valid = False
         self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
+        self.odometry_timeout = float(rospy.get_param('~odometry_timeout', 0.15))
+        self.ekf_ready_timeout = float(rospy.get_param('~ekf_ready_timeout', 0.15))
+        max_tilt = float(rospy.get_param('~max_tilt_degrees', 45.0))
+        self.layout_tolerance = float(rospy.get_param('~anchor_change_tolerance_m', 0.02))
         self.floor_z = float(rospy.get_param('~floor_z', 0.0))
         self.max_correction_speed = float(rospy.get_param('~max_correction_speed', 0.05))
         self.frame = rospy.get_param('~frame_id', 'map')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        limits = (self.timeout, self.odometry_timeout, self.ekf_ready_timeout,
+                  self.layout_tolerance, self.max_correction_speed)
         if (self.frame == self.body_frame or not all((self.frame, self.body_frame))
-                or not np.isfinite(self.floor_z) or not all(np.isfinite(v) and v > 0 for v in
-                                                            (self.timeout, self.max_correction_speed))):
-            raise ValueError('Invalid fusion frames, timeouts or correction speed')
+                or not np.isfinite(self.floor_z) or not 0 < max_tilt < 90
+                or not all(np.isfinite(v) and v > 0 for v in limits)):
+            raise ValueError('Invalid fusion frames or limits')
+        self.min_vertical = math.cos(math.radians(max_tilt))
         self.limited = self.limited_stamp = None
         self.layout = None
         self.layout_stamp = None
@@ -90,7 +95,7 @@ class FusionLocalizationNode(object):
         with self.lock:
             now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
             if (self.ekf_reference_lost or msg.header.frame_id != self.frame
-                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, ODOMETRY_TIMEOUT)):
+                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, self.odometry_timeout)):
                 return
             if self.ekf_odom is not None and stamp <= self.ekf_odom.header.stamp.to_sec():
                 return
@@ -112,29 +117,17 @@ class FusionLocalizationNode(object):
     def anchors_callback(self, msg):
         with self.lock:
             stamp = msg.header.stamp.to_sec()
-            positions = [(p.x, p.y, p.z) for p in msg.positions]
-            valid = (msg.header.frame_id == self.frame and len(msg.anchor_ids) == len(positions) == 4
-                     and len(set(msg.anchor_ids)) == 4 and all(msg.anchor_ids)
-                     and np.all(np.isfinite(positions)) and self.fresh(stamp, rospy.get_time()))
-            if valid:
-                # All four surveyed anchors must form a nondegenerate convex outline.
-                xy = np.asarray(positions)[:, :2]
-                center = xy.mean(axis=0)
-                order = np.argsort(np.arctan2(xy[:, 1] - center[1], xy[:, 0] - center[0]))
-                hull = xy[order]
-                edges = np.roll(hull, -1, axis=0) - hull
-                turns = [edges[i, 0] * edges[(i + 1) % 4, 1] - edges[i, 1] * edges[(i + 1) % 4, 0] for i in range(4)]
-                valid = all(t > 1e-6 for t in turns)
-            if not valid:
-                # Anchors are fixed geometry. Missing/partial reports do not move
-                # the room; only a new valid layout can replace it.
+            if (msg.header.frame_id != self.frame or not self.fresh(stamp, rospy.get_time())
+                    or (self.layout_stamp is not None and stamp <= self.layout_stamp)):
                 return
-            if self.layout_stamp is not None and stamp <= self.layout_stamp:
+            positions = [(p.x, p.y, p.z) for p in msg.positions]
+            if anchor_outline(msg.anchor_ids, positions) is None:
                 return
             layout = sorted(zip(msg.anchor_ids, positions))
             if self.layout is not None and (
                     [a[0] for a in layout] != [a[0] for a in self.layout]
-                    or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout], atol=0.02, rtol=0)):
+                    or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout],
+                                       atol=self.layout_tolerance, rtol=0)):
                 # The EKF started in the old layout's frame.
                 self.layout_changed = True
                 self.generation += 1
@@ -156,18 +149,18 @@ class FusionLocalizationNode(object):
             range_stamp = self.range_stamp.to_sec() if self.range_stamp is not None else None
             range_fresh = (self.fresh(range_stamp, now) and self.range_received is not None
                            and 0 <= ready_at - self.range_received <= self.timeout)
-            odom_fresh = self.fresh(odom_stamp, now, ODOMETRY_TIMEOUT) and not self.ekf_reference_lost
+            odom_fresh = self.fresh(odom_stamp, now, self.odometry_timeout) and not self.ekf_reference_lost
             # Preserve the controller's tilt limit without recomputing height from raw ToF.
             if odom_fresh:
                 q = self.ekf_odom.pose.pose.orientation
                 quaternion = (q.x, q.y, q.z, q.w)
                 norm_sq = sum(v*v for v in quaternion)
-                tilt_ok = 1. - 2. * (q.x*q.x + q.y*q.y) / norm_sq >= MIN_VERTICAL
+                tilt_ok = 1. - 2. * (q.x*q.x + q.y*q.y) / norm_sq >= self.min_vertical
             else:
                 tilt_ok = False
             state_available = range_fresh and self.range_valid and odom_fresh and tilt_ok
             local_ready = bool(state_available and self.ekf_ready
-                               and self.fresh(self.ekf_ready_at, now, .15))
+                               and self.fresh(self.ekf_ready_at, now, self.ekf_ready_timeout))
             ready = bool(local_ready and self.layout is not None and not self.layout_changed)
             reason = ('OK' if ready
                       else 'Clock changed; restart localization on the floor' if self.ekf_reference_lost
@@ -222,7 +215,7 @@ class FusionLocalizationNode(object):
             self.limited = target
         else:
             # Bound extrapolation when no estimate was published during a gap.
-            dt = min(ODOMETRY_TIMEOUT, stamp - self.limited_stamp)
+            dt = min(self.odometry_timeout, stamp - self.limited_stamp)
             self.limited += body_to_map[:2].dot([v.x, v.y, v.z]) * dt
             error = target - self.limited
             distance, step = np.linalg.norm(error), self.max_correction_speed * dt

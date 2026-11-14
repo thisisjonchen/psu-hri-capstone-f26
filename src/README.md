@@ -203,6 +203,8 @@ NOTE: IF CAMERA IS CALIBRATED, DO NOT TOUCH THE FOCUS RING.
 ## UWB + ToF Localization
 
 Start each drone facing the top of the map (+Y) before starting its flight controller.
+Set fusion freshness and anchor limits in `params/fusion_localization.yaml` and
+UWB reader settings in `params/uwb_localization.yaml`.
 
 When calibrating:
 - 4D12: Tag 6

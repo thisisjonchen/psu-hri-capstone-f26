@@ -33,13 +33,18 @@ std::vector<double> parameter(ros::NodeHandle& node,const std::string& key,std::
     if (result.size()!=count) throw std::invalid_argument("Invalid calibration size: "+key);
     return result;
 }
-pals::Profile profile(ros::NodeHandle& node) {
-    pals::Profile p;
+pals::Profile load_profile(ros::NodeHandle& node) {
+    pals::Profile p{};
     p.acceleration_scale=parameter(node,"acceleration_m_s2_per_count",1)[0];
     p.gyro_scale=parameter(node,"gyro_rad_s_per_count",1)[0];
     p.delay=parameter(node,"fusion_delay_s",1)[0];
     node.param("calibration/camera_delay_s",p.camera_delay,0.);
     p.uwb_delay=parameter(node,"uwb_delay_s",1)[0];
+    node.getParam("calibration/initial_rest_s",p.initial_rest_seconds);
+    node.getParam("calibration/initial_uwb_fixes",p.initial_uwb_fixes);
+    node.getParam("calibration/camera_min_height_m",p.camera_min_height);
+    node.getParam("calibration/camera_max_floor_distance_m",p.camera_max_floor_distance);
+    node.getParam("calibration/camera_pixel_stddev",p.camera_pixel_stddev);
     p.acceleration_offset=pals::Vec(parameter(node,"acceleration_offset_msp_counts",3).data());
     p.imu_rotation=pals::Rotation(parameter(node,"rotation_body_msp",9).data());
     p.range_offset=pals::Vec(parameter(node,"range_offset_body",3).data());
@@ -47,13 +52,14 @@ pals::Profile profile(ros::NodeHandle& node) {
     p.camera_offset=pals::Vec(parameter(node,"camera_offset_body",3).data());
     p.uwb_offset=pals::Vec(parameter(node,"uwb_offset_body",3).data());
     p.camera_rotation=pals::Rotation(parameter(node,"rotation_body_camera",9).data());
-    p.validate(); return p;
+    return p;
 }
 struct Event {
     enum Kind { IMU, RANGE, IMAGE, CAMERA, MODE, UWB } kind;
     double received;
     std::int64_t stamp=0;
     pals::Imu imu;
+    pals::Vec force, rate;
     sensor_msgs::Range::ConstPtr range;
     sensor_msgs::CompressedImage::ConstPtr image;
     sensor_msgs::CameraInfo::ConstPtr camera;
@@ -63,7 +69,7 @@ struct Event {
 
 class Node {
 public:
-    Node():private_("~"),profile_(profile(private_)),filter_(profile_) {
+    Node():private_("~"),profile_(load_profile(private_)),filter_(profile_) {
         private_.param<std::string>("body_frame",body_frame_,"pidrone_body");
         private_.param<std::string>("frame_id",frame_,"map");
         cv::setNumThreads(1);
@@ -187,7 +193,7 @@ private:
         last_imu_=stamp;
         history_.push_back({stamp,sample,rate});
         while (!history_.empty() && (stamp-history_.front().stamp)/1.e9>1.) history_.pop_front();
-        Event e; e.kind=Event::IMU; e.stamp=stamp; e.imu=sample; enqueue(e);
+        Event e; e.kind=Event::IMU; e.stamp=stamp; e.imu=sample; e.force=force; e.rate=rate; enqueue(e);
         try { publish(s,stamp); }
         catch (const std::exception& error) { fail(error.what()); publish_ready(false,error.what(),s); }
     }
@@ -345,7 +351,7 @@ private:
             try {
                 if (invalidate_uwb_.exchange(false)) filter_.invalidate_uwb_reference();
                 if (e.kind==Event::IMU) {
-                    filter_.imu(e.stamp,e.imu,e.received);
+                    filter_.imu(e.stamp,e.imu,e.received,e.force,e.rate);
                 } else if (e.kind==Event::RANGE) {
                     const auto& m=*e.range; filter_.range(m.header.stamp.toNSec(),m.range,m.min_range,m.max_range);
                 } else if (e.kind==Event::IMAGE) filter_.image(e.image->header.stamp.toNSec(),e.image->data);

@@ -393,7 +393,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertTrue(controller.position_control)
         self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
 
-    def test_room_commands_reject_wrong_frame_outside_outline_and_disarmed_mode(self):
+    def test_room_commands_reject_wrong_frame_outside_or_invalid_outline_and_disarmed_mode(self):
         controller = self.controller()
         target = NS(header=NS(frame_id='odom', stamp=Stamp(self.ros_now)), pose=NS(position=NS(x=2, y=2)))
         controller.room_target_callback(target)
@@ -402,7 +402,13 @@ class FusionNodeTest(unittest.TestCase):
         target.pose.position.x = 20
         controller.room_target_callback(target)
         self.assertIsNone(controller.room_target)
-        target.pose.position.x = 2
+        target.pose.position.x, target.pose.position.y = .5, 3
+        anchors = self.report_anchors()
+        anchors.positions[1] = vector(.5, 2., 2.)  # One anchor lies inside the triangle.
+        controller.room_anchors_callback(anchors)
+        controller.room_target_callback(target)
+        self.assertIsNone(controller.room_target)
+        controller.room_anchors_callback(self.report_anchors())
         controller.current_mode = 'DISARMED'
         controller.room_target_callback(target)
         self.assertIsNone(controller.room_target)

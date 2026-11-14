@@ -15,7 +15,7 @@ from flight.velocity_controller import VelocityController
 from geometry_msgs.msg import Point, Vector3, Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import AnchorLayout, FlightReadiness, Mode, RC, State
 from std_msgs.msg import Empty, Bool, UInt32, Float32
-from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
+from localization.fusion import anchor_outline, inside_outline, rotate, target_velocity
 from flight.distance_guard import DistanceGuard, fresh, uncertainty, automatic_coordination
 from localization import monotonic
 
@@ -64,6 +64,7 @@ class PIDController(object):
         self.hold_gain = settings['hold_gain']
         self.hold_speed_limit = settings['hold_speed_limit_m_s']
         self.position_release_distance = settings['release_distance_m']
+        self.room_prediction_timeout = settings['room_prediction_timeout_s']
 
         self.desired_yaw_velocity = 0
 
@@ -237,7 +238,7 @@ class PIDController(object):
         return None
 
     def room_ready(self, allow_prediction=True):
-        timeout = XY_PREDICTION_TIMEOUT if allow_prediction else self.measurement_timeout
+        timeout = self.room_prediction_timeout if allow_prediction else self.measurement_timeout
         return (self.local_ready() and self.room_estimate_ready
                 and self.room_pose is not None
                 and 0 <= rospy.get_time() - self.room_pose.header.stamp.to_sec() <= timeout)
@@ -286,18 +287,13 @@ class PIDController(object):
             return
         anchors = self.room_anchors
         if (anchors is None or anchors.header.frame_id != msg.header.frame_id
-                or not 0 <= rospy.get_time() - anchors.header.stamp.to_sec() <= 0.5
-                or len(anchors.positions) != 4 or len(set(anchors.anchor_ids)) != 4):
+                or not 0 <= rospy.get_time() - anchors.header.stamp.to_sec() <= 0.5):
             return
-        xy = np.array([(p.x, p.y) for p in anchors.positions])
-        if not np.all(np.isfinite(xy)):
+        outline = anchor_outline(anchors.anchor_ids, [(p.x, p.y, p.z) for p in anchors.positions])
+        if outline is None:
             return
-        center = xy.mean(axis=0)
-        hull = xy[np.argsort(np.arctan2(xy[:, 1] - center[1], xy[:, 0] - center[0]))]
         point = np.array([msg.pose.position.x, msg.pose.position.y])
-        edges = np.roll(hull, -1, axis=0) - hull
-        offsets = point - hull
-        if np.any(edges[:, 0] * offsets[:, 1] - edges[:, 1] * offsets[:, 0] < -1e-6):
+        if not inside_outline(point, outline):
             rospy.logwarn('Ignoring room target outside anchor outline')
             return
         self.room_target = point

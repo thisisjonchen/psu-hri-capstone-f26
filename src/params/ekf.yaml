@@ -19,3 +19,12 @@ fusion_delay_s: 0.35
 camera_delay_s: 0.04
 # Assumed UWB fix delay for initialization and horizontal correction.
 uwb_delay_s: 0.3
+
+# Stationary startup requirements for the live EKF.
+initial_rest_s: 8.0
+initial_uwb_fixes: 40
+
+# Camera floor geometry (m) and image measurement noise (pixels).
+camera_min_height_m: 0.1
+camera_max_floor_distance_m: 1.5
+camera_pixel_stddev: 1.5

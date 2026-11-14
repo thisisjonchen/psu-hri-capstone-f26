@@ -92,8 +92,8 @@ class LocatorTest(unittest.TestCase):
         self.sleep = pacing.start()
         self.addCleanup(pacing.stop)
 
-    def start_locator(self, fake):
-        loc = UWBLocator(port='fake')
+    def start_locator(self, fake, **settings):
+        loc = UWBLocator(port='fake', **settings)
         # Skip real hardware boot delays, retaining real reader threads and serial errors.
         loc._stop.wait = lambda timeout: loc._stop.is_set()
         self.addCleanup(loc.stop)
@@ -148,9 +148,8 @@ class LocatorTest(unittest.TestCase):
         for lines in ([], [LEC.encode('ascii')]):
             with self.subTest(had_position=bool(lines)):
                 fake = FakeSerial(lines)
-                with mock.patch('localization.uwb_locator.SERIAL_SILENCE_TIMEOUT', 0.05):
-                    loc = self.start_locator(fake)
-                    self.assertTrue(wait_until(lambda: not loc.running))
+                loc = self.start_locator(fake, serial_silence_timeout=0.05)
+                self.assertTrue(wait_until(lambda: not loc.running))
                 self.assertIn('No UWB serial data', loc.error)
                 self.assertFalse(fake.is_open)
                 self.assertIsNone(loc.position)

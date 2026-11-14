@@ -38,23 +38,3 @@ def quaternion_multiply(a, b):
                      aw*by - ax*bz + ay*bw + az*bx,
                      aw*bz + ax*by - ay*bx + az*bw,
                      aw*bw - ax*bx - ay*by - az*bz])
-
-
-def quaternion_exp(rotation_vector):
-    """Convert a rotation vector in radians to a unit quaternion."""
-    x, y, z = map(float, rotation_vector)
-    angle = math.sqrt(x*x + y*y + z*z)
-    scale = .5 - angle*angle/48 if angle < 1e-6 else math.sin(angle/2)/angle
-    return np.array([scale*x, scale*y, scale*z, math.cos(angle/2)])
-
-
-def right_jacobian(rotation_vector):
-    """Derivative of Log(Exp(-v) Exp(v + delta)) at delta=0."""
-    angle = np.linalg.norm(rotation_vector)
-    matrix = skew(rotation_vector)
-    if angle < 1e-4:
-        a, b = .5 - angle*angle/24, 1/6.0 - angle*angle/120
-    else:
-        a = (1 - math.cos(angle)) / angle**2
-        b = (angle - math.sin(angle)) / angle**3
-    return np.eye(3) - a*matrix + b*matrix.dot(matrix)

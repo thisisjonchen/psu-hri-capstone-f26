@@ -186,17 +186,30 @@ class NodeTest(unittest.TestCase):
 
     def test_ros_clock_reset_invalidates_cached_sensors(self):
         self.sensors()
+        self.node.locator.anchor_sample = AnchorSample((Anchor('0CA8', 0, 6, 2.25, 6.5),), self.now)
+        xy = self.messages['pidrone/localization/uwb']
+        anchors = self.messages['pidrone/localization/anchors']
         self.node.step()
+        self.assertEqual(len(xy), 1)
+        self.assertEqual(anchors[-1].anchor_ids, ['0CA8'])
         self.ros_now = 50
         self.node.step()
+        self.assertEqual(len(xy), 1, 'do not re-stamp the cached horizontal fix')
+        self.assertEqual(anchors[-1].anchor_ids, [], 'withdraw pre-reset anchors')
         self.assertEqual(len(self.poses), 1)
         self.assertNotEqual(self.health.level, 0)
         self.assertIsNone(self.node.combiner.range)
-        self.sensors()
         self.now += 0.01
         self.ros_now += 0.01
         self.node.step()
+        self.assertEqual(len(xy), 1)
+        self.assertEqual(len(anchors), 2)
+        self.sensors()
+        self.node.locator.anchor_sample = self.node.locator.anchor_sample._replace(timestamp=self.now)
+        self.node.step()
         self.assertEqual(len(self.poses), 2)
+        self.assertAlmostEqual(xy[-1].header.stamp.to_sec(), self.ros_now)
+        self.assertAlmostEqual(anchors[-1].header.stamp.to_sec(), self.ros_now)
 
     def test_anchor_reports_publish_without_tof_and_expire_without_renewing_old_stamps(self):
         self.node.locator.anchor_sample = AnchorSample((Anchor('0CA8', 0, 6, 2.25, 6.5),), 9.9)
