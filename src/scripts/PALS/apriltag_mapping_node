@@ -120,8 +120,6 @@ class AprilTagMappingNode(object):
 
     def camera_callback(self, msg):
         with self.lock:
-            # Do not use the older src/params/picamera.yaml blindly: its
-            # 320x240 resolution differs from raspicam_node.launch's 240x320.
             if (msg.width <= 0 or msg.height <= 0 or len(msg.K) != 9 or
                     msg.distortion_model not in ('plumb_bob', 'rational_polynomial', 'equidistant') or
                     (msg.distortion_model == 'equidistant' and len(msg.D) != 4) or
