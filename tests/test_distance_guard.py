@@ -9,11 +9,11 @@ from types import SimpleNamespace as NS
 
 import numpy as np
 
-from localization import test_fusion as helpers
-from localization.distance_guard import DistanceGuard, automatic_coordination
+import test_fusion as helpers
+from flight.distance_guard import DistanceGuard, automatic_coordination
 from localization.fusion import target_velocity
-from localization.test_ros_node import Stamp
-from localization.test_velocity_controller import SimulatedAxis
+from test_ros_node import Stamp
+from test_velocity_controller import SimulatedAxis
 
 
 class DistanceControlTest(unittest.TestCase):
@@ -411,7 +411,7 @@ class DistancePIDTest(unittest.TestCase):
 
 class PeerRelayTest(unittest.TestCase):
     def setUp(self):
-        path = Path(__file__).resolve().parents[3] / 'tools' / 'peer_relay.py'
+        path = Path(__file__).resolve().parents[1] / 'tools' / 'peer_relay.py'
         self.module = runpy.run_path(str(path))
 
     def snapshot(self):

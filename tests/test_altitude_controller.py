@@ -13,7 +13,7 @@ import math
 import random
 import unittest
 
-from altitude_controller import AltitudeController
+from flight.altitude_controller import AltitudeController
 
 G = 9.80665
 RATE = 60.0

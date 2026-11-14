@@ -2,7 +2,8 @@
 *.py text eol=lf
 *.sh text eol=lf
 *.screenrc text eol=lf
-src/scripts/PALS/*_node text eol=lf
-src/scripts/PALS/apriltag_detection_drone text eol=lf
+src/localization/*_node
+src/perception/*_node text eol=lf
+src/perception/apriltag_detection_drone text eol=lf
 # Unified diff context prefixes are not source indentation or trailing whitespace.
 *.patch whitespace=-blank-at-eol,-space-before-tab

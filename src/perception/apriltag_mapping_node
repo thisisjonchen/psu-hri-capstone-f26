@@ -16,7 +16,7 @@ from pidrone_pkg.msg import TagDetection, TagMap
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, UInt32
 
-from localization.apriltag_geometry import camera_rotation, estimate_tag_center, project_floor_tag
+from perception.apriltag_geometry import camera_rotation, estimate_tag_center, project_floor_tag
 
 
 class AprilTagMappingNode(object):

@@ -21,7 +21,9 @@ Assuming that the base environment is already set up on the DD24 by following th
 5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
 6. Read all instructions carefully and be ready to disarm at all times.
 
-Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
+Add flight routines to `routines/` to make them available in the dashboard.
+After updating to this layout, run `catkin_make` on each drone and use the
+dashboard from the same revision before restarting the nodes.
 
 **Separation guard** defaults off onboard and in the dashboard, bypassing spacing
 corrections and peer checks for both drones. Confirm
@@ -212,7 +214,7 @@ When calibrating:
    screen -ls
    screen -S <session-id> -X quit
    cd ~/catkin_ws/src/pidrone_pkg
-   screen -c pi.screenrc
+   screen -c boot/pi.screenrc
    ```
 
 ## To Install Python Dependencies on Drone

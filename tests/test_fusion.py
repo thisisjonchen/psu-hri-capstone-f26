@@ -9,8 +9,8 @@ from unittest import mock
 
 import numpy as np
 
-from localization import test_ros_node as ros_doubles
-from localization.test_ros_node import Pose, Stamp, Layout
+import test_ros_node as ros_doubles
+from test_ros_node import Pose, Stamp, Layout
 
 
 def quaternion(roll=0, pitch=0, yaw=0):
@@ -74,7 +74,7 @@ class FusionNodeTest(unittest.TestCase):
         sys.modules['geometry_msgs.msg'].TwistStamped = NS
         sys.modules['geometry_msgs.msg'].PoseStamped = NS
         sys.modules['geometry_msgs.msg'].Pose = sys.modules['geometry_msgs.msg'].Twist = NS
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'fusion_localization_node')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'fusion_localization_node')
         self.ros.Subscriber.reset_mock()
         self.node = runpy.run_path(script)['FusionLocalizationNode']()
         self.node.step.__globals__['monotonic'] = lambda: self.now
@@ -340,7 +340,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertTrue(self.messages['pidrone/localization/ready'][-1].data)
 
     def controller(self):
-        script = os.path.join(os.path.dirname(__file__), '..', 'pid_controller.py')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'flight', 'pid_controller.py')
         controller = runpy.run_path(script)['PIDController']()
         controller.position_control_pub = NS(publish=mock.Mock())
         controller.local_ready_callback(NS(data=True))

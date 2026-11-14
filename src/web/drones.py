@@ -16,7 +16,7 @@ KEY = Path.home() / '.ssh' / 'pals_ed25519'
 CONTAINER = 'pidrone_pkg'
 SESSION = 'pidrone'
 PACKAGE = '~/catkin_ws/src/pidrone_pkg'
-ROUTINES = PACKAGE + '/scripts/PALS/routines'
+ROUTINES = PACKAGE + '/routines'
 START = 'bash ' + PACKAGE + '/boot/pals-start.sh'
 SCRIPT = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_-]*\.py$')
 # Arguments are typed into a screen window, so exclude quotes and screen/shell escapes.
@@ -226,7 +226,7 @@ def list_scripts(drone):
 
 
 def routine_running(drone):
-    status, _ = run(drone, 'docker exec %s pgrep -f "PALS/routines/[A-Za-z0-9_-]+[.]py"' % CONTAINER)
+    status, _ = run(drone, 'docker exec %s pgrep -f "(^|[ /])routines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)"' % CONTAINER)
     return status == 0
 
 

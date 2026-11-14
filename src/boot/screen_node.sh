@@ -10,7 +10,7 @@ pidrone_node_check() {
         [/rosbridge_websocket]='6 rosbridge' [/web_video_server]='7 web_vid_serv'
         [/apriltag_detection]='8 AprilTags' [/uwb_localization]='9 UWB'
         [/apriltag_mapping]='12 TagMap')
-    python "$package_dir/scripts/wait_for_ros_master.py" || return
+    python "$package_dir/boot/wait_for_ros_master.py" || return
     echo 'Checking onboard nodes (up to 60 s)...'
     pending=("${!windows[@]}")
     for _ in $(seq 20); do
@@ -37,7 +37,8 @@ pidrone_screen_node() {
     local node=${1:-} package_dir status
     local -a command
     package_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || return
-    cd -- "$package_dir/scripts" || return
+    cd -- "$package_dir" || return
+    export PYTHONPATH="$package_dir${PYTHONPATH:+:$PYTHONPATH}"
     # Serial ports resolved by boot/pals-start.sh when nodes start.
     if [[ -r "$HOME/catkin_ws/pals.env" ]]; then
         set -a
@@ -54,9 +55,9 @@ pidrone_screen_node() {
 
     case "$node" in
         core) command=(roscore) ;;
-        fc) command=(python -u flight_controller_node.py) ;;
+        fc) command=(python -u flight/flight_controller_node.py) ;;
         shell) return 0 ;;
-        pid) command=(python -u pid_controller.py) ;;
+        pid) command=(python -u flight/pid_controller.py) ;;
         se) command=(roslaunch --wait "$package_dir/launch/fusion_localization.launch") ;;
         vision) command=(roslaunch --wait "$package_dir/launch/raspicam_node.launch") ;;
         tof)
@@ -87,7 +88,7 @@ pidrone_screen_node() {
         return 127
     fi
     if [[ "$node" != core ]]; then
-        python "$package_dir/scripts/wait_for_ros_master.py" || return
+        python "$package_dir/boot/wait_for_ros_master.py" || return
     fi
 
     printf 'Starting:'

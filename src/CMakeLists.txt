@@ -168,12 +168,12 @@ add_subdirectory(native)
 
 ## Mark executable scripts (Python etc.) for installation
 catkin_install_python(PROGRAMS
-  scripts/PALS/apriltag_detection_drone
-  scripts/PALS/apriltag_mapping_node
-  scripts/PALS/uwb_localization_node
-  scripts/PALS/fusion_localization_node
-  scripts/tof_node.py
-  scripts/rosbridge_websocket.py
+  perception/apriltag_detection_drone
+  perception/apriltag_mapping_node
+  localization/uwb_localization_node
+  localization/fusion_localization_node
+  localization/tof_node.py
+  boot/rosbridge_websocket.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 install(DIRECTORY launch params

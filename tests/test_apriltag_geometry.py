@@ -10,9 +10,9 @@ from unittest import mock
 
 import numpy as np
 
-from localization.apriltag_geometry import camera_rotation, project_floor_tag, quaternion_matrix
-from localization.test_fusion import quaternion
-from localization.test_ros_node import Pose, Stamp
+from perception.apriltag_geometry import camera_rotation, project_floor_tag, quaternion_matrix
+from test_fusion import quaternion
+from test_ros_node import Pose, Stamp
 
 
 class AprilTagGeometryTests(unittest.TestCase):
@@ -75,7 +75,7 @@ class AprilTagMappingTests(unittest.TestCase):
         patch = mock.patch.dict(sys.modules, modules)
         patch.start()
         self.addCleanup(patch.stop)
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'apriltag_mapping_node')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'perception', 'apriltag_mapping_node')
         self.node = runpy.run_path(script)['AprilTagMappingNode']()
         self.node.generation_callback(NS(data=1))
         self.node.ready_callback(NS(data=True))

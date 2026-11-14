@@ -101,7 +101,7 @@ align_heading() {
     docker exec "$container" bash -ic '
         for _ in $(seq 40); do pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null || break; sleep 0.5; done
         pgrep -f "(fusion|ekf)_localization_nod[e]|roslaunch .*fusion_localization.launc[h]" >/dev/null && { echo "Localization did not stop; check the SE window."; exit 1; }
-        screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh se^M"' 2>/dev/null || return 1
+        screen -S pidrone -p SE -X stuff "^Ubash $HOME/catkin_ws/src/pidrone_pkg/boot/screen_node.sh se^M"' 2>/dev/null || return 1
     wait_for_localization
 }
 
@@ -130,7 +130,7 @@ case "${1:-}" in
         session_running || { echo "Nodes are not started."; exit 1; }
         warm_reboot || exit 1
         docker exec "$container" screen -S "$session" -p FC -X stuff \
-            '^Ubash /home/duckie/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh fc^M' || exit 1
+            '^Ubash /home/duckie/catkin_ws/src/pidrone_pkg/boot/screen_node.sh fc^M' || exit 1
         check_gyro || exit 1
         align_heading || exit 1
         echo "Warm reboot complete. $result"
@@ -170,7 +170,7 @@ else
     # Interactive bash loads the container's ROS environment and enters pidrone_pkg.
     # screen scans the descriptor range when creating windows. Docker's million-
     # descriptor default delays every window; children inherit this soft limit.
-    docker exec -d "$container" bash -ic "ulimit -Sn 1024 && exec screen -dmS $session -c pi.screenrc" ||
+    docker exec -d "$container" bash -ic "ulimit -Sn 1024 && exec screen -dmS $session -c boot/pi.screenrc" ||
         { echo "Could not launch the screen session." >&2; exit 1; }
     for _ in $(seq 20); do
         session_running && break

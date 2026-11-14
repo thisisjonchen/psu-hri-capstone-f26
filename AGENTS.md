@@ -5,16 +5,17 @@
 PALS is a cooperative payload-transport project using two Duckiedrone DD24 drones.
 The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 
-- `src/scripts/PALS/`: shared drone control, routines, and perception/localization nodes.
-- `src/scripts/localization/`: UWB serial access, sensor validation, fusion, and tests.
-- `src/scripts/flight_controller_node.py` and `h2rMultiWii.py`: flight-controller communication.
-- `src/scripts/pid_controller.py`: control loop. Throttle comes from `altitude_controller.py`
-  and roll/pitch from `velocity_controller.py`; `pid_class.py` serves the dashboard position mode.
+- `src/flight/`: flight controller communication, PID, and shared drone control.
+- `src/localization/`: UWB, ToF, and fusion nodes with their sensor and geometry helpers.
+- `src/perception/`: AprilTag detection and mapping.
+- `src/routines/`: dashboard-selectable flight sequences.
+- `src/boot/`: startup, screen configuration, and ROS bridge.
 - `src/native/ekf_node.cpp` and `live_ekf.cpp`: live EKF, camera tracking and ToF corrections.
-- `tools/replay_ekf.py` and `src/scripts/localization/ekf_*.py`: offline replay using shared native math.
+- `tools/replay_ekf.py` and `src/localization/ekf_*.py`: offline replay using shared native math.
 - `tools/flow_capture.py`: record hand-carried or flight data over SSH and analyze it.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
 - `src/web/`: dashboard, laptop calibration service, and web tests.
+- `tests/`: hardware-free tests for the onboard code.
 - Bundled libraries contain third-party code; avoid unrelated edits.
 
 Read the relevant README and implementation before changing behavior. Documentation
@@ -93,7 +94,7 @@ Available hardware-free checks, from the repository root with dependencies insta
 (use `.venv/bin/python` instead of `python3` when using the existing virtual environment):
 
 ```sh
-PYTHONPATH=src/scripts python3 -m unittest discover -s src/scripts/localization -p 'test_*.py'
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s src/web/tests -p 'test_*.py'
 node --test src/web/tests/dashboard.test.js
 git diff --check

@@ -47,7 +47,7 @@ def check_worktree(require_clean=True):
         raise RuntimeError('Could not check the drone container.')
     if container.stdout.strip() == 'false':
         return False
-    routine = command('docker', 'exec', 'pidrone_pkg', 'pgrep', '-f', 'PALS/routines/[A-Za-z0-9_-]+[.]py')
+    routine = command('docker', 'exec', 'pidrone_pkg', 'pgrep', '-f', '(^|[ /])routines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)')
     if routine.returncode != 1:
         raise RuntimeError('Stop the running routine first.' if routine.returncode == 0
                            else 'Could not check onboard routines.')

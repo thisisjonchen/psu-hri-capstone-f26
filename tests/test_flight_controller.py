@@ -11,8 +11,8 @@ from types import ModuleType, SimpleNamespace as NS
 from threading import Lock
 from unittest import mock
 
-from h2rMultiWii import MultiWii
-from localization import test_fusion as fusion_helpers
+from flight.h2rMultiWii import MultiWii
+import test_fusion as fusion_helpers
 
 
 class FlightControllerLoopTest(unittest.TestCase):
@@ -93,9 +93,9 @@ class FlightControllerLoopTest(unittest.TestCase):
                 yield code, self.board.receiveDataPacket()
         self.board.receive_available = available
         # Use the real command batching and FC main loop.
-        root = os.path.dirname(os.path.dirname(__file__))
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))
         rospkg, yaml = ModuleType('rospkg'), ModuleType('yaml')
-        rospkg.RosPack = lambda: NS(get_path=lambda name: os.path.dirname(root))
+        rospkg.RosPack = lambda: NS(get_path=lambda name: root)
         yaml.load = lambda stream: dict(az=2048., ax=0., ay=0.)
         patches = mock.patch.dict(sys.modules, {'rospkg': rospkg, 'yaml': yaml})
         patches.start()
@@ -108,7 +108,7 @@ class FlightControllerLoopTest(unittest.TestCase):
             orientation=NS(x=0., y=0., z=0., w=1.),
             angular_velocity=fusion_helpers.vector(), linear_acceleration=fusion_helpers.vector())
         with contextlib.redirect_stdout(io.StringIO()):
-            namespace = runpy.run_path(os.path.join(root, 'flight_controller_node.py'))
+            namespace = runpy.run_path(os.path.join(root, 'flight', 'flight_controller_node.py'))
         self.main = namespace['main']
         self.controller_class = namespace['FlightController']
         self.controller_class.preflight_callback.__globals__['monotonic'] = lambda: self.env.now

@@ -1,4 +1,4 @@
-# Horizontal velocity -> lean angle (scripts/velocity_controller.py), PX4/ArduPilot layout.
+# Horizontal velocity -> lean angle (flight/velocity_controller.py), PX4/ArduPilot layout.
 # Loaded by pid_controller.py at startup when /pidrone/velocity/controller is absent.
 # velocity error (m/s) -> P + I -> acceleration
 # -> lean = atan(acceleration / g), capped -> Betaflight angle-mode stick.

@@ -10,16 +10,16 @@ import math
 import threading
 import yaml
 import numpy as np
-from altitude_controller import AltitudeController
-from pid_class import PIDaxis
-from velocity_controller import VelocityController
+from flight.altitude_controller import AltitudeController
+from flight.pid_class import PIDaxis
+from flight.velocity_controller import VelocityController
 from geometry_msgs.msg import Pose, Twist, PoseStamped, PoseWithCovarianceStamped
 from pidrone_pkg.msg import AnchorLayout, FlightReadiness, Mode, RC, State
 from std_msgs.msg import Empty, Bool, UInt32, Float32
 from localization.fusion import rotate, target_velocity, XY_PREDICTION_TIMEOUT
-from localization.distance_guard import DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, automatic_coordination
+from flight.distance_guard import DistanceGuard, fresh, uncertainty, STATE_TIMEOUT, automatic_coordination
 from localization import monotonic
-from three_dim_vec import Position, Velocity, Error, RPY
+from flight.three_dim_vec import Position, Velocity, Error, RPY
 
 
 def synchronized(method):

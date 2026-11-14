@@ -11,17 +11,17 @@ import numpy as np
 import tf
 
 
-import command_values as cmds
+from flight import command_values as cmds
 import json
 from sensor_msgs.msg import Imu
-from h2rMultiWii import MultiWii
+from flight.h2rMultiWii import MultiWii
 from serial import SerialException
 from std_msgs.msg import Header, Empty, Bool, String
 from pidrone_pkg.msg import Battery, Mode, RC, State, FlightReadiness, MspImu, IntegratedImu
 from sensor_msgs.msg import Range
 from localization import monotonic
-from localization.distance_guard import fresh, STATE_TIMEOUT
-from localization.imu_clock import ImuClock
+from flight.distance_guard import fresh, STATE_TIMEOUT
+from flight.imu_clock import ImuClock
 import os
 
 

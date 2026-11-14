@@ -8,7 +8,7 @@ import sys
 import rospy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from drone_controller import Drone
+from flight.drone_controller import Drone
 
 
 ALTITUDES = (0.25, 0.50, 0.25)

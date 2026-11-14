@@ -85,7 +85,7 @@ run echo "export LD_LIBRARY_PATH=/opt/vc/lib/:/home/$USER/raspicam_node_ws/devel
 
 run echo "export PYTHONPATH=\$PYTHONPATH:/home/$USER/raspicam_node_ws/devel/python2.7/dist-packages" >> $HOME/.bashrc
 
-run echo "export PYTHONPATH=\$PYTHONPATH:/home/$USER/catkin_ws/src/pidrone_pkg/scripts" >> $HOME/.bashrc
+run echo "export PYTHONPATH=\$PYTHONPATH:/home/$USER/catkin_ws/src/pidrone_pkg" >> $HOME/.bashrc
 
 
 RUN echo "export ROS_MASTER_URI=http://$hostname:11311" >> $HOME/.bashrc

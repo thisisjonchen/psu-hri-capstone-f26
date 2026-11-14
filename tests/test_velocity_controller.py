@@ -10,7 +10,7 @@ import random
 import unittest
 from collections import deque
 
-from velocity_controller import VelocityController
+from flight.velocity_controller import VelocityController
 
 G = 9.80665
 RATE = 60.0

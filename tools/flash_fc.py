@@ -174,7 +174,7 @@ def stop_fc():
     require(mode.returncode == 0 and re.search(r'^mode: [\"\']?DISARMED[\"\']?\s*$', mode.stdout, re.M),
             'The running FC node must report DISARMED before it can be stopped.')
     require(run(['docker', 'exec', 'pidrone_pkg', 'pgrep', '-f',
-                 'PALS/routines/[A-Za-z0-9_-]+[.]py']).returncode == 1,
+                 '(^|[ /])routines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)']).returncode == 1,
             'Stop the running routine before flashing.')
     result = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'FC',
                   '-X', 'stuff', '\x03'])
@@ -296,7 +296,7 @@ def worker(folder, user_home):
         env.write_text('\n'.join(lines + ['PALS_FC_PORT=' + str(port.resolve())]) + '\n')
         owner = user_home.stat()
         os.chown(str(env), owner.st_uid, owner.st_gid)
-        command = '^Ubash $HOME/catkin_ws/src/pidrone_pkg/scripts/screen_node.sh fc^M'
+        command = '^Ubash $HOME/catkin_ws/src/pidrone_pkg/boot/screen_node.sh fc^M'
         started = run(['docker', 'exec', 'pidrone_pkg', 'screen', '-S', 'pidrone', '-p', 'FC',
                        '-X', 'stuff', command])
         require(started.returncode == 0, 'Firmware verified, but the FC window could not be restarted.')

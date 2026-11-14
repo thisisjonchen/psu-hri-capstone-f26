@@ -11,9 +11,9 @@ import unittest
 from types import ModuleType, SimpleNamespace as NS
 from unittest import mock
 
-from localization import test_fusion as fusion_helpers
-from localization.test_fusion import quaternion, twist
-from localization.test_ros_node import Pose, Stamp
+import test_fusion as fusion_helpers
+from test_fusion import quaternion, twist
+from test_ros_node import Pose, Stamp
 
 
 class RosConsoleHandler(logging.StreamHandler):
@@ -43,7 +43,7 @@ class RoutineControlTest(unittest.TestCase):
             'rosgraph.roslogging': roslogging})
         patch.start()
         self.addCleanup(patch.stop)
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'drone_controller.py')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'flight', 'drone_controller.py')
         cls = runpy.run_path(script)['Drone']
         self.globals = cls.__init__.__globals__
         self.globals['time'] = NS(time=lambda: self.fusion.now, sleep=lambda _: None)
@@ -544,14 +544,14 @@ class RoutineControlTest(unittest.TestCase):
                 self.assertEqual(controller.desired_position.z, controller.takeoff_height)
 
     def test_prototype_moves_after_timed_takeoff_and_lands_on_completion_or_failure(self):
-        module = ModuleType('drone_controller')
+        module = ModuleType('flight.drone_controller')
         module.Drone = mock.Mock()
         drone = module.Drone.return_value
         drone.mode = 'FLYING'
         drone.finish = type(self.drone).finish.__get__(drone)
         self.ros.init_node = mock.Mock()
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'prototype-1-forward.py')
-        with mock.patch.dict(sys.modules, {'drone_controller': module}), \
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'routines', 'prototype-1-forward.py')
+        with mock.patch.dict(sys.modules, {'flight.drone_controller': module}), \
                 mock.patch.object(sys, 'argv', [script, '--fly', '--distance', '.3']):
             main = runpy.run_path(script)['main']
             main()
@@ -568,7 +568,7 @@ class RoutineControlTest(unittest.TestCase):
             drone.land.assert_called_once_with(hold_xy=True, disarm_height=None)
 
     def test_hover_height_precedes_timed_hold_and_preserves_landing_on_failure(self):
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'hover_routine.py')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'routines', 'hover_routine.py')
         for height, failed in [(None, False), (.5, False), (.5, True)]:
             with self.subTest(height=height, failed=failed):
                 drone = mock.Mock(mode='FLYING', takeoff_height=.3)
@@ -579,7 +579,7 @@ class RoutineControlTest(unittest.TestCase):
                 if height is not None:
                     args += ['--height', str(height)]
                 self.ros.init_node = mock.Mock()
-                with mock.patch.dict(sys.modules, {'drone_controller': NS(Drone=lambda: drone)}), \
+                with mock.patch.dict(sys.modules, {'flight.drone_controller': NS(Drone=lambda: drone)}), \
                         mock.patch.object(sys, 'argv', args):
                     main = runpy.run_path(script)['main']
                     if failed:
@@ -596,12 +596,12 @@ class RoutineControlTest(unittest.TestCase):
                 self.assertEqual(drone.mock_calls, expected)
 
     def test_invalid_hover_height_is_rejected_before_initializing_flight(self):
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'routines', 'hover_routine.py')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'routines', 'hover_routine.py')
         drone = mock.Mock()
         self.ros.init_node = mock.Mock()
         for height in ('0', '-.1', 'nan', 'inf'):
             with self.subTest(height=height), \
-                    mock.patch.dict(sys.modules, {'drone_controller': NS(Drone=drone)}), \
+                    mock.patch.dict(sys.modules, {'flight.drone_controller': NS(Drone=drone)}), \
                     mock.patch.object(sys, 'argv', [script, '--fly', '--height', height]), \
                     contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as error:

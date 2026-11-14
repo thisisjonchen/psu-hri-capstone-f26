@@ -36,7 +36,7 @@ class ExecuteTest(unittest.TestCase):
         drones.execute('drone1', 'prototype-1-forward.py', '--fly --distance 0.25')
         self.assertEqual(self.commands[-1],
                          "docker exec pidrone_pkg screen -S pidrone -p routine -X stuff "
-                         "'^Upython -u ~/catkin_ws/src/pidrone_pkg/scripts/PALS/routines/prototype-1-forward.py --fly --distance 0.25^M'")
+                         "'^Upython -u ~/catkin_ws/src/pidrone_pkg/routines/prototype-1-forward.py --fly --distance 0.25^M'")
 
     def test_rejects_unsafe_or_unavailable_requests(self):
         for drone, script, args in [('drone3', 'hover_routine.py', ''),
@@ -97,7 +97,7 @@ class BranchTest(unittest.TestCase):
                 self.container_running = True
                 return subprocess.CompletedProcess(args, 0, '', '')
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'pgrep'):
-                code = self.routine_code if args[-1].startswith('PALS/routines/') else (
+                code = self.routine_code if 'routines/' in args[-1] else (
                     2 if self.nodes_running is None else 0 if self.nodes_running else 1)
                 return subprocess.CompletedProcess(args, code, '', '')
             if args[:4] == ('docker', 'exec', 'pidrone_pkg', 'timeout'):

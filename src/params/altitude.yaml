@@ -1,4 +1,4 @@
-# Altitude cascade in the PX4/ArduPilot layout (scripts/altitude_controller.py).
+# Altitude cascade in the PX4/ArduPilot layout (flight/altitude_controller.py).
 # Loaded by pid_controller.py at startup when /pidrone/altitude/controller is absent.
 # height error -> height_p -> climb-rate target -> PI -> acceleration -> thrust -> throttle
 # Near hover, 1 m/s^2 is about 35 us of throttle.

@@ -10,8 +10,8 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
-from localization.distance_guard import fresh, finite, uncertainty, STATE_TIMEOUT
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from flight.distance_guard import fresh, finite, uncertainty, STATE_TIMEOUT
 
 
 TOPICS = {

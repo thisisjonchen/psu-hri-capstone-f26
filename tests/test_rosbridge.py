@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 
 synchronize_replay = runpy.run_path(str(
-    Path(__file__).resolve().parents[2] / 'scripts' / 'rosbridge_websocket.py'
+    Path(__file__).resolve().parents[1] / 'src' / 'boot' / 'rosbridge_websocket.py'
 ))['synchronize_replay']
 
 

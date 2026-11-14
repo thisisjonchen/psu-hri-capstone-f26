@@ -8,7 +8,7 @@ from __future__ import division
 import cv2
 import numpy as np
 
-from localization.apriltag_geometry import undistort_pixels
+from perception.apriltag_geometry import undistort_pixels
 from localization.rotations import quaternion_matrix, skew
 from localization.ekf import _array
 from localization import ekf_native

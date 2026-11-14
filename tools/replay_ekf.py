@@ -22,7 +22,7 @@ import sys
 import numpy as np
 from rosbags.typesys import Stores, get_typestore, get_types_from_msg
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from localization.ekf import ErrorStateEKF, _array
 from localization.ekf_native import imu_means
 from localization.rotations import quaternion_matrix, quaternion_multiply

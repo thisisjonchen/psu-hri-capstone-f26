@@ -98,7 +98,7 @@ class NodeTest(unittest.TestCase):
         patched = mock.patch.dict(sys.modules, modules)
         patched.start()
         self.addCleanup(patched.stop)
-        script = os.path.join(os.path.dirname(__file__), '..', 'PALS', 'uwb_localization_node')
+        script = os.path.join(os.path.dirname(__file__), '..', 'src', 'localization', 'uwb_localization_node')
         node_globals = runpy.run_path(script)
         self.node_class = node_globals['UWBLocalizationNode']
         # Class methods retain the run_path globals dictionary.

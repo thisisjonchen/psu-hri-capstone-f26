@@ -132,7 +132,7 @@ def stop_all_nodes(port):
                 screen -S pidrone -p "$window" -X stuff '^C' >/dev/null 2>&1 || :
             done
             for _ in $(seq 40); do
-                pgrep -f '[r]oslaunch .*\.launch|[f]light_controller_node.py|[p]id_controller.py|[f]usion_localization_node|[e]kf_localization_node|[r]aspicam_node|[v]l53l1x_node|[t]of_node.py|[u]wb_localization_node|[w]eb_video_server|[a]priltag|PALS/[r]outines/' >/dev/null
+                pgrep -f '[r]oslaunch .*\.launch|[f]light_controller_node.py|[p]id_controller.py|[f]usion_localization_node|[e]kf_localization_node|[r]aspicam_node|[v]l53l1x_node|[t]of_node.py|[u]wb_localization_node|[w]eb_video_server|[a]priltag|(^|[ /])[r]outines/[A-Za-z0-9_-]+[.]py([[:space:]]|$)' >/dev/null
                 status=$?
                 [[ $status == 1 ]] && exit 0
                 [[ $status == 0 ]] || exit 1

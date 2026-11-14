@@ -12,7 +12,7 @@ import time
 import rospy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from drone_controller import Drone
+from flight.drone_controller import Drone
 
 
 LANDING_STEP_HEIGHT_M = 0.2032 # 8 inches
