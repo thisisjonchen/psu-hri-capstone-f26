@@ -9,10 +9,44 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import fc_maintenance
 import drones
 import drone_git
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
-import warm_reboot_fc
+
+SOURCE = Path(__file__).resolve().parents[3] / 'src'
+
+
+class FlashTest(unittest.TestCase):
+    def test_flash_streams_worker_output_and_downloads_backup(self):
+        with TemporaryDirectory() as directory, \
+                mock.patch.object(fc_maintenance, 'ROOT', Path(directory)), \
+                mock.patch('builtins.input', return_value='drone1'), \
+                mock.patch('builtins.print'), \
+                mock.patch.object(drones, 'connect') as connect:
+            client = connect.return_value
+            sftp = client.open_sftp.return_value.__enter__.return_value
+            sftp.normalize.return_value = '/home/duckie'
+            sftp.listdir.return_value = ['verification.json']
+            transport = client.get_transport.return_value
+            commands = []
+
+            def session():
+                context = mock.MagicMock()
+                channel = context.__enter__.return_value
+                channel.exec_command.side_effect = commands.append
+                channel.makefile.return_value = [b'Verified firmware\n']
+                channel.recv_exit_status.return_value = 0
+                return context
+
+            transport.open_session.side_effect = session
+            fc_maintenance.flash('drone1')
+            connect.assert_called_once_with('drone1')
+            client.close.assert_called_once()
+            self.assertTrue(any(call.args[1].endswith('.dfu') for call in sftp.put.call_args_list))
+            self.assertTrue(any('fc_maintenance.py flash --workdir ' in command for command in commands))
+            sftp.get.assert_called_once()
+            log, = Path(directory).glob('firmware_backups/drone1_*/session.log')
+            self.assertEqual(log.read_text(), 'Verified firmware\n')
 
 
 class ExecuteTest(unittest.TestCase):
@@ -382,20 +416,20 @@ class RestartTest(unittest.TestCase):
 
                 connection.write.side_effect = write
                 with mock.patch.dict(sys.modules, {'serial': serial}), \
-                        mock.patch.object(warm_reboot_fc, 'port_unused',
+                        mock.patch.object(fc_maintenance, 'port_unused',
                                           side_effect=RuntimeError('Serial port is still owned') if fault == 'owned' else None), \
-                        mock.patch.object(warm_reboot_fc, 'usb_device',
+                        mock.patch.object(fc_maintenance, 'usb_device',
                                           side_effect=lambda port: root if fault == 'wrong_usb' and connection.write.called else usb), \
-                        mock.patch.object(warm_reboot_fc, 'msp', side_effect=msp), \
-                        mock.patch.object(warm_reboot_fc, 'check_disarmed', side_effect=disarmed), \
-                        mock.patch.object(warm_reboot_fc, 'calibration_complete',
+                        mock.patch.object(fc_maintenance, 'msp', side_effect=msp), \
+                        mock.patch.object(fc_maintenance, 'check_disarmed', side_effect=disarmed), \
+                        mock.patch.object(fc_maintenance, 'calibration_complete',
                                           side_effect=[False] * 4 if fault == 'calibrating' else [False, True]) as calibrated, \
-                        mock.patch.object(warm_reboot_fc, 'wait_for', side_effect=wait):
+                        mock.patch.object(fc_maintenance, 'wait_for', side_effect=wait):
                     if error:
                         with self.assertRaisesRegex(RuntimeError, error):
-                            warm_reboot_fc.reboot_controller(port)
+                            fc_maintenance.reboot_controller(port)
                     else:
-                        warm_reboot_fc.reboot_controller(port)
+                        fc_maintenance.reboot_controller(port)
                         self.assertEqual(calibrated.call_count, 2)
                         self.assertEqual(len(checks), 4, 'retry only read-only verification after USB returns')
                 if fault in ('armed_before', 'owned'):
@@ -407,7 +441,7 @@ class RestartTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('bash'), 'requires bash')
     def test_restart_starts_replacements_only_after_cleanup_and_fc_reboot(self):
-        launcher = Path(__file__).resolve().parents[2] / 'boot/pals-start.sh'
+        launcher = SOURCE / 'boot/pals-start.sh'
         stubs = r'''
 flock() { [[ "$failure" != lock ]]; }
 docker() {
@@ -421,7 +455,7 @@ docker() {
     esac
 }
 sudo() {
-    [[ "$*" == *' restart' ]] || return 2
+    [[ "$*" == *'/tools/dashboard/fc_maintenance.py restart' && -f "$3" ]] || return 2
     echo 'cleanup and FC verification' >> "$calls"
     [[ "$failure" != reboot ]] || { echo 'mock FC verification failed'; return 1; }
 }
@@ -477,17 +511,17 @@ source "$1" restart
                         self.fail('Unexpected command: %r' % command)
                     return SimpleNamespace(returncode=status, stdout=output)
                 serial = SimpleNamespace(Serial=mock.MagicMock())
-                with mock.patch.object(warm_reboot_fc, 'run', side_effect=run), \
+                with mock.patch.object(fc_maintenance, 'run', side_effect=run), \
                         mock.patch.dict(sys.modules, {'serial': serial}), \
-                        mock.patch.object(warm_reboot_fc, 'port_unused',
+                        mock.patch.object(fc_maintenance, 'port_unused',
                                           side_effect=RuntimeError('owned') if fault == 'owned' else None), \
-                        mock.patch.object(warm_reboot_fc, 'check_disarmed',
+                        mock.patch.object(fc_maintenance, 'check_disarmed',
                                           side_effect=RuntimeError('armed') if fault == 'fc_armed' else None) as check:
                     if error:
                         with self.assertRaisesRegex(RuntimeError, error):
-                            warm_reboot_fc.stop_all_nodes('/dev/serial/by-id/test')
+                            fc_maintenance.stop_all_nodes('/dev/serial/by-id/test')
                     else:
-                        warm_reboot_fc.stop_all_nodes('/dev/serial/by-id/test')
+                        fc_maintenance.stop_all_nodes('/dev/serial/by-id/test')
                     if fault in ('armed', 'unknown', 'fc_query', 'owned', 'fc_armed'):
                         self.assertFalse(any('-c' in c or c[1] == 'stop' for c in calls))
                     elif fault != 'stop_failed':
@@ -517,25 +551,25 @@ source "$1" restart
                     if value == '/dev/serial/by-id/SPEEDYBEEF405V3-test':
                         return port
                     return Path(value)
-                with mock.patch.object(warm_reboot_fc, 'Path', side_effect=path), \
-                        mock.patch.object(warm_reboot_fc.os, 'geteuid', return_value=0), \
-                        mock.patch.object(warm_reboot_fc, 'stop_fc', return_value=False), \
-                        mock.patch.object(warm_reboot_fc, 'run', return_value=SimpleNamespace(
+                with mock.patch.object(fc_maintenance, 'Path', side_effect=path), \
+                        mock.patch.object(fc_maintenance.os, 'geteuid', return_value=0), \
+                        mock.patch.object(fc_maintenance, 'stop_fc', return_value=False), \
+                        mock.patch.object(fc_maintenance, 'run', return_value=SimpleNamespace(
                             returncode=localization_status, stdout='process check')) as run, \
-                        mock.patch.object(warm_reboot_fc, 'stop_all_nodes',
+                        mock.patch.object(fc_maintenance, 'stop_all_nodes',
                                           side_effect=RuntimeError('container stop failed')
                                           if localization_status == 2 else None) as stop_all, \
-                        mock.patch.object(warm_reboot_fc, 'reboot_controller') as reboot:
+                        mock.patch.object(fc_maintenance, 'reboot_controller') as reboot:
                     order = mock.Mock()
                     order.attach_mock(stop_all, 'stop')
                     order.attach_mock(reboot, 'reboot')
                     if localization_status == 2:
                         with self.assertRaisesRegex(RuntimeError, 'container stop failed' if restart else
                                                     'Could not check localization'):
-                            warm_reboot_fc.warm_reboot(restart=restart)
+                            fc_maintenance.warm_reboot(restart=restart)
                         reboot.assert_not_called()
                     else:
-                        warm_reboot_fc.warm_reboot(restart=restart)
+                        fc_maintenance.warm_reboot(restart=restart)
                         reboot.assert_called_once_with(port)
                         if restart:
                             self.assertEqual(order.mock_calls, [mock.call.stop(port), mock.call.reboot(port)])
@@ -543,8 +577,7 @@ source "$1" restart
                     self.assertEqual(run.call_count, 0 if restart else 1)
 
     def test_restart_readiness_requires_fresh_tof_and_localization(self):
-        source = Path(__file__).resolve().parents[2]
-        script = source / 'boot/wait_for_localization.py'
+        script = SOURCE / 'boot/wait_for_localization.py'
         for fault in (None, 'missing', 'stale', 'invalid', 'invalid_after_valid', 'localization'):
             with self.subTest(fault=fault):
                 now, subscribers = [100.0], {}
@@ -573,7 +606,7 @@ source "$1" restart
                     'sensor_msgs.msg': SimpleNamespace(Range=object),
                     'std_msgs.msg': SimpleNamespace(Bool=object)}
                 with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report, \
-                        mock.patch.object(sys, 'path', [str(source), *sys.path]):
+                        mock.patch.object(sys, 'path', [str(SOURCE), *sys.path]):
                     main = runpy.run_path(str(script))['main']
                     main.__globals__['monotonic'] = lambda: now[0]
                     self.assertEqual(main(), int(fault is not None))
@@ -603,9 +636,9 @@ source "$1" restart
                 with mock.patch.dict(sys.modules, modules), mock.patch('builtins.print') as report:
                     if fault:
                         with self.assertRaisesRegex(RuntimeError, 'incomplete/stale'):
-                            exec(warm_reboot_fc.GYRO_CHECK, {})
+                            exec(fc_maintenance.GYRO_CHECK, {})
                     else:
-                        exec(warm_reboot_fc.GYRO_CHECK, {})
+                        exec(fc_maintenance.GYRO_CHECK, {})
                         self.assertIn('0.000 / 0.000 / 0.000', report.call_args.args[0])
 
 

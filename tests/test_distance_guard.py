@@ -411,7 +411,7 @@ class DistancePIDTest(unittest.TestCase):
 
 class PeerRelayTest(unittest.TestCase):
     def setUp(self):
-        path = Path(__file__).resolve().parents[1] / 'tools' / 'peer_relay.py'
+        path = Path(__file__).resolve().parents[1] / 'tools' / 'dashboard' / 'peer_relay.py'
         self.module = runpy.run_path(str(path))
 
     def snapshot(self):

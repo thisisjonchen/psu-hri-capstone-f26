@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay recorded IMU, camera, and range measurements through the EKF.
 
-Usage: python3 tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+Usage: python3 tools/diagnostics/replay.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
 The calibration profile supplies sensor scales, mounting, and the initial state.
 Camera input defaults to JPEG images; --camera encoder compares raw encoder vectors.
 Image-pair flow rates are fused at their midpoint using the matching IMU interval.
@@ -22,13 +22,13 @@ import sys
 import numpy as np
 from rosbags.typesys import Stores, get_typestore, get_types_from_msg
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
 from localization.ekf import ErrorStateEKF, _array
 from localization.ekf_native import imu_means
 from localization.rotations import quaternion_matrix, quaternion_multiply
 from localization.ekf_replay import DelayedEKF
 from localization.ekf_sensors import FloorCamera, FloorRange, UwbTag, mounting_rotation
-from flow_capture import read_ekf_events
+from capture import read_ekf_events
 
 UWB_TOPIC = '/pidrone/localization/uwb'
 

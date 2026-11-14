@@ -5,5 +5,5 @@
 
 .calibration-state.json*
 .DS_Store
-flow_capture_*/
+/recordings/
 firmware_backups/

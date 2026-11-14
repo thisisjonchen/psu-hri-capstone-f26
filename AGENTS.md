@@ -11,10 +11,10 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 - `src/routines/`: dashboard-selectable flight sequences.
 - `src/boot/`: startup, screen configuration, and ROS bridge.
 - `src/native/ekf_node.cpp` and `live_ekf.cpp`: live EKF, camera tracking and ToF corrections.
-- `tools/replay_ekf.py` and `src/localization/ekf_*.py`: offline replay using shared native math.
-- `tools/flow_capture.py`: record hand-carried or flight data over SSH and analyze it.
+- `tools/diagnostics/`: SSH capture, recording analysis, and offline replay using the shared EKF math.
+- `tools/dashboard/`: dashboard, laptop calibration, peer relay, flight-controller maintenance, and dashboard tests.
+- `tools/migration/`: drone update guide, firmware bundle, and ToF driver patch.
 - `src/launch/`, `src/params/`, and `src/msg/`: ROS configuration and messages.
-- `src/web/`: dashboard, laptop calibration service, and web tests.
 - `tests/`: hardware-free tests for the onboard code.
 - Bundled libraries contain third-party code; avoid unrelated edits.
 
@@ -95,13 +95,13 @@ Available hardware-free checks, from the repository root with dependencies insta
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m unittest discover -s src/web/tests -p 'test_*.py'
-node --test src/web/tests/dashboard.test.js
+python3 -m unittest discover -s tools/dashboard/tests -p 'test_*.py'
+node --test tools/dashboard/tests/dashboard.test.js
 git diff --check
 ```
 
 Report which checks actually ran and any environment limitations. Passing tests or
 an increased telemetry rate does not establish real-flight stability. Keep experiment
 results in the task handoff or analysis artifacts rather than expanding this file
-with changing gains, test counts, or flight history. Save requested bag recordings
-in the current directory unless the user specifies another location.
+with changing gains, test counts, or flight history. Save recordings in
+`recordings/` unless the user specifies another location.

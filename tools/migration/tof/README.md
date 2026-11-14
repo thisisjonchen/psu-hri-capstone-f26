@@ -10,8 +10,8 @@ version of this patch before applying the current version:
 
 ```sh
 cd ~/catkin_ws/src/vl53l1x_ros
-git apply --check ~/catkin_ws/psu-hri-capstone-f26/tools/tof/driver-errors.patch
-git apply ~/catkin_ws/psu-hri-capstone-f26/tools/tof/driver-errors.patch
+git apply --check ~/catkin_ws/psu-hri-capstone-f26/tools/migration/tof/driver-errors.patch
+git apply ~/catkin_ws/psu-hri-capstone-f26/tools/migration/tof/driver-errors.patch
 cd ~/catkin_ws
 catkin_make install --pkg vl53l1x -j1
 ```

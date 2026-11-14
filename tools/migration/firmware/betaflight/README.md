@@ -13,7 +13,7 @@ Keep the flight controller connected to its Pi by USB, remove the props, and
 keep the drone disarmed. From this repository on the laptop, run:
 
 ```sh
-python3 tools/pals.py flash-fc --drone drone1
+python3 tools/pals.py migrate --drone drone1
 ```
 
 Use `--drone drone2` for drone2. SSH access must already work, as it does for the

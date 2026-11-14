@@ -36,7 +36,7 @@ configuration dump or copy drone2's complete Betaflight configuration.
 3. From the laptop repository, install the firmware using the existing tool:
 
    ```sh
-   python3 tools/pals.py flash-fc --drone drone1
+   python3 tools/pals.py migrate --drone drone1
    ```
 
    The [firmware guide](firmware/betaflight/README.md) lists supported builds and

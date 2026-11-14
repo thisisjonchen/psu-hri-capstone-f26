@@ -23,7 +23,6 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from calibration.calibration_service import AnchorCalibration
 import drones
-sys.path.insert(0, str(ROOT.parents[1] / 'tools'))
 import peer_relay
 
 

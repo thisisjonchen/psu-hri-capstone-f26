@@ -35,7 +35,7 @@ disarm/watchdog behavior remain active. Re-enable it under **Controls** while th
 connected drones are disarmed. The dashboard resets the switch off when reopened.
 
 For the complete firmware, driver and code rollout, see the
-[drone update guide](../tools/DRONE_UPDATE.md).
+[drone update guide](../tools/migration/DRONE_UPDATE.md).
 
 ## Betaflight telemetry setup
 
@@ -47,12 +47,12 @@ To install the firmware and save the 250 Hz serial setting together,
 run from the laptop with the drone disarmed and props removed:
 
 ```sh
-python3 tools/pals.py flash-fc --drone drone1
+python3 tools/pals.py migrate --drone drone1
 ```
 
 Use `--drone drone2` for drone2. The command backs up the selected drone, preserves
 its configuration, and verifies the update. See the
-[firmware instructions](../tools/firmware/betaflight/README.md#apply-to-a-drone) for
+[firmware instructions](../tools/migration/firmware/betaflight/README.md#apply-to-a-drone) for
 supported versions and the Pi-side code needed for 100 Hz IMU delivery.
 
 Drone2 uses a SpeedyBee F405 V3 with a custom Betaflight 2026.6.1 build
@@ -76,7 +76,7 @@ verification. The flash command preserves this setting; it does not enable it.
 
 The serial setting controls how often Betaflight services serial traffic. The
 USB interval is a compiled firmware change, preserved in the
-[patch and build instructions](../tools/firmware/betaflight/README.md). Flashing a stock
+[patch and build instructions](../tools/migration/firmware/betaflight/README.md). Flashing a stock
 image removes that change; restoring the CLI settings alone does not restore it.
 
 The Pi requests integrated rotation and specific force at 100 Hz for
@@ -106,8 +106,11 @@ before running Python.
 Record from the laptop with props removed:
 
 ```sh
-python3 tools/flow_capture.py ekf --drone drone2 --seconds 40
+python3 tools/diagnostics/capture.py ekf --drone drone2 --seconds 40
 ```
+
+By default, captures go into `recordings/` in this checkout. Use `--out` to
+choose a different location.
 
 Captures require IMU, JPEGs, camera calibration and ToF, and include published
 estimates. Data is buffered on the Pi, downloaded, then removed there. Allow about
@@ -120,10 +123,10 @@ If PID reports altitude unavailable, compare state and raw range ages on
 `/pidrone/localization/fusion_status` with the last accepted range age and
 correction result on `/pidrone/ekf/status`.
 
-Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
+Provide a JSON replay calibration profile, then run:
 
 ```sh
-.venv/bin/python tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+.venv/bin/python tools/diagnostics/replay.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
 ```
 
 The profile supplies sensor geometry, scales and initial state. Use

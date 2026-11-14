@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Launch the PALS dashboard or update a flight controller.
 
-  flash-fc    install the bundled Betaflight USB firmware and 250 Hz serial setting
+  migrate     install the bundled Betaflight USB firmware
   dashboard   start the dashboard server and open it in the browser
 """
 import argparse
@@ -14,7 +14,7 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / 'src' / 'web'
+DASHBOARD = ROOT / 'tools' / 'dashboard'
 VENV = ROOT / '.venv'
 VENV_PYTHON = VENV / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
 REQUIREMENTS = ROOT / 'requirements.txt'
@@ -36,26 +36,26 @@ def ensure_venv():
 
 def dashboard(port):
     threading.Timer(1.5, webbrowser.open, ['http://localhost:%d' % port]).start()
-    sys.exit(subprocess.call([sys.executable, str(WEB / 'server.py'), '--port', str(port)]))
+    sys.exit(subprocess.call([sys.executable, str(DASHBOARD / 'server.py'), '--port', str(port)]))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('flash-fc', 'dashboard'))
+    parser.add_argument('command', choices=('migrate', 'dashboard'))
     parser.add_argument('--drone', choices=('drone1', 'drone2'),
-                        help='target drone for flash-fc')
+                        help='target drone for migrate')
     parser.add_argument('--port', type=int, default=8000, help='dashboard port')
     args = parser.parse_args()
-    if args.command == 'flash-fc' and not args.drone:
-        parser.error('flash-fc requires --drone drone1 or --drone drone2')
+    if args.command == 'migrate' and not args.drone:
+        parser.error('migrate requires --drone drone1 or --drone drone2')
     ensure_venv()
-    sys.path.insert(0, str(WEB))
-    if args.command == 'flash-fc':
-        from flash_fc import flash
+    if args.command == 'migrate':
+        sys.path.insert(0, str(DASHBOARD))
+        from dashboard.fc_maintenance import flash
         try:
             flash(args.drone)
         except (RuntimeError, OSError, EOFError) as error:
-            parser.exit(1, 'flash-fc: %s\n' % error)
+            parser.exit(1, 'migrate: %s\n' % error)
     else:
         dashboard(args.port)
 

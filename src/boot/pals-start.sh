@@ -4,7 +4,7 @@ set -u
 container=pidrone_pkg
 session=pidrone
 workspace=$HOME/catkin_ws
-worker=$(dirname "$(readlink -f "$0")")/../../tools/warm_reboot_fc.py
+worker=$(dirname "$(readlink -f "$0")")/../../tools/dashboard/fc_maintenance.py
 action=${1:-}
 
 # A second Connect during a start must wait, then find the session, not start another.
