@@ -96,7 +96,7 @@ constant rotation rate and uniformly distributed delta velocity in its starting 
 The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
 
 ```sh
-cmake -S src/native -B .venv/ekf-native
+cmake -S src/localization/native -B .venv/ekf-native
 cmake --build .venv/ekf-native
 ```
 

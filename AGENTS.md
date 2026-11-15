@@ -7,10 +7,10 @@ The ROS package is `pidrone_pkg`, located in `src/` in this checkout.
 
 - `src/flight/`: flight controller communication, PID, and shared drone control.
 - `src/localization/`: UWB, ToF, and fusion nodes with their sensor and geometry helpers.
+- `src/localization/native/`: C++ EKF node and shared EKF math for flight and replay.
 - `src/perception/`: AprilTag detection and mapping.
 - `src/routines/`: dashboard-selectable flight sequences.
 - `src/boot/`: startup, screen configuration, and ROS bridge.
-- `src/native/ekf_node.cpp` and `live_ekf.cpp`: live EKF, camera tracking and ToF corrections.
 - `tools/diagnostics/`: SSH capture, recording analysis, and offline replay using the shared EKF math.
 - `tools/dashboard/`: dashboard, laptop calibration, peer relay, flight-controller maintenance, and dashboard tests.
 - `tools/migration/`: drone update guide, firmware bundle, and ToF driver patch.
