@@ -138,6 +138,21 @@ class AnchorCalibration:
         self.dirty = True
         self.persist()
 
+    def selected_boards(self, choices):
+        addresses = [choice['ble'] for choice in choices]
+        known = {board['ble']: board for board in self.boards if board['active']}
+        if len(addresses) != 4 or len(set(addresses)) != 4:
+            raise ValueError('Select four different anchors')
+        if any(address not in known for address in addresses):
+            raise ValueError('An assigned anchor is unavailable; scan again or replace it')
+        boards = [known[address] for address in addresses]
+        if len({board['id'] for board in boards}) != 4:
+            raise ValueError('Select four distinct anchors')
+        pans = {board['pan'] for board in boards if board['pan'] is not None}
+        if sum(board['initiator'] for board in boards) != 1 or len(pans) > 1:
+            raise ValueError('Select one initiator and three anchors on the same PAN')
+        return [dict(board, z=0.0) for board in boards]
+
     def run(self, request):
         try:
             action = request['action']
@@ -160,11 +175,7 @@ class AnchorCalibration:
                     message += ' Unreadable boards: ' + '; '.join(ble.scan_warnings)
                 self.update('idle', message, boards=self.boards)
             elif action == 'measure':
-                choices = request.get('anchors', [])
-                if len(choices) != 4 or len(set(c['ble'] for c in choices)) != 4:
-                    raise ValueError('Select four different anchors')
-                known = {b['ble']: b for b in self.boards}
-                boards = [dict(known[c['ble']], z=0.0) for c in choices]
+                boards = self.selected_boards(request.get('anchors', []))
                 self.preview = None
                 self.preview_at = None
                 self.update('measuring', 'Measuring…', preview=None, token=None)
@@ -178,19 +189,25 @@ class AnchorCalibration:
                 self.preview_at = monotonic()
                 self.update('preview', '', preview=preview, token=str(uuid.uuid4()))
             elif action == 'edit':
-                layout = self.state.get('layout')
-                if not layout or self.dirty:
-                    raise ValueError('No saved layout to adjust; measure first')
-                self.preview = {'positions': copy.deepcopy(layout['positions'])}
+                if self.dirty:
+                    raise ValueError('Previous save incomplete. Measure and save again.')
+                boards = self.selected_boards(request.get('anchors', []))
+                layout = self.state['layout']
+                saved = {(p['ble'], p['id']): p for p in layout['positions']} if layout else {}
+                positions = []
+                for board in boards:
+                    position = saved.get((board['ble'], board['id']), {})
+                    positions.append(dict(board, x=position.get('x'), y=position.get('y')))
+                self.preview = {'positions': positions}
                 self.preview_at = monotonic()
                 self.update('preview', '', preview=self.preview, token=str(uuid.uuid4()))
             elif action == 'apply':
                 if (self.preview is None or self.preview_at is None or monotonic() - self.preview_at > 120
                         or request.get('token') != self.state['token']):
-                    raise ValueError('Preview expired or changed; measure again')
+                    raise ValueError('Preview expired or changed. Select Measure or Adjust again.')
                 positions = self.preview['positions']
-                if 'positions' in request:
-                    positions = adjust_layout(positions, request['positions'])
+                if 'positions' in request or any(p['x'] is None or p['y'] is None for p in positions):
+                    positions = adjust_layout(positions, request.get('positions'))
                 self.update('saving', 'Saving…')
                 ble.call('save', self.check_cancelled, positions, self.mark_write)
                 self.check_cancelled()

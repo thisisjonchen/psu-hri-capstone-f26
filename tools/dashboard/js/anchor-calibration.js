@@ -227,7 +227,7 @@ class AnchorCalibration {
     if (this.pendingAction || !this.fresh()) return;
     if (document.getElementById('calibration-' + action).disabled) return;
     const request = { action };
-    if (action === 'measure') {
+    if (action === 'measure' || action === 'edit') {
       request.anchors = this.corners().map(ble => ({ ble }));
     }
     if (action === 'apply') {
@@ -271,15 +271,16 @@ class AnchorCalibration {
         document.getElementById('calibration-label-' + i).textContent = corners[i];
         document.getElementById('calibration-anchor-' + i).value = p.ble;
         ['x', 'y'].forEach(axis => {
-          document.getElementById('calibration-' + axis + '-' + i).value = p[axis].toFixed(3);
+          document.getElementById('calibration-' + axis + '-' + i).value = p[axis] == null ? '' : p[axis].toFixed(3);
         });
       });
     } else if (!state || !state.preview) {
       this.editorToken = null;
     }
     document.getElementById('calibration-scan').disabled = !fresh || busy || !!state.preview;
-    document.getElementById('calibration-measure').disabled = !fresh || busy || !!this.selectionIssue();
-    document.getElementById('calibration-edit').disabled = !fresh || busy || !state.layout || state.dirty || !!state.preview;
+    const selectionIssue = this.selectionIssue();
+    document.getElementById('calibration-measure').disabled = !fresh || busy || !!selectionIssue;
+    document.getElementById('calibration-edit').disabled = !fresh || busy || !!selectionIssue || state.dirty || !!state.preview;
     document.getElementById('calibration-apply').disabled = !fresh || busy || state.stage !== 'preview' || !state.token || !this.matchesPreview() || !this.editedPositions();
     document.getElementById('calibration-cancel').disabled = !fresh || !!this.pendingAction || !(busy || state.preview || state.dirty);
     for (let i = 0; i < 4; i++) {
@@ -296,7 +297,7 @@ class AnchorCalibration {
       document.getElementById('calibration-' + action).textContent = active === action ? labels[action] : defaults[action];
     });
     const selectionStatus = document.getElementById('calibration-selection');
-    const issue = state && state.boards.filter(board => board.active).length >= 4 ? this.selectionIssue() : '';
+    const issue = state && state.boards.filter(board => board.active).length >= 4 ? selectionIssue : '';
     selectionStatus.hidden = !issue;
     selectionStatus.textContent = issue || '';
     const status = document.getElementById('calibration-status');

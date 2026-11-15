@@ -138,7 +138,7 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(self.node.state['stage'], 'complete')
         self.assertTrue(self.node.state['layout']['verified'])
         layout = self.node.status()['layout']
-        self.node.request({'action': 'edit'})
+        self.node.request(dict(self.measure, action='edit'))
         self.node.worker.join()
         self.assertEqual(self.node.state['stage'], 'preview')
         self.assertEqual(self.node.preview['positions'], layout['positions'])
@@ -155,6 +155,23 @@ class CoordinatorTest(unittest.TestCase):
         self.node = self.create()
         self.assertEqual(self.node.status()['layout'], dict(layout, verified=False))
         self.assertEqual(self.node.boards, BOARDS)
+
+    def test_first_layout_can_be_entered_manually_after_scan(self):
+        edit = dict(self.measure, action='edit')
+        self.node.run(edit)
+        preview = self.node.status()['preview']['positions']
+        self.assertEqual(preview, [dict(board, x=None, y=None) for board in BOARDS])
+        self.node.run(dict(action='apply', token=self.node.state['token']))
+        self.ble.save.assert_not_called()
+
+        self.node.run(edit)
+        edits = [dict(id=board['id'], x=x, y=y) for board, (x, y, _) in zip(BOARDS, POINTS)]
+        self.ble.save.side_effect = lambda positions, guard, on_write: on_write()
+        self.node.run(dict(action='apply', token=self.node.state['token'], positions=edits))
+        layout = self.node.status()['layout']
+        self.assertTrue(layout['verified'])
+        self.assertEqual(layout['positions'], [dict(board, x=e['x'], y=e['y']) for board, e in zip(BOARDS, edits)])
+        self.ble.measure.assert_not_called()
 
     def test_cancel_retains_unverified_save_for_recovery(self):
         self.node.run(self.measure)

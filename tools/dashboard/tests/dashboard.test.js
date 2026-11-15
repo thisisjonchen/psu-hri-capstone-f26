@@ -1673,7 +1673,7 @@ test('manual anchor edits preview live without changing saved positions or being
     layout: { revision: 'saved', frame: 'map', verified: false, positions } };
   app.anchorCalibration.update(state);
   await app.anchorCalibration.request('edit');
-  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'edit' });
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'edit', anchors: boards.map(b => ({ ble: b.ble })) });
   const preview = { ...state, stage: 'preview', token: 'edit-token', preview: { positions } };
   app.anchorCalibration.update(preview);
   const svg = app.elements.get('calibration-position-map');
@@ -1718,6 +1718,37 @@ test('manual anchor edits preview live without changing saved positions or being
   assert.equal(points().length, 0);
   assert.equal(app.elements.get('calibration-preview').hidden, true);
   assert.equal(app.fleetMap.calibratedRoom.anchors.find(p => p.name === '4D12').x, 0);
+});
+
+test('adjust opens a blank coordinate editor before the first measurement', async () => {
+  const app = dashboard({ discover: false });
+  const boards = ['4D12', '980C', '9781', 'CA83'].map((id, i) =>
+    ({ id, ble: 'uuid-' + i, active: true, initiator: i === 0 }));
+  const state = { stage: 'idle', message: '', boards, busy: false, layout: null };
+  app.anchorCalibration.update(state);
+  assert.equal(app.elements.get('calibration-edit').disabled, true);
+  boards.forEach((board, i) => {
+    const select = app.elements.get('calibration-anchor-' + i);
+    select.value = board.ble;
+    select.listeners.input();
+  });
+  await app.anchorCalibration.request('edit');
+  assert.deepEqual(app.calibrationRequests, [{ action: 'edit', anchors: boards.map(b => ({ ble: b.ble })) }]);
+  app.anchorCalibration.update({ ...state, stage: 'preview', token: 'manual',
+    preview: { positions: boards.map(b => ({ ...b, x: null, y: null, z: 0 })) } });
+  assert.equal(app.elements.get('calibration-preview').hidden, false);
+  assert.equal(app.elements.get('calibration-apply').disabled, true);
+  const positions = boards.map((board, i) => ({ id: board.id, x: [0, 4, 4, 0][i], y: [0, 0, 3, 3][i] }));
+  positions.forEach((position, i) => {
+    for (const axis of ['x', 'y']) {
+      const field = app.elements.get('calibration-' + axis + '-' + i);
+      assert.equal(field.value, '');
+      field.value = String(position[axis]);
+      field.listeners.input();
+    }
+  });
+  await app.anchorCalibration.request('apply');
+  assert.deepEqual(app.calibrationRequests.at(-1), { action: 'apply', token: 'manual', positions });
 });
 
 test('late status and request timeouts cannot unlock calibration or trigger duplicate requests', async () => {
