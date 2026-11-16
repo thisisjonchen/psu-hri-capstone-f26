@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Adapt room-frame EKF output for the controller and validate the anchor layout.
+"""Adapt EKF output for the controller and validate the room anchor layout.
 
-The EKF initializes room XY from UWB and owns the startup +Y heading.
-Here, XY corrections reach the controller at a limited speed; velocity passes
-through unchanged. ToF freshness remains part of controller readiness.
+XY corrections reach the controller at a limited speed. Velocity passes through
+unchanged, and ToF freshness remains part of controller readiness.
 """
 import math
 import threading
@@ -45,10 +44,12 @@ class FusionLocalizationNode(object):
         self.floor_z = float(rospy.get_param('~floor_z', 0.0))
         self.max_correction_speed = float(rospy.get_param('~max_correction_speed', 0.05))
         self.frame = rospy.get_param('~frame_id', 'map')
+        self.local_frame = rospy.get_param('~local_frame_id', 'odom')
         self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        frames = (self.frame, self.local_frame, self.body_frame)
         limits = (self.timeout, self.odometry_timeout, self.ekf_ready_timeout,
                   self.layout_tolerance, self.max_correction_speed)
-        if (self.frame == self.body_frame or not all((self.frame, self.body_frame))
+        if (not all(frames) or len(set(frames)) != len(frames)
                 or not np.isfinite(self.floor_z) or not 0 < max_tilt < 90
                 or not all(np.isfinite(v) and v > 0 for v in limits)):
             raise ValueError('Invalid fusion frames or limits')
@@ -94,7 +95,7 @@ class FusionLocalizationNode(object):
     def update_ekf(self, msg):
         with self.lock:
             now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
-            if (self.ekf_reference_lost or msg.header.frame_id != self.frame
+            if (self.ekf_reference_lost or msg.header.frame_id not in (self.frame, self.local_frame)
                     or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, self.odometry_timeout)):
                 return
             if self.ekf_odom is not None and stamp <= self.ekf_odom.header.stamp.to_sec():
@@ -146,6 +147,7 @@ class FusionLocalizationNode(object):
             self.last_time = now
             ready_at = monotonic()
             odom_stamp = self.ekf_odom.header.stamp.to_sec() if self.ekf_odom is not None else None
+            odom_frame = self.ekf_odom.header.frame_id if self.ekf_odom is not None else ''
             range_stamp = self.range_stamp.to_sec() if self.range_stamp is not None else None
             range_fresh = (self.fresh(range_stamp, now) and self.range_received is not None
                            and 0 <= ready_at - self.range_received <= self.timeout)
@@ -161,7 +163,8 @@ class FusionLocalizationNode(object):
             state_available = range_fresh and self.range_valid and odom_fresh and tilt_ok
             local_ready = bool(state_available and self.ekf_ready
                                and self.fresh(self.ekf_ready_at, now, self.ekf_ready_timeout))
-            ready = bool(local_ready and self.layout is not None and not self.layout_changed)
+            ready = bool(local_ready and odom_frame == self.frame
+                         and self.layout is not None and not self.layout_changed)
             reason = ('OK' if ready
                       else 'Clock changed; restart localization on the floor' if self.ekf_reference_lost
                       else 'ToF missing or stale' if not range_fresh
@@ -169,6 +172,8 @@ class FusionLocalizationNode(object):
                       else 'EKF odometry missing or stale' if not odom_fresh
                       else 'Excessive tilt for altitude control' if not tilt_ok
                       else 'Waiting for EKF readiness' if not local_ready
+                      else 'Local XY only; restart on the floor with UWB for room positioning'
+                      if odom_frame == self.local_frame
                       else 'Anchor layout changed; restart localization on the floor' if self.layout_changed
                       else 'Four surveyed anchors required')
             readiness = (local_ready, ready)
@@ -194,7 +199,7 @@ class FusionLocalizationNode(object):
             status.values = [KeyValue(key='velocity_source', value='EKF'),
                              KeyValue(key='local_ready', value=str(local_ready)),
                              KeyValue(key='height_source', value='EKF + ToF'),
-                             KeyValue(key='frame_id', value=self.frame),
+                             KeyValue(key='frame_id', value=odom_frame),
                              KeyValue(key='correction_gap_m', value='%.3f' % gap)]
             for name, stamp in (('raw_range', range_stamp), ('ekf_odometry', odom_stamp),
                                 ('controller_state', self.state_stamp)):
@@ -262,9 +267,10 @@ class FusionLocalizationNode(object):
         limited.pose = pose
         self.odom_pub.publish(limited)
         p = pose.pose.position
-        z = p.z + self.floor_z
+        frame = odometry.header.frame_id
+        z = p.z + (self.floor_z if frame == self.frame else 0.)
         self.broadcaster.sendTransform((p.x, p.y, z), quaternion, odometry.header.stamp,
-                                       self.body_frame, self.frame)
+                                       self.body_frame, frame)
         if ready:
             room = PoseWithCovarianceStamped()
             room.header = odometry.header

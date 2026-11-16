@@ -41,7 +41,10 @@ resolve_ports() {
     # shellcheck disable=SC1090
     source "$ports" || return 1
     fc=$(readlink -e "${PALS_FC_ID:-}") || { echo "Flight controller not found: ${PALS_FC_ID:-unset}" >&2; return 1; }
-    uwb=$(readlink -e "${PALS_UWB_ID:-}") || { echo "UWB tag not found: ${PALS_UWB_ID:-unset}" >&2; return 1; }
+    if ! uwb=$(readlink -e "${PALS_UWB_ID:-}"); then
+        uwb=
+        echo "UWB tag not found: ${PALS_UWB_ID:-unset}. Continuing startup without UWB." >&2
+    fi
     [[ "$fc" != "$uwb" ]] || { echo "FC and UWB resolve to the same serial device; fix pals.ports." >&2; return 1; }
     printf 'PALS_FC_PORT=%s\nPALS_UWB_PORT=%s\n' "$fc" "$uwb" > "$workspace/pals.env"
 }

@@ -118,7 +118,7 @@ class Drone(object):
         self.local_pose = msg
 
     def _hold_pose(self, required=True, allow_prediction=False, local=False):
-        """Local odometry (IMU/flow, no UWB) or the fused room pose (UWB)."""
+        """Return controller odometry or the pose verified in the room frame."""
         msg = self.local_pose if local else self.fused_pose
         timeout = self.room_prediction_timeout if allow_prediction and not local else self.estimate_timeout
         if (msg is None or not msg.header.frame_id or

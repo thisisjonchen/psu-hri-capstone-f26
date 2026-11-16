@@ -84,10 +84,11 @@ class FusionNodeTest(unittest.TestCase):
         self.node.step()
 
     def refresh(self, yaw=math.pi/2, height=.5, velocity=(0, 0, 0), omega=(0, 0, 0),
-                position=(1, 2), roll=0, pitch=0, ready=True):
+                position=(1, 2), roll=0, pitch=0, ready=True, frame='map'):
         self.node.range_callback(NS(range=height, min_range=.01, max_range=4,
                                    header=NS(stamp=Stamp(self.ros_now))))
         msg = self.ekf_message(yaw, height, velocity, omega, position, roll, pitch)
+        msg.header.frame_id = frame
         self.node.update_ekf(msg)
         self.node.ekf_ready_callback(NS(data=ready))
 
@@ -112,22 +113,27 @@ class FusionNodeTest(unittest.TestCase):
 
     def test_ekf_motion_and_readiness_without_anchors(self):
         self.node = type(self.node)()
-        self.tick(height=.05)
+        self.tick(height=.05, frame='odom')
         self.node.step()
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
         self.assertEqual(self.messages['pidrone/localization/fused'], [])
-        self.tick(yaw=math.pi/2, velocity=(.1, .2, .03))
+        self.tick(yaw=math.pi/2, velocity=(.1, .2, .03), frame='odom')
+        self.report_anchors()
         self.node.step()
         msg = self.messages['pidrone/state'][-1]
-        self.assertEqual(msg.header.frame_id, 'map')
+        self.assertEqual(msg.header.frame_id, 'odom')
+        self.assertEqual(self.messages['pidrone/localization/odometry'][-1].header.frame_id, 'odom')
+        self.assertFalse(self.messages['pidrone/localization/ready'][-1].data)
+        self.assertEqual(self.messages['pidrone/localization/fused'], [])
+        self.assertEqual(self.node.broadcaster.sendTransform.call_args[0][-1], 'odom')
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.x, .1)
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.y, .2)
         self.assertAlmostEqual(msg.twist_with_covariance.twist.linear.z, .03)
         self.assertAlmostEqual(msg.pose_with_covariance.pose.position.x, 1, delta=.005)
         self.assertTrue(self.messages['pidrone/localization/local_ready'][-1].data)
         before = msg.pose_with_covariance.pose.position.x
-        self.tick(ready=False, position=(.4, 2))
+        self.tick(ready=False, position=(.4, 2), frame='odom')
         self.node.step()
         self.assertFalse(self.messages['pidrone/localization/local_ready'][-1].data)
         after = self.messages['pidrone/state'][-1].pose_with_covariance.pose.position.x

@@ -86,7 +86,7 @@ struct Snapshot {
     Filter filter;
     RangeTrace range_trace;
     std::int64_t origin_ns = 0;
-    bool initialized = false, reference_valid = true;
+    bool initialized = false, reference_valid = true, room_aligned = false;
     // Aid stamps are relative to origin_ns, in seconds.
     double delay = 0.;
     double range_aid = -1.e100, horizontal_aid = -1.e100;
@@ -150,7 +150,7 @@ private:
     double ground_range_ = -1., rest_range_ = 0., stationary_duration_ = 0.;
     Vec rest_force_, stationary_angle_ = Vec(0., 0., 0.);
     bool was_stationary_ = false, reference_valid_ = true;
-    bool uwb_reference_valid_ = true;
+    bool uwb_reference_valid_ = true, room_aligned_ = false;
     bool takeoff_handoff_ = false;
     std::map<std::string, double> last_aid_;
     std::string mode_, fault_;

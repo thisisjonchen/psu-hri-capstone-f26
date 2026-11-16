@@ -20,6 +20,20 @@ void feed_imu(pals::LiveEKF& filter,std::int64_t stamp,const pals::Imu& sample,d
     sample.means(force,rate);
     filter.imu(stamp,sample,received,force,rate);
 }
+pals::Profile startup_profile() {
+    pals::Profile profile{};
+    profile.acceleration_scale=profile.gyro_scale=1.;
+    profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
+    profile.range_beam=pals::Vec(0.,0.,-1.);
+    profile.delay=.35; profile.uwb_delay=.3;
+    return profile;
+}
+void ground_tick(pals::LiveEKF& filter,int i,bool valid_tof=true) {
+    const auto ns=1000000000LL+i*10000000LL;
+    filter.mode("DISARMED",i*.01);
+    filter.range(ns,valid_tof ? .05 : -1.,0.,4.);
+    feed_imu(filter,ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},i*.01);
+}
 }
 
 TEST(EkfOutput, ResumesAfterOutputGapWithoutRequiringExpiredHistory) {
@@ -151,24 +165,14 @@ TEST(EkfOutput, ProjectionUsesSharedRangeGeometryAndPreservesImuFailure) {
 }
 
 TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
-    pals::Profile profile{};
-    profile.acceleration_scale=profile.gyro_scale=1.;
-    profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
-    profile.range_beam=pals::Vec(0.,0.,-1.);
-    profile.delay=.35; profile.uwb_delay=.3;
-    pals::LiveEKF filter(profile);
-    auto tick=[](pals::LiveEKF& f,int i) {
-        const auto ns=1000000000LL+i*10000000LL;
-        f.mode("DISARMED",i*.01);
-        f.range(ns,.05,0.,4.);
-        feed_imu(f,ns,{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)},i*.01);
-    };
+    pals::LiveEKF filter(startup_profile());
     for (int i=1;i<=900;++i) {
-        tick(filter,i);
+        ground_tick(filter,i);
         if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.4,-.2,.01);
         if (i==800) EXPECT_FALSE(filter.snapshot().initialized);
     }
     ASSERT_TRUE(filter.snapshot().initialized);
+    EXPECT_TRUE(filter.snapshot().room_aligned);
     const auto initialized=filter.snapshot().filter;
     EXPECT_NEAR(initialized.position()[0],.4,1.e-9);
     EXPECT_NEAR(initialized.position()[1],-.2,1.e-9);
@@ -187,6 +191,38 @@ TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
     EXPECT_GT(result.filter.position()[1],reference.filter.position()[1]);
     for (std::size_t i=2;i<result.filter.state.size();++i)
         EXPECT_NEAR(result.filter.state[i],reference.filter.state[i],1.e-12);
+}
+
+TEST(EkfOutput, StartsLocallyWhenUwbIsMissingAndKeepsItsOrigin) {
+    pals::LiveEKF filter(startup_profile());
+    const int first_tof_tick=1301, ready_tick=first_tof_tick+800, last_tick=ready_tick+599;
+    for (int i=1;i<first_tof_tick;++i) ground_tick(filter,i,false);
+    EXPECT_FALSE(filter.snapshot().initialized);
+    for (int i=first_tof_tick;i<ready_tick;++i) ground_tick(filter,i);
+    EXPECT_FALSE(filter.snapshot().initialized);
+    ground_tick(filter,ready_tick);
+    auto initialized=filter.snapshot();
+    ASSERT_TRUE(initialized.initialized);
+    EXPECT_FALSE(initialized.room_aligned);
+    EXPECT_NEAR(initialized.filter.position()[0],0.,1.e-9);
+    EXPECT_NEAR(initialized.filter.position()[1],0.,1.e-9);
+    EXPECT_NEAR(initialized.filter.position()[2],.05,1.e-9);
+    auto baseline=filter;
+    for (int i=ready_tick+1;i<=last_tick;++i) {
+        ground_tick(filter,i);
+        ground_tick(baseline,i);
+        if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.05,-.03,.01);
+    }
+    const auto result=filter.snapshot(), reference=baseline.snapshot();
+    EXPECT_TRUE(result.fault.empty());
+    EXPECT_FALSE(result.room_aligned);
+    EXPECT_EQ(result.filter.state,reference.filter.state);
+    EXPECT_EQ(result.filter.covariance,reference.filter.covariance);
+    const double now=1.+last_tick*.01;
+    auto projected=result.filter;
+    ASSERT_TRUE(projected.project(stationary_imu(now-result.origin_ns/1.e9,50)));
+    std::string reason;
+    EXPECT_TRUE(result.ready(now,projected,reason));
 }
 
 int main(int argc, char** argv) {

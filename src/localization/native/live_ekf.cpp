@@ -261,13 +261,13 @@ bool Snapshot::range_ready(double now) const {
 bool Snapshot::ready(double now, const Filter& estimate, std::string& reason) const {
     const double current=now-origin_ns/1.e9;
     if (!fault.empty()) reason=fault;
-    else if (!initialized) reason="Initializing: disarmed, still on floor, facing +Y with UWB + ToF";
+    else if (!initialized) reason="Initializing: disarmed, still on floor, facing +Y with fresh ToF";
     else if (!reference_valid) reason="Reference lost: restart SE on the floor before flight";
     else if (!range_ready(now)) reason="Waiting: fresh ToF height";
     else if (!(current-estimate.stamp>=0. && current-estimate.stamp<=.15)) reason="Waiting: fresh state estimate";
     else if (current-delay-horizontal_aid>.5 && current>takeoff_deadline) reason="Waiting: camera tracking or confirmed rest on floor";
     else if (!estimate.navigation_variance_valid()) reason="Waiting: position or velocity uncertainty too high";
-    else { reason="Ready"; return true; }
+    else { reason=room_aligned ? "Ready" : "Ready: local XY only"; return true; }
     return false;
 }
 
@@ -347,7 +347,7 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     queue(m);
 }
 void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
-    if (stamp<=0 || !uwb_reference_valid_ || !fault_.empty()) return;
+    if (stamp<=0 || !uwb_reference_valid_ || !fault_.empty() || (origin_ns_ && !room_aligned_)) return;
     stamp-=std::llround(profile_.uwb_delay*1.e9);
     if (stamp<=0 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
     if (!origin_ns_) {
@@ -427,8 +427,7 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received,const Vec& force,co
         for (const auto& f:uwb_initial_) if (f.stamp<=ns) {
             tag_x+=f.x; tag_y+=f.y; tag_variance+=f.variance; ++fixes;
         }
-        if (fixes<profile_.initial_uwb_fixes) { initial_.pop_front(); return; }
-        tag_x/=fixes; tag_y/=fixes; tag_variance/=fixes;
+        const bool have_uwb=fixes>=profile_.initial_uwb_fixes;
         Vec mean_force(0.,0.,0.),mean_rate(0.,0.,0.); double distance=0.;
         for (const auto& s:initial_) { mean_force+=s.force; mean_rate+=s.rate; distance+=s.range; }
         const double count=initial_.size(); mean_force/=count; mean_rate/=count; distance/=count;
@@ -439,11 +438,17 @@ void LiveEKF::imu(std::int64_t ns,Imu sample,double received,const Vec& force,co
         const double yaw=std::acos(-1.)/2.-std::atan2(tilt(1,0),tilt(0,0));
         q=product(Quaternion(0.,0.,std::sin(yaw/2.),std::cos(yaw/2.)),q);
         const Rotation r=rotation(q);
-        const Vec tag=r*profile_.uwb_offset;
         const double height=-(r*profile_.range_offset+distance*(r*profile_.range_beam))[2];
         if (!std::isfinite(height) || height<=0.) { fault_="Invalid initial floor geometry"; return; }
-        filter_.initialize(tag_x-tag[0],tag_y-tag[1],tag_variance,height,q,
+        Vec initial_xy(0.,0.,0.);
+        double xy_variance=0.;
+        if (have_uwb) {
+            initial_xy=Vec(tag_x/fixes,tag_y/fixes,0.)-r*profile_.uwb_offset;
+            xy_variance=tag_variance/fixes;
+        }
+        filter_.initialize(initial_xy[0],initial_xy[1],xy_variance,height,q,
                            mean_force-r.t()*Vec(0.,0.,gravity_m_s2),mean_rate);
+        room_aligned_=have_uwb;
         origin_ns_=ns; ground_range_=distance; initial_.clear(); uwb_initial_.clear(); return;
     }
     const double dt=stamp-last_imu_;
@@ -632,7 +637,7 @@ bool LiveEKF::correct_camera(const Measurement& m,const Vec& rate) {
 Snapshot LiveEKF::snapshot() const {
     Snapshot s; s.initialized=origin_ns_!=0; s.origin_ns=origin_ns_; s.filter=filter_; s.delay=profile_.delay;
     s.range_trace=range_trace_;
-    s.reference_valid=reference_valid_; s.fault=fault_;
+    s.reference_valid=reference_valid_; s.room_aligned=room_aligned_; s.fault=fault_;
     if (last_aid_.count("range")) s.range_aid=last_aid_.at("range");
     for (const char* name:{"camera","zero_velocity"})
         if (last_aid_.count(name)) s.horizontal_aid=std::max(s.horizontal_aid,last_aid_.at(name));

@@ -44,7 +44,7 @@ def main():
     while not rospy.is_shutdown():
         range_ready = fresh_range()
         if ready[0] and range_ready:
-            print('EKF initialized facing map +Y at the UWB position.')
+            print('EKF initialized. Local flight estimate ready.')
             return 0
         elapsed = monotonic() - started
         if elapsed >= 75 or (elapsed >= 15 and not range_ready):

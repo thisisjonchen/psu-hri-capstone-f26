@@ -35,7 +35,7 @@ pidrone_node_check() {
 
 pidrone_screen_node() {
     local node=${1:-} package_dir status launch
-    local -a command launch_args=()
+    local -a command
     package_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || return
     cd -- "$package_dir" || return
     if [[ ${PIDRONE_LIBRARY_PATH+x} ]]; then
@@ -74,17 +74,12 @@ pidrone_screen_node() {
         video) command=(rosrun web_video_server web_video_server) ;;
         tags) launch=apriltag_detection ;;
         tagmap) launch=apriltag_mapping ;;
-        uwb)
-            launch=uwb
-            if [[ -n "${PALS_UWB_PORT:-}" ]]; then
-                launch_args+=("port:=$PALS_UWB_PORT")
-            fi
-            ;;
+        uwb) launch=uwb ;;
         *) echo 'Usage: bash boot/screen_node.sh {core|fc|pid|se|vision|tof|bridge|video|tags|tagmap|uwb|check|shell}' >&2
            return 2 ;;
     esac
     if [[ -n ${launch:-} ]]; then
-        command=(roslaunch --wait "$package_dir/launch/$launch.launch" "${launch_args[@]}")
+        command=(roslaunch --wait "$package_dir/launch/$launch.launch")
     fi
 
     echo "Retry from this window with: bash boot/screen_node.sh $node"

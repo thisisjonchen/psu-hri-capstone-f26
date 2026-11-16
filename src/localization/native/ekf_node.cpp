@@ -72,6 +72,9 @@ public:
     Node():private_("~"),profile_(load_profile(private_)),filter_(profile_) {
         private_.param<std::string>("body_frame",body_frame_,"pidrone_body");
         private_.param<std::string>("frame_id",frame_,"map");
+        private_.param<std::string>("local_frame_id",local_frame_,"odom");
+        if (local_frame_.empty() || local_frame_==frame_ || local_frame_==body_frame_)
+            throw std::invalid_argument("Local odometry requires a distinct frame");
         cv::setNumThreads(1);
         state_pub_=node_.advertise<pidrone_pkg::State>("pidrone/ekf/state",1);
         odom_pub_=node_.advertise<nav_msgs::Odometry>("pidrone/ekf/odometry",1);
@@ -100,7 +103,7 @@ private:
     ros::Publisher state_pub_,odom_pub_,ready_pub_,status_pub_,trace_pub_;
     ros::Subscriber imu_sub_,range_sub_,image_sub_,camera_sub_,mode_sub_,uwb_sub_,generation_sub_;
     ros::WallTimer timer_;
-    std::string body_frame_,frame_;
+    std::string body_frame_,frame_,local_frame_;
     std::thread worker_;
     std::mutex queue_mutex_,snapshot_mutex_;
     std::condition_variable available_;
@@ -292,7 +295,8 @@ private:
         for (int i=0;i<3;++i) for (int j=0;j<3;++j)
             output.twist_covariance[6*i+j]+=velocity_error[i]*velocity_error[j];
         nav_msgs::Odometry odom;
-        odom.header.stamp.fromNSec(stamp); odom.header.frame_id=frame_; odom.child_frame_id=body_frame_;
+        odom.header.stamp.fromNSec(stamp);
+        odom.header.frame_id=s.room_aligned ? frame_ : local_frame_; odom.child_frame_id=body_frame_;
         auto& p=odom.pose.pose.position; p.x=estimate.state[0]; p.y=estimate.state[1]; p.z=vertical[0];
         auto& q=odom.pose.pose.orientation;
         q.x=output.quaternion[0]; q.y=output.quaternion[1]; q.z=output.quaternion[2]; q.w=output.quaternion[3];
@@ -321,7 +325,7 @@ private:
             if (!trace_pub_.getNumSubscribers() || (s.range_trace.sequence==last_trace_range_
                 && stamp-last_trace_stamp_<100000000LL)) return;
             pidrone_pkg::EkfVerticalTrace msg;
-            msg.header.stamp.fromNSec(stamp); msg.header.frame_id=frame_;
+            msg.header.stamp.fromNSec(stamp); msg.header.frame_id=s.room_aligned ? frame_ : local_frame_;
             msg.fusion_stamp.fromNSec(s.origin_ns+std::llround(s.filter.stamp*1.e9));
             const auto& r=s.range_trace;
             if (r.sequence) msg.range_stamp.fromNSec(s.origin_ns+std::llround(r.stamp*1.e9));
