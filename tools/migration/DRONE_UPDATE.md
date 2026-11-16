@@ -10,6 +10,7 @@ configuration dump or copy drone2's complete Betaflight configuration.
 | PALS repository | Current ROS messages, C++ EKF, FC/PID code, launch files, shared parameters and warm restart helper |
 | Betaflight | Bundled `imu100001`: integrated IMU telemetry and 2 ms USB flush; installer saves 250 Hz serial service |
 | ToF driver | [`driver-errors.patch`](tof/driver-errors.patch): reject failed reads and interrupt-recovery results |
+| Pi Wi-Fi | [Wi-Fi startup patch](wifi/README.md) for DD24 hosts with duplicate DHCP and late client Wi-Fi restarts |
 | Laptop dashboard | Current web files and root `requirements.txt`, including `psutil` |
 
 ## Apply in this order
