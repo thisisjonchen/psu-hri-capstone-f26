@@ -1,0 +1,12 @@
+private_topics: true
+camera_frame_id: camera
+enable_raw: false
+enable_imv: false
+camera_id: 0
+camera_name: camera_dd24
+camera_info_url: package://raspicam_node/camera_info/camera_dd24.yaml
+width: 240
+height: 320
+framerate: 30
+exposure_mode: antishake
+shutter_speed: 0

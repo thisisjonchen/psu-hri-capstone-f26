@@ -1,5 +1,4 @@
 <launch>
-  <!-- Launch after camera, UWB and fusion. Each drone has its own ROS master. -->
   <node pkg="pidrone_pkg" type="apriltag_mapping_node" name="apriltag_mapping" output="screen" respawn="true" respawn_delay="5">
     <rosparam command="load" file="$(find pidrone_pkg)/params/apriltag_mapping.yaml"/>
     <param name="detection_topic" value="/pidrone/apriltag/detections"/>

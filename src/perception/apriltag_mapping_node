@@ -1,0 +1,264 @@
+#!/usr/bin/env python
+"""Project floor AprilTags into the UWB map.
+
+This is independent of flight control. All mapping is on the same ROS master
+as the drone's existing AprilTag detector, UWB localization, and fusion node.
+"""
+from __future__ import print_function
+
+import threading
+from collections import deque
+
+import numpy as np
+import rospy
+from geometry_msgs.msg import Point, PoseWithCovarianceStamped
+from pidrone_pkg.msg import TagDetection, TagMap
+from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import Bool, UInt32
+
+from perception.apriltag_geometry import camera_rotation, estimate_tag_center, project_floor_tag
+
+
+class AprilTagMappingNode(object):
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.frame = rospy.get_param('~frame_id', 'map')
+        self.plane_z = float(rospy.get_param('~tag_plane_z', 0.0))
+        self.tag_sizes = {int(tag_id): float(size) for tag_id, size in
+                          rospy.get_param('~tag_sizes_m', {}).items()}
+        if any(not np.isfinite(size) or size <= 0 for size in self.tag_sizes.values()):
+            raise ValueError('Tag sizes must be positive meters')
+        self.max_distance = float(rospy.get_param('~max_tag_distance', 3.0))
+        self.max_skew = float(rospy.get_param('~max_image_pose_skew', 0.35))
+        self.max_jump = float(rospy.get_param('~max_tag_jump', 0.35))
+        self.min_samples = int(rospy.get_param('~min_tag_samples', 3))
+        offset = rospy.get_param('~camera_offset_body', [0, 0, 0])
+        self.camera_offset = np.asarray(offset, dtype=float)
+        self.rotation = camera_rotation(
+            float(rospy.get_param('~camera_pitch_down_deg', 45.0)),
+            float(rospy.get_param('~camera_azimuth_deg', 0.0)),
+            float(rospy.get_param('~camera_image_roll_deg', 0.0)))
+        if (self.camera_offset.shape != (3,) or not np.all(np.isfinite(self.camera_offset))
+                or not np.isfinite(self.plane_z)
+                or not 0 < self.max_skew <= 1
+                or not 0 < self.max_jump or not 0 < self.max_distance
+                or not 1 <= self.min_samples <= 100):
+            raise ValueError('Invalid mapping calibration or thresholds')
+        self.ready = False
+        self.pose = None
+        self.poses = deque(maxlen=256)
+        self.camera_info = None
+        self.generation = None
+        self.last_detection_stamp = None
+        self.tags = {}  # id -> recent observations and last confirmed position
+        self.publisher = rospy.Publisher('/pidrone/apriltag/map', TagMap, queue_size=1, latch=True)
+        self.publish_map()
+        rospy.Subscriber(rospy.get_param('~detection_topic', '/pidrone/apriltag/detections'),
+                         TagDetection, self.detection_callback, queue_size=1)
+        rospy.Subscriber(rospy.get_param('~pose_topic', '/pidrone/localization/fused'),
+                         PoseWithCovarianceStamped, self.pose_callback, queue_size=2)
+        rospy.Subscriber(rospy.get_param('~camera_info_topic', '/raspicam_node/camera_info'),
+                         CameraInfo, self.camera_callback, queue_size=1)
+        rospy.Subscriber('/pidrone/localization/ready', Bool, self.ready_callback, queue_size=1)
+        rospy.Subscriber('/pidrone/localization/generation', UInt32, self.generation_callback, queue_size=1)
+        rospy.loginfo('Tag mapping: optical rays to z=%.3f in %s; camera offset %s',
+                      self.plane_z, self.frame, self.camera_offset)
+
+    def publish_map(self):
+        msg = TagMap()
+        msg.header.frame_id = self.frame
+        # This stamps the map update; cached tags retain their old positions.
+        msg.header.stamp = rospy.Time.now()
+        for tag_id in sorted(self.tags):
+            entry = self.tags[tag_id]
+            if entry['position'] is None:
+                continue
+            point = Point()
+            position = entry['position']
+            point.x, point.y, point.z = [float(v) for v in position]
+            msg.tag_ids.append(tag_id)
+            msg.zones.append(entry['zone'])
+            msg.positions.append(point)
+            msg.sample_counts.append(self.min_samples)
+        self.publisher.publish(msg)
+
+    def generation_callback(self, msg):
+        with self.lock:
+            if self.generation is not None and self.generation != msg.data:
+                self.tags.clear()
+                self.pose = None
+                self.poses.clear()
+                self.last_detection_stamp = None
+                rospy.logwarn('UWB room generation changed; clearing measured AprilTag map')
+                self.publish_map()
+            self.generation = msg.data
+
+    def ready_callback(self, msg):
+        with self.lock:
+            self.ready = bool(msg.data)
+            if not self.ready:
+                self.pose = None
+                self.poses.clear()
+
+    def pose_callback(self, msg):
+        with self.lock:
+            if msg.header.frame_id != self.frame:
+                return
+            if not self._fresh(msg):
+                return
+            p, q = msg.pose.pose.position, msg.pose.pose.orientation
+            values = (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+            if not all(np.isfinite(v) for v in values) or sum(v*v for v in values[3:]) < 1e-12:
+                return
+            stamp = self._stamp(msg)
+            if self.pose is not None and stamp <= self._stamp(self.pose):
+                return
+            self.pose = msg
+            self.poses.append(msg)
+            while self.poses and not self._fresh(self.poses[0]):
+                self.poses.popleft()
+
+    def camera_callback(self, msg):
+        with self.lock:
+            if (msg.width <= 0 or msg.height <= 0 or len(msg.K) != 9 or
+                    msg.distortion_model not in ('plumb_bob', 'rational_polynomial', 'equidistant') or
+                    (msg.distortion_model == 'equidistant' and len(msg.D) != 4) or
+                    not all(np.isfinite(v) for v in list(msg.K) + list(msg.D)) or
+                    msg.K[0] <= 0 or msg.K[4] <= 0):
+                self.camera_info = None
+                rospy.logwarn_throttle(5, 'Invalid camera_info: model=%s, size=%dx%d, K=%s, D=%s; AprilTag map paused',
+                                       msg.distortion_model, msg.width, msg.height, msg.K, msg.D)
+                return
+            self.camera_info = msg
+
+    @staticmethod
+    def _stamp(message):
+        return message.header.stamp.to_sec()
+
+    def _fresh(self, stamp):
+        seconds = self._stamp(stamp)
+        age = rospy.Time.now().to_sec() - seconds
+        return seconds > 0 and 0 <= age <= self.max_skew
+
+    def projection_pose(self, message):
+        """Interpolate fresh EKF-derived room poses; never extrapolate a ray."""
+        info = self.camera_info
+        if message.image_width != info.width or message.image_height != info.height:
+            rospy.logwarn_throttle(5, 'CameraInfo size %dx%d != camera image %dx%d: run camera calibration',
+                                   info.width, info.height, message.image_width, message.image_height)
+            return None
+        stamp = self._stamp(message)
+        before = None
+        for pose in self.poses:
+            if not self._fresh(pose):
+                continue
+            p, q = pose.pose.pose.position, pose.pose.pose.orientation
+            position = np.array([p.x, p.y, p.z], dtype=float)
+            rotation = np.array([q.x, q.y, q.z, q.w], dtype=float)
+            rotation /= np.linalg.norm(rotation)
+            at = self._stamp(pose)
+            if at == stamp:
+                return position, rotation
+            if at < stamp:
+                before = (at, position, rotation)
+                continue
+            if before is None:
+                return None
+            start, p0, q0 = before
+            fraction = (stamp - start) / (at - start)
+            # SLERP along the shortest arc; q and -q describe the same attitude.
+            dot = np.dot(q0, rotation)
+            if dot < 0:
+                rotation, dot = -rotation, -dot
+            dot = np.clip(dot, 0., 1.)
+            if dot > .9995:
+                q = q0 + fraction * (rotation - q0)
+            else:
+                angle = np.arccos(dot)
+                q = (np.sin((1 - fraction) * angle) * q0 +
+                     np.sin(fraction * angle) * rotation) / np.sin(angle)
+            return p0 + fraction * (position - p0), q / np.linalg.norm(q)
+        return None
+
+    def project(self, pixel, plane_z, pose):
+        info = self.camera_info
+        position, rotation = pose
+        return project_floor_tag(pixel, info.K, info.D, position,
+                                 rotation, self.camera_offset, self.rotation,
+                                 plane_z=plane_z, max_distance=self.max_distance,
+                                 distortion_model=info.distortion_model)
+
+    def detection_callback(self, message):
+        with self.lock:
+            if (not self.ready or self.pose is None or self.camera_info is None or
+                    not message.camera_online or not self._fresh(message)):
+                return
+            observation_time = self._stamp(message)
+            # Detector republishes the last result until camera timeout; a given
+            # frame must never count as multiple independent observations.
+            if self.last_detection_stamp is not None and observation_time <= self.last_detection_stamp:
+                return
+            count = len(message.tag_ids)
+            if (count != len(message.zones) or count != len(message.center_x) or
+                    count != len(message.center_y) or len(set(message.tag_ids)) != count or count == 0):
+                return
+            info = self.camera_info
+            pose = self.projection_pose(message)
+            if pose is None:
+                return
+            self.last_detection_stamp = observation_time
+            changed = False
+            for index, tag_id in enumerate(message.tag_ids):
+                if tag_id < 0 or not (0 <= message.center_x[index] < info.width
+                                      and 0 <= message.center_y[index] < info.height):
+                    continue
+                try:
+                    if tag_id in self.tag_sizes:
+                        if len(message.corner_x) != count * 4 or len(message.corner_y) != count * 4:
+                            raise ValueError('Missing tag corners')
+                        start = index * 4
+                        xs = message.corner_x[start:start + 4]
+                        ys = message.corner_y[start:start + 4]
+                        if not (all(0 <= x < info.width for x in xs) and
+                                all(0 <= y < info.height for y in ys)):
+                            raise ValueError('Tag corners are outside the image')
+                        measurement = estimate_tag_center(
+                            list(zip(xs, ys)), self.tag_sizes[tag_id], info.K, info.D,
+                            pose[0], pose[1], self.camera_offset, self.rotation,
+                            self.max_distance, info.distortion_model)
+                    else:
+                        measurement = self.project(
+                            (message.center_x[index], message.center_y[index]), self.plane_z, pose)
+                except ValueError as error:
+                    rospy.logwarn_throttle(5, 'AprilTag geometry rejected: {}'.format(error))
+                    continue
+                entry = self.tags.get(tag_id)
+                if entry is None:
+                    entry = {'zone': message.zones[index], 'samples': [],
+                             'position': None, 'stamp': observation_time}
+                    self.tags[tag_id] = entry
+                samples = entry['samples']
+                # Confirm a new cluster after a move or observation gap. Keep
+                # displaying the last confirmed position during confirmation.
+                if samples and (observation_time - entry['stamp'] > self.max_skew or
+                                np.linalg.norm(measurement - np.mean(samples, axis=0)) > self.max_jump):
+                    samples[:] = []
+                samples.append(measurement)
+                del samples[:-self.min_samples]
+                entry['stamp'] = observation_time
+                if len(samples) == self.min_samples:
+                    entry['position'] = np.mean(samples, axis=0)
+                    entry['zone'] = message.zones[index]
+                    changed = True
+            if changed:
+                self.publish_map()
+
+
+def main():
+    rospy.init_node('apriltag_mapping')
+    AprilTagMappingNode()
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()

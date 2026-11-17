@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+"""Detect AprilTags onboard from ROS camera images; publish results to rosbridge."""
+from __future__ import print_function
+
+import threading
+import time
+
+import cv2
+import numpy as np
+import rospy
+from sensor_msgs.msg import CompressedImage
+from pidrone_pkg.msg import TagDetection
+
+TAG_ZONES = {0: 'PAYLOAD', 1: 'DROP_OFF'}
+
+
+def make_detector():
+    try:
+        from pupil_apriltags import Detector
+    except ImportError:
+        import apriltag
+        return apriltag.Detector(apriltag.DetectorOptions(
+            families='tag36h11', nthreads=1, quad_decimate=1.0))
+    return Detector(families='tag36h11', nthreads=1, quad_decimate=1.0)
+
+
+class AprilTagNode(object):
+    def __init__(self):
+        self.detector = make_detector()
+        self.rate = float(rospy.get_param('~rate', 10))
+        self.timeout = float(rospy.get_param('~camera_timeout', 0.5))
+        if not 0 < self.rate <= 30 or self.timeout <= 0:
+            raise ValueError('rate must be between 0 and 30 Hz; camera_timeout must be positive')
+        self.lock = threading.Lock()
+        self.pending = None
+        self.last_frame_at = None
+        self.result = TagDetection()
+        self.result.camera_online = False
+        self.publisher = rospy.Publisher('/pidrone/apriltag/detections', TagDetection, queue_size=1)
+        topic = rospy.get_param('~image_topic', '/raspicam_node/image/compressed')
+        self.subscriber = rospy.Subscriber(topic, CompressedImage, self.image_callback,
+                                           queue_size=1, buff_size=2 ** 20)
+        rospy.loginfo('AprilTag detection: %s -> /pidrone/apriltag/detections at %.1f Hz', topic, self.rate)
+
+    def image_callback(self, message):
+        # Keep only the newest frame. Detection runs in the rate-limited main loop.
+        with self.lock:
+            self.pending = (message, time.time())
+
+    def step(self):
+        with self.lock:
+            pending, self.pending = self.pending, None
+        if pending is not None:
+            message, received = pending
+            self.result = TagDetection()
+            self.result.header = message.header
+            self.last_frame_at = None
+            try:
+                age = rospy.Time.now().to_sec() - message.header.stamp.to_sec()
+                if time.time() - received <= self.timeout and (message.header.stamp.to_sec() <= 0 or age <= self.timeout):
+                    image = cv2.imdecode(np.frombuffer(message.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                    if image is None:
+                        raise ValueError('Invalid compressed camera frame')
+                    detections = self.detector.detect(image)
+                    tags = {int(tag.tag_id): tag for tag in detections
+                            if tag.tag_id in TAG_ZONES}
+                    ids = sorted(tags)
+                    self.result.tag_ids = ids
+                    self.result.zones = [TAG_ZONES[tag_id] for tag_id in ids]
+                    self.result.center_x = [float(tags[tag_id].center[0]) for tag_id in ids]
+                    self.result.center_y = [float(tags[tag_id].center[1]) for tag_id in ids]
+                    self.result.corner_x = [float(p[0]) for tag_id in ids for p in tags[tag_id].corners]
+                    self.result.corner_y = [float(p[1]) for tag_id in ids for p in tags[tag_id].corners]
+                    self.result.image_height, self.result.image_width = image.shape
+                    self.result.camera_online = True
+                    self.last_frame_at = received
+            except (ValueError, cv2.error, RuntimeError) as error:
+                rospy.logwarn_throttle(5, 'AprilTag image processing failed: {}'.format(error))
+        if self.last_frame_at is None or time.time() - self.last_frame_at > self.timeout:
+            self.result = TagDetection()
+            self.result.header.stamp = rospy.Time.now()
+            self.result.camera_online = False
+        self.publisher.publish(self.result)
+
+    def run(self):
+        rate = rospy.Rate(self.rate)
+        while not rospy.is_shutdown():
+            self.step()
+            rate.sleep()
+
+
+def main():
+    rospy.init_node('apriltag_detection')
+    try:
+        AprilTagNode().run()
+    except rospy.ROSInterruptException:
+        pass
+
+
+if __name__ == '__main__':
+    main()

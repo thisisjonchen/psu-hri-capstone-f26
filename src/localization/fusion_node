@@ -1,0 +1,295 @@
+#!/usr/bin/env python
+"""Adapt EKF output for the controller and validate the room anchor layout.
+
+XY corrections reach the controller at a limited speed. Velocity passes through
+unchanged, and ToF freshness remains part of controller readiness.
+"""
+import math
+import threading
+from copy import copy, deepcopy
+
+import numpy as np
+import rospy
+import tf
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry
+from pidrone_pkg.msg import AnchorLayout, State
+from sensor_msgs.msg import Range
+from std_msgs.msg import Bool, UInt32
+
+from localization.position import valid_range
+from localization import monotonic
+from localization.fusion import anchor_outline
+from localization.rotations import quaternion_matrix
+
+
+class FusionLocalizationNode(object):
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.updated = threading.Event()
+        self.ekf_odom = None
+        self.ekf_ready, self.ekf_ready_at = False, None
+        self.ekf_reference_lost = False
+        self.ekf_published_stamp = None
+        self.state_stamp = None
+        self.range_stamp = None
+        self.range_received = None
+        self.range_valid = False
+        self.timeout = float(rospy.get_param('~sensor_timeout', 0.5))
+        self.odometry_timeout = float(rospy.get_param('~odometry_timeout', 0.15))
+        self.ekf_ready_timeout = float(rospy.get_param('~ekf_ready_timeout', 0.15))
+        max_tilt = float(rospy.get_param('~max_tilt_degrees', 45.0))
+        self.layout_tolerance = float(rospy.get_param('~anchor_change_tolerance_m', 0.02))
+        self.floor_z = float(rospy.get_param('~floor_z', 0.0))
+        self.max_correction_speed = float(rospy.get_param('~max_correction_speed', 0.05))
+        self.frame = rospy.get_param('~frame_id', 'map')
+        self.local_frame = rospy.get_param('~local_frame_id', 'odom')
+        self.body_frame = rospy.get_param('~body_frame', 'pidrone_body')
+        frames = (self.frame, self.local_frame, self.body_frame)
+        limits = (self.timeout, self.odometry_timeout, self.ekf_ready_timeout,
+                  self.layout_tolerance, self.max_correction_speed)
+        if (not all(frames) or len(set(frames)) != len(frames)
+                or not np.isfinite(self.floor_z) or not 0 < max_tilt < 90
+                or not all(np.isfinite(v) and v > 0 for v in limits)):
+            raise ValueError('Invalid fusion frames or limits')
+        self.min_vertical = math.cos(math.radians(max_tilt))
+        self.limited = self.limited_stamp = None
+        self.layout = None
+        self.layout_stamp = None
+        self.layout_changed = False
+        self.generation = 0
+        self.last_time = None
+        self.last_status_at = None
+        self.published_ready = None
+        self.last_ready_at = None
+        self.published_generation = None
+        self.state_pub = rospy.Publisher('pidrone/state', State, queue_size=1, tcp_nodelay=True)
+        self.pose_pub = rospy.Publisher('pidrone/localization/fused', PoseWithCovarianceStamped, queue_size=1)
+        self.odom_pub = rospy.Publisher('pidrone/localization/odometry', Odometry, queue_size=1)
+        self.status_pub = rospy.Publisher('pidrone/localization/fusion_status', DiagnosticArray, queue_size=1)
+        self.local_pub = rospy.Publisher('pidrone/localization/local_ready', Bool, queue_size=1)
+        self.ready_pub = rospy.Publisher('pidrone/localization/ready', Bool, queue_size=1)
+        self.generation_pub = rospy.Publisher('pidrone/localization/generation', UInt32, queue_size=1, latch=True)
+        self.broadcaster = tf.TransformBroadcaster()
+        self.subscribers = [
+            rospy.Subscriber('pidrone/range', Range, self.range_callback, queue_size=1),
+            rospy.Subscriber('pidrone/localization/anchors', AnchorLayout, self.anchors_callback, queue_size=1),
+            rospy.Subscriber('pidrone/ekf/odometry', Odometry, self.ekf_callback, queue_size=1,
+                             tcp_nodelay=True),
+            rospy.Subscriber('pidrone/ekf/local_ready', Bool, self.ekf_ready_callback, queue_size=1)]
+
+    def fresh(self, stamp, now, timeout=None):
+        limit = self.timeout if timeout is None else timeout
+        return stamp is not None and 0 < stamp <= now and now - stamp <= limit
+
+    def ekf_ready_callback(self, msg):
+        with self.lock:
+            self.ekf_ready, self.ekf_ready_at = bool(msg.data), rospy.get_time()
+
+    def ekf_callback(self, msg):
+        self.update_ekf(msg)
+        self.step()
+        self.updated.set()
+
+    def update_ekf(self, msg):
+        with self.lock:
+            now, stamp = rospy.get_time(), msg.header.stamp.to_sec()
+            if (self.ekf_reference_lost or msg.header.frame_id not in (self.frame, self.local_frame)
+                    or msg.child_frame_id != self.body_frame or not self.fresh(stamp, now, self.odometry_timeout)):
+                return
+            if self.ekf_odom is not None and stamp <= self.ekf_odom.header.stamp.to_sec():
+                return
+            p, q, v, w = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist.linear, msg.twist.twist.angular
+            quaternion = np.array([q.x, q.y, q.z, q.w])
+            if (not all(np.all(np.isfinite(value)) for value in
+                        ((p.x, p.y, p.z), quaternion, (v.x, v.y, v.z), (w.x, w.y, w.z),
+                         msg.pose.covariance, msg.twist.covariance))
+                    or abs(np.linalg.norm(quaternion) - 1.) > .001):
+                return
+            self.ekf_odom = msg
+
+    def range_callback(self, msg):
+        with self.lock:
+            self.range_stamp = msg.header.stamp
+            self.range_received = monotonic()
+            self.range_valid = valid_range(msg.range, msg.min_range, msg.max_range)
+
+    def anchors_callback(self, msg):
+        with self.lock:
+            stamp = msg.header.stamp.to_sec()
+            if (msg.header.frame_id != self.frame or not self.fresh(stamp, rospy.get_time())
+                    or (self.layout_stamp is not None and stamp <= self.layout_stamp)):
+                return
+            positions = [(p.x, p.y, p.z) for p in msg.positions]
+            if anchor_outline(msg.anchor_ids, positions) is None:
+                return
+            layout = sorted(zip(msg.anchor_ids, positions))
+            if self.layout is not None and (
+                    [a[0] for a in layout] != [a[0] for a in self.layout]
+                    or not np.allclose([a[1] for a in layout], [a[1] for a in self.layout],
+                                       atol=self.layout_tolerance, rtol=0)):
+                # The EKF started in the old layout's frame.
+                self.layout_changed = True
+                self.generation += 1
+            self.layout = layout
+            self.layout_stamp = stamp
+
+    def step(self):
+        with self.lock:
+            now = rospy.get_time()
+            if self.last_time is not None and now < self.last_time:
+                self.ekf_reference_lost = True
+                self.generation += 1
+                self.range_stamp = None
+                self.limited = self.limited_stamp = None
+                self.layout = self.layout_stamp = None
+            self.last_time = now
+            ready_at = monotonic()
+            odom_stamp = self.ekf_odom.header.stamp.to_sec() if self.ekf_odom is not None else None
+            odom_frame = self.ekf_odom.header.frame_id if self.ekf_odom is not None else ''
+            range_stamp = self.range_stamp.to_sec() if self.range_stamp is not None else None
+            range_fresh = (self.fresh(range_stamp, now) and self.range_received is not None
+                           and 0 <= ready_at - self.range_received <= self.timeout)
+            odom_fresh = self.fresh(odom_stamp, now, self.odometry_timeout) and not self.ekf_reference_lost
+            # Preserve the controller's tilt limit without recomputing height from raw ToF.
+            if odom_fresh:
+                q = self.ekf_odom.pose.pose.orientation
+                quaternion = (q.x, q.y, q.z, q.w)
+                norm_sq = sum(v*v for v in quaternion)
+                tilt_ok = 1. - 2. * (q.x*q.x + q.y*q.y) / norm_sq >= self.min_vertical
+            else:
+                tilt_ok = False
+            state_available = range_fresh and self.range_valid and odom_fresh and tilt_ok
+            local_ready = bool(state_available and self.ekf_ready
+                               and self.fresh(self.ekf_ready_at, now, self.ekf_ready_timeout))
+            ready = bool(local_ready and odom_frame == self.frame
+                         and self.layout is not None and not self.layout_changed)
+            reason = ('OK' if ready
+                      else 'Clock changed; restart localization on the floor' if self.ekf_reference_lost
+                      else 'ToF missing or stale' if not range_fresh
+                      else 'ToF invalid' if not self.range_valid
+                      else 'EKF odometry missing or stale' if not odom_fresh
+                      else 'Excessive tilt for altitude control' if not tilt_ok
+                      else 'Waiting for EKF readiness' if not local_ready
+                      else 'Local XY only; restart on the floor with UWB for room positioning'
+                      if odom_frame == self.local_frame
+                      else 'Anchor layout changed; restart localization on the floor' if self.layout_changed
+                      else 'Four surveyed anchors required')
+            readiness = (local_ready, ready)
+            # Send changes immediately and keep the dashboard's heartbeat fresh.
+            if readiness != self.published_ready or ready_at - self.last_ready_at >= .1:
+                self.local_pub.publish(Bool(data=local_ready))
+                self.ready_pub.publish(Bool(data=ready))
+                self.published_ready, self.last_ready_at = readiness, ready_at
+            if self.generation != self.published_generation:
+                self.generation_pub.publish(UInt32(data=self.generation))
+                self.published_generation = self.generation
+            if state_available and odom_stamp != self.ekf_published_stamp:
+                self.publish_estimates(quaternion, local_ready, ready)
+            if self.last_status_at is not None and ready_at - self.last_status_at < .5:
+                return
+            gap = (0. if self.limited is None or self.ekf_odom is None else
+                   math.hypot(self.limited[0] - self.ekf_odom.pose.pose.position.x,
+                              self.limited[1] - self.ekf_odom.pose.pose.position.y))
+            status = DiagnosticStatus()
+            status.name, status.hardware_id = 'fusion_localization', 'uwb+imu+tof+camera'
+            status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
+            status.message = reason
+            status.values = [KeyValue(key='velocity_source', value='EKF'),
+                             KeyValue(key='local_ready', value=str(local_ready)),
+                             KeyValue(key='height_source', value='EKF + ToF'),
+                             KeyValue(key='frame_id', value=odom_frame),
+                             KeyValue(key='correction_gap_m', value='%.3f' % gap)]
+            for name, stamp in (('raw_range', range_stamp), ('ekf_odometry', odom_stamp),
+                                ('controller_state', self.state_stamp)):
+                status.values.append(KeyValue(key=name + '_age_s',
+                                              value='missing' if stamp is None else '%.3f' % (now - stamp)))
+            diagnostics = DiagnosticArray()
+            diagnostics.header.stamp = rospy.Time.from_sec(now)
+            diagnostics.status = [status]
+            self.status_pub.publish(diagnostics)
+            self.last_status_at = ready_at
+
+    def limit(self, odometry, body_to_map):
+        """Follow EKF velocity; close the XY gap to the EKF at max_correction_speed."""
+        stamp = odometry.header.stamp.to_sec()
+        p, v = odometry.pose.pose.position, odometry.twist.twist.linear
+        target = np.array([p.x, p.y], dtype=float)
+        if self.limited is None:
+            self.limited = target
+        else:
+            # Bound extrapolation when no estimate was published during a gap.
+            dt = min(self.odometry_timeout, stamp - self.limited_stamp)
+            self.limited += body_to_map[:2].dot([v.x, v.y, v.z]) * dt
+            error = target - self.limited
+            distance, step = np.linalg.norm(error), self.max_correction_speed * dt
+            self.limited = target if distance <= step else self.limited + error * step / distance
+        self.limited_stamp = stamp
+        return self.limited, float(np.sum((self.limited - target) ** 2))
+
+    def publish_estimates(self, quaternion, local_ready, ready):
+        odometry = self.ekf_odom
+        stamp = odometry.header.stamp.to_sec()
+        body_to_map = quaternion_matrix(quaternion)
+        pose = deepcopy(odometry.pose)
+        (pose.pose.position.x, pose.pose.position.y), gap = self.limit(odometry, body_to_map)
+        covariance = list(pose.covariance)
+        covariance[0] += gap
+        covariance[7] += gap
+        pose.covariance = covariance
+        state = State()
+        state.header = copy(odometry.header)
+        # Keep the existing altitude watchdog tied to a real ToF observation.
+        state.header.stamp = min((odometry.header.stamp, self.range_stamp), key=lambda value: value.to_sec())
+        state.pose_with_covariance = pose
+        state.twist_with_covariance.twist.angular = odometry.twist.twist.angular
+        yaw = tf.transformations.euler_from_quaternion(quaternion)[2]
+        c, s = math.cos(yaw), math.sin(yaw)
+        level = np.array([[c, s, 0.], [-s, c, 0.], [0., 0., 1.]])
+        rotation = level.dot(body_to_map)
+        v = odometry.twist.twist.linear
+        velocity = rotation.dot([v.x, v.y, v.z])
+        state.twist_with_covariance.twist.linear.x = velocity[0]
+        state.twist_with_covariance.twist.linear.y = velocity[1]
+        state.twist_with_covariance.twist.linear.z = velocity[2]
+        # State uses heading-level translation; Odometry retains physical body twist.
+        transform = np.eye(6)
+        transform[:3, :3] = rotation
+        covariance = np.asarray(odometry.twist.covariance).reshape(6, 6)
+        state.twist_with_covariance.covariance = transform.dot(covariance).dot(transform.T).ravel().tolist()
+        self.state_pub.publish(state)
+        self.ekf_published_stamp = stamp
+        self.state_stamp = state.header.stamp.to_sec()
+        if not local_ready:
+            return
+        limited = copy(odometry)
+        limited.pose = pose
+        self.odom_pub.publish(limited)
+        p = pose.pose.position
+        frame = odometry.header.frame_id
+        z = p.z + (self.floor_z if frame == self.frame else 0.)
+        self.broadcaster.sendTransform((p.x, p.y, z), quaternion, odometry.header.stamp,
+                                       self.body_frame, frame)
+        if ready:
+            room = PoseWithCovarianceStamped()
+            room.header = odometry.header
+            room.pose = pose
+            if self.floor_z:
+                room.pose = deepcopy(pose)
+                room.pose.pose.position.z = z
+            self.pose_pub.publish(room)
+
+
+def main():
+    rospy.init_node('fusion')
+    node = FusionLocalizationNode()
+    while not rospy.is_shutdown():
+        # Samples publish in their callback; keep checking freshness through gaps.
+        if not node.updated.wait(1 / 60.):
+            node.step()
+        node.updated.clear()
+
+
+if __name__ == '__main__':
+    main()

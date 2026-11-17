@@ -21,7 +21,12 @@ Assuming that the base environment is already set up on the DD24 by following th
 5. Keep it still for at least eight seconds while the EKF initializes; wait for localization readiness. Under **Routines**, select a script, enter its arguments, and click **Run**.
 6. Read all instructions carefully and be ready to disarm at all times.
 
-Note: Everything done on the drone is through this `pidrone_pkg`. Add routines to `scripts/PALS/routines` to make them available in the dashboard.
+Add flight routines to `routines/` to make them available in the dashboard.
+Tune XY hold, routine movement, and routine settling in `params/position.yaml`.
+Find altitude and velocity tuning, shared flight limits, and RC presets in `params/flight.yaml`.
+Set paired spacing limits and coordination timeouts in `params/coordination.yaml`.
+After updating to this layout, run `catkin_make` on each drone and use the
+dashboard from the same revision before restarting the nodes.
 
 **Separation guard** defaults off onboard and in the dashboard, bypassing spacing
 corrections and peer checks for both drones. Confirm
@@ -30,7 +35,7 @@ disarm/watchdog behavior remain active. Re-enable it under **Controls** while th
 connected drones are disarmed. The dashboard resets the switch off when reopened.
 
 For the complete firmware, driver and code rollout, see the
-[drone update guide](../tools/DRONE_UPDATE.md).
+[drone update guide](../tools/migration/DRONE_UPDATE.md).
 
 ## Betaflight telemetry setup
 
@@ -42,12 +47,12 @@ To install the firmware and save the 250 Hz serial setting together,
 run from the laptop with the drone disarmed and props removed:
 
 ```sh
-python3 tools/pals.py flash-fc --drone drone1
+python3 tools/pals.py migrate --drone drone1
 ```
 
 Use `--drone drone2` for drone2. The command backs up the selected drone, preserves
 its configuration, and verifies the update. See the
-[firmware instructions](../tools/firmware/betaflight/README.md#apply-to-a-drone) for
+[firmware instructions](../tools/migration/firmware/betaflight/README.md#apply-to-a-drone) for
 supported versions and the Pi-side code needed for 100 Hz IMU delivery.
 
 Drone2 uses a SpeedyBee F405 V3 with a custom Betaflight 2026.6.1 build
@@ -71,7 +76,7 @@ verification. The flash command preserves this setting; it does not enable it.
 
 The serial setting controls how often Betaflight services serial traffic. The
 USB interval is a compiled firmware change, preserved in the
-[patch and build instructions](../tools/firmware/betaflight/README.md). Flashing a stock
+[patch and build instructions](../tools/migration/firmware/betaflight/README.md). Flashing a stock
 image removes that change; restoring the CLI settings alone does not restore it.
 
 The Pi requests integrated rotation and specific force at 100 Hz for
@@ -84,12 +89,14 @@ change gyro sampling or PID loop rates. They are applied to drone2; drone1 is un
 
 Build the C++ EKF node onboard with `catkin_make` and source the workspace. It projects
 each fresh IMU sample for output while a worker handles delayed camera/ToF fusion.
+Delayed UWB fixes initialize room position and correct horizontal position during
+flight. The EKF continues on IMU, camera and ToF between fixes.
 Both paths consume integrated IMU increments directly. Splitting an interval assumes
 constant rotation rate and uniformly distributed delta velocity in its starting axes.
 The Python replay shares `libpidrone_ekf.so`. To build that library on the laptop:
 
 ```sh
-cmake -S src/native -B .venv/ekf-native
+cmake -S src/localization/native -B .venv/ekf-native
 cmake --build .venv/ekf-native
 ```
 
@@ -99,8 +106,11 @@ before running Python.
 Record from the laptop with props removed:
 
 ```sh
-python3 tools/flow_capture.py ekf --drone drone2 --seconds 40
+python3 tools/diagnostics/capture.py ekf --drone drone2 --seconds 40
 ```
+
+By default, captures go into `recordings/` in this checkout. Use `--out` to
+choose a different location.
 
 Captures require IMU, JPEGs, camera calibration and ToF, and include published
 estimates. Data is buffered on the Pi, downloaded, then removed there. Allow about
@@ -109,10 +119,14 @@ mark driver callbacks, not sensor acquisition.
 `camera_delay_s` subtracts the camera's delay relative to IMU timestamps during
 fusion; it leaves recorded timestamps unchanged.
 
-Fill in the [replay calibration profile](../tools/ekf_calibration.example.json), then run:
+If PID reports altitude unavailable, compare state and raw range ages on
+`/pidrone/localization/fusion_status` with the last accepted range age and
+correction result on `/pidrone/ekf/status`.
+
+Provide a JSON replay calibration profile, then run:
 
 ```sh
-.venv/bin/python tools/replay_ekf.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
+.venv/bin/python tools/diagnostics/replay.py CAPTURE --calibration PROFILE.json --out NEW_FOLDER
 ```
 
 The profile supplies sensor geometry, scales and initial state. Use
@@ -192,6 +206,8 @@ NOTE: IF CAMERA IS CALIBRATED, DO NOT TOUCH THE FOCUS RING.
 ## UWB + ToF Localization
 
 Start each drone facing the top of the map (+Y) before starting its flight controller.
+Set fusion freshness and anchor limits in `params/fusion.yaml` and
+UWB reader settings in `params/uwb.yaml`.
 
 When calibrating:
 - 4D12: Tag 6
@@ -200,14 +216,8 @@ When calibrating:
 - CA83: Tag 3
 
 ## Tips + Tricks
-- Use `d + [enter] to exit out of a screen session
-- If you come across an issue with the screen session, run:
-   ```
-   screen -ls
-   screen -S <session-id> -X quit
-   cd ~/catkin_ws/src/pidrone_pkg
-   screen -c pi.screenrc
-   ```
+- Press the backtick key, then `d`, to detach from Screen.
+- Retry an exited node with the command printed in its window. Use the dashboard's **Restart** button to restart all nodes while disarmed.
 
 ## To Install Python Dependencies on Drone
 1. Add to `requirements.txt`
