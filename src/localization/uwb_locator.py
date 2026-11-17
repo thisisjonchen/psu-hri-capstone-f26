@@ -1,6 +1,6 @@
 """Nonblocking DWM1001/PANS serial reader.
 
-Position timestamps are host monotonic receipt times, not UWB measurement times.
+Range reports are stamped with host monotonic receipt time.
 """
 from __future__ import print_function
 
@@ -88,32 +88,28 @@ def parse_lec_line(line, timestamp=None):
             anchors.append(Anchor(address, x, y, z, distance))
         timestamp = monotonic() if timestamp is None else timestamp
         tail = parts[2 + 6 * count:]
-        position = parse_lep_line(','.join(tail), timestamp) if tail else None
-        if tail and (len(tail) != 5 or tail[0] != 'POS' or position is None):
+        if tail and tail[0] != 'POS':
             return None
+        position = parse_lep_line(','.join(tail), timestamp) if tail else None
         return AnchorSample(tuple(sorted(anchors, key=lambda a: a.id)), timestamp), position
     except (ValueError, IndexError):
         return None
 
 
 class UWBLocator(object):
-    """Keep the latest accepted fix; serial I/O and shell setup run in a worker.
+    """Keep the latest range report; serial I/O and shell setup run in a worker.
 
     Resetting the tag once on connection establishes a known stream state. Sending
     lec again after a timeout would turn a slow-starting stream OFF.
     """
-    def __init__(self, port=None, baud=115200, min_quality=50, stale_after=0.5,
-                 serial_silence_timeout=30.0):
-        if (not 0 <= min_quality <= 100 or not all(finite(v) and v > 0 for v in
-                                                  (stale_after, serial_silence_timeout))):
-            raise ValueError('Invalid minimum quality or timeout')
+    def __init__(self, port=None, baud=115200, serial_silence_timeout=30.0):
+        if not finite(serial_silence_timeout) or serial_silence_timeout <= 0:
+            raise ValueError('Invalid serial silence timeout')
         self.port, self.baud = port, baud
-        self.min_quality, self.stale_after = min_quality, stale_after
         self.serial_silence_timeout = serial_silence_timeout
         self._serial = None
         self._thread = None
         self._stop = threading.Event()
-        self._latest = None
         self._latest_anchors = None
         self._connected = False
         self._in_shell = False
@@ -138,7 +134,6 @@ class UWBLocator(object):
                 ('serial_timeout_s', str(self.serial_timeout)),
                 ('record_age_s', age(self.last_record_at)),
                 ('last_reported_quality', str(self.last_quality) if self.last_quality is not None else 'none'),
-                ('min_quality', str(self.min_quality)),
                 ('rejected_records', str(self.rejected_records)),
                 ('update_rate_verified', str(self.rate_verified)),
                 ('update_rate_warning', self.rate_warning),
@@ -161,16 +156,8 @@ class UWBLocator(object):
         return self.running and self._connected
 
     @property
-    def position(self):
-        return self._latest if self.connected else None
-
-    @property
     def anchor_sample(self):
         return self._latest_anchors if self.connected else None
-
-    def is_fresh(self):
-        p = self.position
-        return p is not None and 0 <= monotonic() - p.timestamp <= self.stale_after
 
     def start(self):
         if self.running:
@@ -214,7 +201,6 @@ class UWBLocator(object):
         if self._serial is not None and self._serial.is_open:
             self._serial.close()
         self._thread = None
-        self._latest = None
         self._latest_anchors = None
         self._connected = False
         self.reader_state = 'stopped'
@@ -268,7 +254,6 @@ class UWBLocator(object):
                     line, pending = pending.split(b'\n', 1)
                     text = line.decode('ascii', 'ignore')
                     self.last_line = text.strip()[-512:]
-                    complete = False
                     if 'DIST,' in text:
                         record = parse_lec_line(text)
                         if record is None:
@@ -276,7 +261,6 @@ class UWBLocator(object):
                             continue
                         self._latest_anchors, p = record
                         self.last_record_at = self._latest_anchors.timestamp
-                        complete = len(self._latest_anchors.anchors) == 4
                     else:
                         p = parse_lep_line(text)
                         if p is not None:
@@ -285,10 +269,6 @@ class UWBLocator(object):
                             self.rejected_records += 1
                     if p is not None:
                         self.last_quality = p.quality
-                    # Require four anchors in this record, not a cached layout.
-                    # Partial records leave the accepted fix and its age unchanged.
-                    if complete and p is not None and p.quality >= self.min_quality:
-                        self._latest = p
                 if len(pending) > 2048:
                     pending = b''
         except (serial.SerialException, OSError, ValueError, RuntimeError) as error:
@@ -298,7 +278,6 @@ class UWBLocator(object):
             self._connected = False
             if self.reader_state != 'error':
                 self.reader_state = 'stopped'
-            self._latest = None
             self._latest_anchors = None
             try:
                 if self._serial.is_open and self._in_shell:
@@ -370,7 +349,7 @@ if __name__ == '__main__':
     with UWBLocator(sys.argv[1]) as locator:
         try:
             while locator.running:
-                print(locator.position, 'fresh' if locator.is_fresh() else 'STALE')
+                print(locator.anchor_sample)
                 time.sleep(0.2)
         except KeyboardInterrupt:
             pass

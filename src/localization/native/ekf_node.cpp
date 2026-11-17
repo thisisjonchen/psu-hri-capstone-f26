@@ -39,7 +39,6 @@ pals::Profile load_profile(ros::NodeHandle& node) {
     p.gyro_scale=parameter(node,"gyro_rad_s_per_count",1)[0];
     p.delay=parameter(node,"fusion_delay_s",1)[0];
     node.param("calibration/camera_delay_s",p.camera_delay,0.);
-    p.uwb_delay=parameter(node,"uwb_delay_s",1)[0];
     node.getParam("calibration/initial_rest_s",p.initial_rest_seconds);
     node.getParam("calibration/initial_uwb_fixes",p.initial_uwb_fixes);
     node.getParam("calibration/camera_min_height_m",p.camera_min_height);

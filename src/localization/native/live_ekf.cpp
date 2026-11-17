@@ -68,8 +68,6 @@ void Profile::validate() const {
     require(std::isfinite(delay) && delay>=0. && delay<=.4,"Live fusion delay must be in [0, 0.4]");
     require(std::isfinite(camera_delay) && camera_delay>=0. && camera_delay<=delay,
             "Camera delay must fit within the fusion delay");
-    require(std::isfinite(uwb_delay) && uwb_delay>=0. && uwb_delay<=delay,
-            "UWB delay must fit within the fusion delay");
     require(std::isfinite(initial_rest_seconds) && initial_rest_seconds>0. && initial_uwb_fixes>0,
             "Startup requires a positive rest duration and UWB fix count");
     require(std::isfinite(camera_min_height) && std::isfinite(camera_max_floor_distance)
@@ -347,9 +345,8 @@ void LiveEKF::image(std::int64_t stamp,const std::vector<unsigned char>& encoded
     queue(m);
 }
 void LiveEKF::uwb(std::int64_t stamp,double x,double y,double variance) {
-    if (stamp<=0 || !uwb_reference_valid_ || !fault_.empty() || (origin_ns_ && !room_aligned_)) return;
-    stamp-=std::llround(profile_.uwb_delay*1.e9);
-    if (stamp<=0 || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
+    if (stamp<=0 || !uwb_reference_valid_ || !fault_.empty() || (origin_ns_ && !room_aligned_)
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(variance) || variance<=0.) return;
     if (!origin_ns_) {
         if (rest_since_ && stamp>=rest_since_) uwb_initial_.push_back({stamp,x,y,variance});
         return;

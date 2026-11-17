@@ -439,6 +439,17 @@ extern "C" int pals_ekf_correct(double* state, double* covariance, const double*
         }
     if (!finite(delta,15) || !finite(covariance,225)) return 3;
     if (xy_only) {
+        Matrix reset = {};
+        for (int i=0; i<15; ++i) reset[15*i+i]=1.;
+        double shift[9];
+        skew(delta,shift);
+        for (int i=0; i<3; ++i)
+            for (int j=0; j<3; ++j)
+                reset[15*i+j+6]=shift[3*i+j];
+        std::copy(covariance,covariance+225,prior.begin());
+        const Matrix recentered=multiply(multiply(reset,prior),transpose(reset));
+        if (!finite(recentered.data(),recentered.size())) return 3;
+        std::copy(recentered.begin(),recentered.end(),covariance);
         state[0]+=delta[0];
         state[1]+=delta[1];
         symmetrize(covariance);

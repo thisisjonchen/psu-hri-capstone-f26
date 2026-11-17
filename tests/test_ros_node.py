@@ -7,7 +7,8 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
-from localization.uwb_locator import Position, Anchor, AnchorSample
+from localization.uwb_locator import Anchor, AnchorSample, parse_lec_line
+from test_position import anchor_ranges
 
 
 class Stamp(object):
@@ -47,11 +48,9 @@ class FakeLocator(object):
     def __init__(self, **kwargs):
         self.port = kwargs['port']
         self.running = False
-        self.position = None
         self.error = None
         self.starts = 0
         self.anchor_sample = None
-        self.stale_after = kwargs['stale_after']
 
     def start(self):
         self.starts += 1
@@ -60,7 +59,7 @@ class FakeLocator(object):
 
     def stop(self):
         self.running = False
-        self.position = None
+        self.anchor_sample = None
 
     def diagnostics(self, now):
         return [('reader_state', 'streaming')]
@@ -123,13 +122,15 @@ class NodeTest(unittest.TestCase):
         self.node.imu_callback(SimpleNamespace(
             orientation=SimpleNamespace(x=0, y=0, z=0, w=1), orientation_covariance=[0] * 9,
             header=SimpleNamespace(stamp=Stamp(self.ros_now))))
-        self.node.locator.position = Position(1, 2, 999, 90, self.now)
+        self.node.locator.anchor_sample = AnchorSample(anchor_ranges((1., 2., distance)), self.now)
 
     def test_publication_uses_tof_covariance_and_original_stamp_only_once(self):
         self.sensors(range_stamp=99.95)
         self.node.step()
         msg = self.poses[-1]
-        self.assertEqual((msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z), (1, 2, 0.5))
+        self.assertAlmostEqual(msg.pose.pose.position.x, 1.)
+        self.assertAlmostEqual(msg.pose.pose.position.y, 2.)
+        self.assertEqual(msg.pose.pose.position.z, 0.5)
         self.assertEqual(msg.header.stamp.to_sec(), 99.95)
         self.assertEqual(msg.header.frame_id, 'map')
         self.assertEqual(msg.pose.pose.orientation.w, 1)
@@ -139,12 +140,31 @@ class NodeTest(unittest.TestCase):
         self.node.step()
         self.assertEqual(len(self.poses), 1)
         self.assertEqual(self.health.level, 0)
-        self.assertEqual(self.health.values[1].value, 'ToF')
-        self.assertEqual({item.key: item.value for item in self.health.values}['reader_state'], 'streaming')
+        values = {item.key: item.value for item in self.health.values}
+        self.assertEqual(values['height_source'], 'ToF')
+        self.assertEqual(values['reader_state'], 'streaming')
         xy = self.messages['pidrone/localization/uwb'][-1]
         self.assertEqual(xy.header.stamp.to_sec(), 100)
         self.assertEqual(xy.pose.covariance[14], 1e6)
         self.assertEqual(len(self.messages['pidrone/localization/uwb']), 1)
+
+    def test_xy_requires_four_consistent_ranges_and_ignores_firmware_position(self):
+        self.sensors()
+        xy = self.messages['pidrone/localization/uwb']
+        anchors = self.node.locator.anchor_sample.anchors
+        fields = ['AN%d,%s,%s,%s,%s,%s' % ((i,) + anchor) for i, anchor in enumerate(anchors)]
+        for records, pans, expected in ((fields, ',POS,99,99,99,1', 1),
+                                        (fields[:-1], ',POS,1,2,.5,100', 1),
+                                        (fields, '', 2)):
+            self.now += .1
+            self.ros_now += .1
+            self.sensors()
+            line = 'DIST,%d,%s%s' % (len(records), ','.join(records), pans)
+            self.node.locator.anchor_sample = parse_lec_line(line, self.now)[0]
+            self.node.step()
+            self.assertEqual(len(xy), expected)
+            self.assertAlmostEqual(xy[-1].pose.pose.position.x, 1.)
+            self.assertAlmostEqual(xy[-1].pose.pose.position.y, 2.)
 
     def test_missing_invalid_or_stale_tof_suppresses_pose_and_publishes_health(self):
         self.node.step()
@@ -153,17 +173,17 @@ class NodeTest(unittest.TestCase):
         self.sensors(distance=8)
         self.node.step()
         self.assertEqual(self.poses, [])
-        self.assertEqual(len(self.messages['pidrone/localization/uwb']), 1)
+        self.assertEqual(self.messages['pidrone/localization/uwb'], [])
         self.sensors()
         self.now, self.ros_now = 10.6, 100.6
-        self.node.locator.position = Position(1, 2, 999, 90, self.now)
+        self.node.locator.anchor_sample = AnchorSample(anchor_ranges(), self.now)
         self.node.step()
         self.assertEqual(self.poses, [])
         self.assertIn('ToF', self.health.message)
 
     def test_disconnect_attempts_reconnect_without_publishing_old_fix(self):
         self.sensors()
-        self.node.locator.position = None
+        self.node.locator.anchor_sample = None
         self.node.locator.running = False
         self.node.step()
         self.assertEqual(self.node.locator.starts, 1)
@@ -186,12 +206,11 @@ class NodeTest(unittest.TestCase):
 
     def test_ros_clock_reset_invalidates_cached_sensors(self):
         self.sensors()
-        self.node.locator.anchor_sample = AnchorSample((Anchor('0CA8', 0, 6, 2.25, 6.5),), self.now)
         xy = self.messages['pidrone/localization/uwb']
         anchors = self.messages['pidrone/localization/anchors']
         self.node.step()
         self.assertEqual(len(xy), 1)
-        self.assertEqual(anchors[-1].anchor_ids, ['0CA8'])
+        self.assertEqual(len(anchors[-1].anchor_ids), 4)
         self.ros_now = 50
         self.node.step()
         self.assertEqual(len(xy), 1, 'do not re-stamp the cached horizontal fix')
@@ -205,7 +224,6 @@ class NodeTest(unittest.TestCase):
         self.assertEqual(len(xy), 1)
         self.assertEqual(len(anchors), 2)
         self.sensors()
-        self.node.locator.anchor_sample = self.node.locator.anchor_sample._replace(timestamp=self.now)
         self.node.step()
         self.assertEqual(len(self.poses), 2)
         self.assertAlmostEqual(xy[-1].header.stamp.to_sec(), self.ros_now)

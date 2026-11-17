@@ -70,6 +70,6 @@ class SerialOwnershipTest(unittest.TestCase):
                 loc.start()
             configure.assert_not_called()
         self.assertFalse(loc.running)
-        self.assertIsNone(loc.position)
+        self.assertIsNone(loc.anchor_sample)
         self.assertEqual(loc.reader_state, 'error')
         self.assertIn('already in use', loc.error)

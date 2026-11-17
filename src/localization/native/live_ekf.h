@@ -20,7 +20,7 @@ Quaternion product(const Quaternion& a, const Quaternion& b);
 
 struct Profile {
     double acceleration_scale, gyro_scale, delay;
-    double camera_delay = 0., uwb_delay = 0.;
+    double camera_delay = 0.;
     double initial_rest_seconds = 8.;
     int initial_uwb_fixes = 40;
     double camera_min_height = .1, camera_max_floor_distance = 1.5, camera_pixel_stddev = 1.5;

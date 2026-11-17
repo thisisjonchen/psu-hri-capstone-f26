@@ -120,21 +120,22 @@ class LocatorTest(unittest.TestCase):
         for line in [LEC.replace('DIST,4', 'DIST,5'), LEC.replace('1150', '1151'),
                      LEC.replace('1151', 'ZZZZ'), LEC.replace(',3,6,', ',nan,6,'),
                      LEC.replace(',2.25,6.44', ',2.25,-1'), LEC.replace('AN3', 'AN0'),
-                     LEC.replace(',POS,', ',bad,POS,'), 'DIST,2,AN0,1151,0,0',
-                     LEC.replace(',9,90', ',9,101')]:
+                     LEC.replace(',POS,', ',bad,POS,'), 'DIST,2,AN0,1151,0,0']:
             self.assertIsNone(parse_lec_line(line), line)
+        ranges_only, p = parse_lec_line(LEC.replace(',9,90', ',9,101'), timestamp=100)
+        self.assertEqual(ranges_only, sample)
+        self.assertIsNone(p)
         partial, p = parse_lec_line('DIST,1,AN2,ca8,0,6,2.25,6.5', timestamp=101)
         self.assertEqual(partial.anchors[0].id, '0CA8')
         self.assertIsNone(p)
         self.assertEqual(parse_lec_line('DIST,0', timestamp=102)[0].anchors, ())
 
-    def test_delayed_first_fix_does_not_toggle_stream_off_or_discard_first_fix(self):
+    def test_delayed_first_report_does_not_toggle_stream_off(self):
         fake = FakeSerial(streaming=True)
         loc = self.start_locator(fake)
-        self.assertIsNone(loc.position)
+        self.assertIsNone(loc.anchor_sample)
         fake.lines.append(LEC.encode('ascii'))
-        self.assertTrue(wait_until(lambda: loc.position is not None))
-        self.assertEqual((loc.position.x, loc.position.y), (1, 2))
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
         self.assertEqual(fake.writes.count(b'lec\r'), 1)
         self.assertEqual(len(loc.anchor_sample.anchors), 4)
         self.assertIn(b'reset\r', fake.writes)
@@ -146,13 +147,13 @@ class LocatorTest(unittest.TestCase):
 
     def test_prolonged_serial_silence_closes_reader_for_reconnect(self):
         for lines in ([], [LEC.encode('ascii')]):
-            with self.subTest(had_position=bool(lines)):
+            with self.subTest(had_ranges=bool(lines)):
                 fake = FakeSerial(lines)
                 loc = self.start_locator(fake, serial_silence_timeout=0.05)
                 self.assertTrue(wait_until(lambda: not loc.running))
                 self.assertIn('No UWB serial data', loc.error)
                 self.assertFalse(fake.is_open)
-                self.assertIsNone(loc.position)
+                self.assertIsNone(loc.anchor_sample)
                 self.assertEqual(fake.writes.count(b'lec\r'), 1)
         # Unconfirmed slow stationary updates must get time to arrive.
         loc.update_rate = (1, 100)
@@ -173,8 +174,7 @@ class LocatorTest(unittest.TestCase):
                 fake.rate_reply, fake.get_rate_reply, fake.info_reply = reply, readback, info
                 fake.apply_after = apply_after
                 loc = self.start_locator(fake)
-                self.assertTrue(wait_until(lambda: loc.position is not None))
-                self.assertTrue(loc.is_fresh())
+                self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
                 self.assertEqual(loc.rate_verified, verified)
                 self.assertEqual(bool(loc.rate_warning), not verified)
                 self.assertIsNone(loc.error)
@@ -189,87 +189,75 @@ class LocatorTest(unittest.TestCase):
         # A reconnect must repair a reverted tag, even after an earlier verified run.
         fake = FakeSerial([LEC.encode('ascii')])
         loc = self.start_locator(fake)
-        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
         loc.stop()
         replacement = FakeSerial([LEC.encode('ascii')])
         with mock.patch('localization.uwb_locator.ExclusiveSerial', return_value=replacement):
             loc.start()
-        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
         self.assertEqual(replacement.rate_writes, 1)
         self.assertTrue(loc.rate_verified)
 
-    def test_partial_lines_and_quality_filter(self):
+    def test_partial_lines_and_optional_firmware_quality(self):
         raw = LEC.encode('ascii')
         low_quality = LEC.replace('POS,1,2,9,90', 'POS,9,9,9,10')
-        fake = FakeSerial([raw[:30], raw[30:], b'POS,unsupported\r\n', low_quality.encode('ascii')])
+        fake = FakeSerial([raw[:30], raw[30:]])
         loc = self.start_locator(fake)
+        self.assertTrue(wait_until(lambda: loc.last_quality == 90))
+        first = loc.anchor_sample
+        self.assertEqual(len(first.anchors), 4)
+        fake.lines.extend([b'POS,unsupported\r\n', low_quality.encode('ascii')])
         self.assertTrue(wait_until(lambda: loc.last_quality == 10))
-        self.assertEqual(loc.position.x, 1)
+        self.assertGreater(loc.anchor_sample.timestamp, first.timestamp)
         self.assertEqual(len(loc.anchor_sample.anchors), 4)
-        self.assertTrue(loc.is_fresh())
         details = dict(loc.diagnostics(time.monotonic()))
         self.assertEqual(details['reader_state'], 'streaming')
         self.assertEqual(details['last_reported_quality'], '10')
         self.assertEqual(details['rejected_records'], '1')
-        with mock.patch('localization.uwb_locator.monotonic', return_value=loc.position.timestamp + 1):
-            self.assertFalse(loc.is_fresh())
 
-    def test_position_requires_four_anchors_in_the_same_record(self):
+    def test_reports_keep_only_ranges_from_the_same_record(self):
         partial = LEC.replace('DIST,4', 'DIST,3').replace('AN3,1150,0,0,2.25,3.19,', '')
         partial = partial.replace('POS,1,2,9,90', 'POS,8,8,9,99')
         fake = FakeSerial([partial.encode('ascii')])
         loc = self.start_locator(fake)
         self.assertTrue(wait_until(lambda: loc.last_quality == 99))
-        self.assertIsNone(loc.position)
         self.assertEqual(len(loc.anchor_sample.anchors), 3)
 
         fake.lines.append(LEC.encode('ascii'))
-        self.assertTrue(wait_until(lambda: loc.position is not None))
-        accepted = loc.position
-        # A cached complete layout cannot qualify a standalone POS message.
+        self.assertTrue(wait_until(lambda: len(loc.anchor_sample.anchors) == 4))
+        complete = loc.anchor_sample
         fake.lines.append(b'POS,9,9,9,98\r\n')
         self.assertTrue(wait_until(lambda: loc.last_quality == 98))
-        self.assertIs(loc.position, accepted)
+        self.assertIs(loc.anchor_sample, complete)
         fake.lines.append(partial.encode('ascii'))
         self.assertTrue(wait_until(lambda: loc.last_quality == 99))
         self.assertEqual(len(loc.anchor_sample.anchors), 3)
-        self.assertIs(loc.position, accepted)
-        with mock.patch('localization.uwb_locator.monotonic', return_value=accepted.timestamp + 1):
-            self.assertFalse(loc.is_fresh())
+        self.assertGreater(loc.anchor_sample.timestamp, complete.timestamp)
 
-        fake.lines.append(LEC.replace('POS,1,2,9,90', 'POS,3,4,9,90').encode('ascii'))
-        self.assertTrue(wait_until(lambda: loc.position.x == 3))
-        self.assertGreater(loc.position.timestamp, accepted.timestamp)
-        self.assertEqual(len(loc.anchor_sample.anchors), 4)
-        self.assertTrue(loc.is_fresh())
-
-    def test_stop_clears_fix_and_closes_port(self):
+    def test_stop_clears_ranges_and_closes_port(self):
         fake = FakeSerial([LEC.encode('ascii')])
         loc = self.start_locator(fake)
-        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
         loc.stop()
         self.assertFalse(loc.running)
-        self.assertFalse(loc.is_fresh())
-        self.assertIsNone(loc.position)
         self.assertIsNone(loc.anchor_sample)
         self.assertFalse(fake.streaming)
         self.assertFalse(fake.is_open)
 
-    def test_serial_failure_invalidates_fix_and_can_reconnect(self):
+    def test_serial_failure_invalidates_ranges_and_can_reconnect(self):
         fake = FakeSerial([LEC.encode('ascii')])
         loc = self.start_locator(fake)
-        self.assertTrue(wait_until(lambda: loc.position is not None))
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
         fake.fail = True
         self.assertTrue(wait_until(lambda: not loc.running))
-        self.assertFalse(loc.is_fresh())
         self.assertIsNone(loc.anchor_sample)
         self.assertEqual(loc.error, 'device unplugged')
         self.assertFalse(fake.is_open)
-        replacement = FakeSerial([LEC.replace('POS,1,2,9,90', 'POS,3,4,0,90').encode('ascii')])
+        replacement = FakeSerial([LEC.replace('6.44', '6.59').encode('ascii')])
         with mock.patch('localization.uwb_locator.ExclusiveSerial', return_value=replacement):
             loc.start()
-        self.assertTrue(wait_until(lambda: loc.position is not None))
-        self.assertEqual(loc.position.x, 3)
+        self.assertTrue(wait_until(lambda: loc.anchor_sample is not None))
+        self.assertEqual(loc.anchor_sample.anchors[-1].distance, 6.59)
         self.assertIsNone(loc.error)
 
     def test_no_port_never_opens_a_guessed_device(self):

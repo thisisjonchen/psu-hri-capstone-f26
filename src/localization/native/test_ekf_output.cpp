@@ -25,7 +25,7 @@ pals::Profile startup_profile() {
     profile.acceleration_scale=profile.gyro_scale=1.;
     profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
     profile.range_beam=pals::Vec(0.,0.,-1.);
-    profile.delay=.35; profile.uwb_delay=.3;
+    profile.delay=.35;
     return profile;
 }
 void ground_tick(pals::LiveEKF& filter,int i,bool valid_tof=true) {
@@ -164,8 +164,10 @@ TEST(EkfOutput, ProjectionUsesSharedRangeGeometryAndPreservesImuFailure) {
     EXPECT_EQ(seed.covariance,actual.covariance);
 }
 
-TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
-    pals::LiveEKF filter(startup_profile());
+TEST(EkfOutput, UwbInitializesAndCorrectsOnlyRoomXYAtFixStamp) {
+    auto profile=startup_profile();
+    profile.uwb_offset=pals::Vec(0.,.038,0.);
+    pals::LiveEKF filter(profile);
     for (int i=1;i<=900;++i) {
         ground_tick(filter,i);
         if (i%10==0) filter.uwb(1000000000LL+i*10000000LL,.4,-.2,.01);
@@ -174,16 +176,18 @@ TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
     ASSERT_TRUE(filter.snapshot().initialized);
     EXPECT_TRUE(filter.snapshot().room_aligned);
     const auto initialized=filter.snapshot().filter;
-    EXPECT_NEAR(initialized.position()[0],.4,1.e-9);
+    // With the body facing +Y, its left-mounted tag is 3.8 cm toward map -X.
+    EXPECT_NEAR(initialized.position()[0],.438,1.e-9);
     EXPECT_NEAR(initialized.position()[1],-.2,1.e-9);
     auto baseline=filter;
-    for (int i=901;i<=1010;++i) {
+    for (int i=901;i<=1040;++i) {
         const auto ns=1000000000LL+i*10000000LL;
-        // Stop aiding both filters apart from a delayed UWB fix in one.
+        // Only one filter receives the fix. It should apply at the fix timestamp.
         if (i==1000) filter.uwb(ns,.48,-.12,.01);
         const pals::Imu imu{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)};
         feed_imu(filter,ns,imu,i*.01);
         feed_imu(baseline,ns,imu,i*.01);
+        if (i==1034) EXPECT_EQ(filter.snapshot().filter.state,baseline.snapshot().filter.state);
     }
     const auto result=filter.snapshot(), reference=baseline.snapshot();
     EXPECT_TRUE(result.fault.empty());
@@ -191,6 +195,17 @@ TEST(EkfOutput, DelayedUwbInitializesAndCorrectsOnlyRoomXY) {
     EXPECT_GT(result.filter.position()[1],reference.filter.position()[1]);
     for (std::size_t i=2;i<result.filter.state.size();++i)
         EXPECT_NEAR(result.filter.state[i],reference.filter.state[i],1.e-12);
+}
+
+TEST(EkfOutput, XyOnlyCorrectionPreservesUnobservedPublicCovariance) {
+    auto filter=resting(1.,.75);
+    const cv::Mat prior=filter.public_covariance();
+    cv::Mat h=cv::Mat::zeros(2,15,CV_64F);
+    h.at<double>(0,0)=h.at<double>(1,1)=1.;
+    ASSERT_TRUE(filter.correct((cv::Mat_<double>(2,1)<<.2,.2),h,cv::Mat::eye(2,2,CV_64F)*.01,9.21,true));
+    const cv::Mat posterior=filter.public_covariance();
+    const cv::Range unobserved(2,15);
+    EXPECT_LT(cv::norm(prior(unobserved,unobserved)-posterior(unobserved,unobserved),cv::NORM_INF),1.e-12);
 }
 
 TEST(EkfOutput, StartsLocallyWhenUwbIsMissingAndKeepsItsOrigin) {
