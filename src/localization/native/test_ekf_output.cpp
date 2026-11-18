@@ -25,7 +25,7 @@ pals::Profile startup_profile() {
     profile.acceleration_scale=profile.gyro_scale=1.;
     profile.imu_rotation=profile.camera_rotation=pals::Rotation::eye();
     profile.range_beam=pals::Vec(0.,0.,-1.);
-    profile.delay=.35;
+    profile.delay=.15;
     return profile;
 }
 void ground_tick(pals::LiveEKF& filter,int i,bool valid_tof=true) {
@@ -182,12 +182,12 @@ TEST(EkfOutput, UwbInitializesAndCorrectsOnlyRoomXYAtFixStamp) {
     auto baseline=filter;
     for (int i=901;i<=1040;++i) {
         const auto ns=1000000000LL+i*10000000LL;
-        // Only one filter receives the fix. It should apply at the fix timestamp.
-        if (i==1000) filter.uwb(ns,.48,-.12,.01);
+        // The fix arrives 50 ms after its stamp and is fused at that stamp.
+        if (i==1005) filter.uwb(ns-50000000LL,.48,-.12,.01);
         const pals::Imu imu{0.,.01,pals::Quaternion(0.,0.,0.,1.),pals::Vec(0.,0.,.098)};
         feed_imu(filter,ns,imu,i*.01);
         feed_imu(baseline,ns,imu,i*.01);
-        if (i==1034) EXPECT_EQ(filter.snapshot().filter.state,baseline.snapshot().filter.state);
+        if (i==1014) EXPECT_EQ(filter.snapshot().filter.state,baseline.snapshot().filter.state);
     }
     const auto result=filter.snapshot(), reference=baseline.snapshot();
     EXPECT_TRUE(result.fault.empty());

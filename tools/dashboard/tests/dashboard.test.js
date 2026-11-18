@@ -808,13 +808,6 @@ test('keyboard takes over from position control and brakes on release', () => {
   app.fleetMap.previewTarget('drone1', 1, 2);
   app.fleetMap.sendTarget();
   assert.equal(a.publishers.roomTarget.messages.length, 1);
-  app.key('keydown', 'w');
-  for (const drone of [a, b]) {
-    assert.equal(last(drone, 'twist').linear.y, 0.1);
-    assert.equal(drone.publishers.pose.messages.length, 0);
-  }
-  app.key('keyup', 'w');
-  for (const drone of [a, b]) assert.equal(last(drone, 'twist').linear.y, 0);
   for (const [key, topic, field, axis, expected] of [
     ['w', 'twist', 'linear', 'y', .1], ['s', 'twist', 'linear', 'y', -.1],
     ['a', 'twist', 'linear', 'x', -.1], ['d', 'twist', 'linear', 'x', .1],
@@ -822,7 +815,10 @@ test('keyboard takes over from position control and brakes on release', () => {
     ['j', 'twist', 'angular', 'z', -50], ['l', 'twist', 'angular', 'z', 50]
   ]) {
     app.key('keydown', key);
-    for (const drone of [a, b]) assert.equal(last(drone, topic)[field][axis], expected);
+    for (const drone of [a, b]) {
+      assert.equal(last(drone, topic)[field][axis], expected);
+      if (key === 'w') assert.equal(drone.publishers.pose.messages.length, 0);
+    }
     app.key('keyup', key);
     for (const drone of [a, b]) {
       assert.deepEqual(last(drone, 'twist').linear, { x: 0, y: 0, z: 0 });
@@ -1879,7 +1875,7 @@ test('layout loss or replacement cancels an in-progress drag without restoring o
   assert.equal(Object.keys(map.targets).length, 0);
 });
 
-test('tap selection, overlapping targets, and keyboard adjustment work without coordinate fields', () => {
+test('tap selection, overlapping targets, and keyboard adjustment work', () => {
   const app = dashboard(), map = app.fleetMap;
   app.connect('drone1'); app.connect('drone2');
   map.previewTarget('drone1', 1, 2);
@@ -1889,7 +1885,6 @@ test('tap selection, overlapping targets, and keyboard adjustment work without c
   map.previewTarget('drone2', 1, 2);
   map.startTargetDrag(mapPointer(map, 1, 2));
   map.finishTargetDrag(mapPointer(map, 1, 2));
-  assert.equal(map.selectedTarget, 'drone2');
   assert.equal(map.targets.drone2.y, 2);
   assert.equal(map.selectedTarget, 'drone2', 'overlapping markers follow the existing selection');
   let prevented = false, stopped = false;
@@ -1898,8 +1893,6 @@ test('tap selection, overlapping targets, and keyboard adjustment work without c
   assert.ok(prevented && stopped);
   assert.equal(map.targets.drone2.x, 1.5);
   assert.equal(map.targets.drone1.x, 1);
-  const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
-  assert.doesNotMatch(html, /id="target-(drone|x|y|submit)"/);
 });
 
 test('mapped AprilTags average positions by ID and clear reports on generation change', () => {

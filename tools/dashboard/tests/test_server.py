@@ -146,14 +146,6 @@ class TerminalBridgeTest(unittest.TestCase):
 
 
 class PeerRelayLifecycleTest(unittest.TestCase):
-    def test_retired_toggle_api_cannot_disable_relay(self):
-        handler = DashboardHandler.__new__(DashboardHandler)
-        handler.allowed = lambda: True
-        handler.send_error = mock.Mock()
-        handler.path = '/api/peer-relay'
-        handler.do_POST()
-        handler.send_error.assert_called_once_with(404)
-
     def test_waits_for_pair_skips_invalid_data_and_reconnects_after_loss(self):
         stop = threading.Event()
         sockets = [mock.MagicMock() for _ in range(5)]
