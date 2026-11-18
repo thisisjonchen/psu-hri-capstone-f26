@@ -723,11 +723,9 @@ test('shared commands reach both bridges and individual commands only their targ
   app.dispatch('takeoff', 'drone2');
   assert.equal(last(a, 'mode').mode, 'ARMED');
   assert.equal(last(b, 'mode').mode, 'FLYING');
-  for (const drone of [a, b]) app.receive(drone, '/pidrone/position_control', { data: true });
   app.dispatch('forward', 'both');
   for (const drone of [a, b]) {
-    assert.equal(drone.publishers.positionMode.messages.length, 0);
-    assert.deepEqual(last(drone, 'pose').position, { x: 0, y: 0.1, z: 0 });
+    assert.equal(last(drone, 'twist').linear.y, 0.1);
   }
 });
 
@@ -802,28 +800,51 @@ test('an offline partner blocks shared flight commands without queued or partial
   assert.equal(app.drones.drone2.publish('mode', { mode: 'FLYING' }), false);
 });
 
-test('each drone follows its reported position mode for keyboard movement', () => {
+test('keyboard takes over from position control and brakes on release', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.receive(a, '/pidrone/position_control', { data: true });
-  app.receive(b, '/pidrone/position_control', { data: false });
-  app.key('keydown', 'i');
-  assert.equal(last(a, 'pose').position.y, 0.1);
-  assert.equal(last(b, 'twist').linear.y, 0.1);
-  assert.equal(a.positionMode, true);
-  assert.equal(b.positionMode, false);
+  readyRoom(app, a, 100);
+  app.receive(a, '/pidrone/mode', { mode: 'FLYING' });
+  app.fleetMap.previewTarget('drone1', 1, 2);
+  app.fleetMap.sendTarget();
+  assert.equal(a.publishers.roomTarget.messages.length, 1);
+  app.key('keydown', 'w');
+  for (const drone of [a, b]) {
+    assert.equal(last(drone, 'twist').linear.y, 0.1);
+    assert.equal(drone.publishers.pose.messages.length, 0);
+  }
+  app.key('keyup', 'w');
+  for (const drone of [a, b]) assert.equal(last(drone, 'twist').linear.y, 0);
+  for (const [key, topic, field, axis, expected] of [
+    ['w', 'twist', 'linear', 'y', .1], ['s', 'twist', 'linear', 'y', -.1],
+    ['a', 'twist', 'linear', 'x', -.1], ['d', 'twist', 'linear', 'x', .1],
+    ['i', 'pose', 'position', 'z', .05], ['k', 'pose', 'position', 'z', -.05],
+    ['j', 'twist', 'angular', 'z', -50], ['l', 'twist', 'angular', 'z', 50]
+  ]) {
+    app.key('keydown', key);
+    for (const drone of [a, b]) assert.equal(last(drone, topic)[field][axis], expected);
+    app.key('keyup', key);
+    for (const drone of [a, b]) {
+      assert.deepEqual(last(drone, 'twist').linear, { x: 0, y: 0, z: 0 });
+      assert.equal(last(drone, 'twist').angular.z, 0);
+    }
+  }
+  const counts = [a, b].map(drone => drone.publishers.positionMode.messages.length);
+  app.key('keydown', 'p');
+  app.key('keydown', 'v');
+  assert.deepEqual([a, b].map(drone => drone.publishers.positionMode.messages.length), counts);
 });
 
 test('key release stops original recipients even after focus changes', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.key('keydown', 'i');
+  app.key('keydown', 'w');
   const input = app.element(); input.closest = () => input;
-  app.key('keyup', 'i', input);
+  app.key('keyup', 'w', input);
   assert.equal(last(a, 'twist').linear.y, 0);
   assert.equal(last(b, 'twist').linear.y, 0);
   const sent = b.publishers.twist.messages.length;
-  app.key('keydown', 'i', input);
+  app.key('keydown', 'w', input);
   assert.equal(b.publishers.twist.messages.length, sent);
 });
 
@@ -848,13 +869,13 @@ test('Space allows typing in forms and terminals, and disarms all outside them',
 test('shared targeting stays intact and window blur stops movement', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.key('keydown', 'i');
+  app.key('keydown', 'w');
   assert.equal(app.currentTarget(), 'both');
   app.listeners.blur();
   assert.equal(last(a, 'twist').linear.y, 0);
   assert.equal(last(b, 'twist').linear.y, 0);
   assert.equal(app.heldKeys.size, 0);
-  app.key('keydown', 'a');
+  app.key('keydown', 'j');
   app.listeners.blur();
   assert.equal(last(b, 'twist').angular.z, 0);
 });
@@ -1247,13 +1268,13 @@ test('a stalled restart response releases the runner without retrying the comman
 test('a dropped partner stops movement until a fresh key press', () => {
   const app = dashboard();
   const a = app.connect('drone1'), b = app.connect('drone2');
-  app.key('keydown', 'i');
+  app.key('keydown', 'w');
   a.ros.close();
   assert.equal(last(b, 'twist').linear.y, 0);
-  app.key('keydown', 'i', app.element(), true);
+  app.key('keydown', 'w', app.element(), true);
   assert.equal(last(b, 'twist').linear.y, 0);
-  app.key('keyup', 'i');
-  app.key('keydown', 'i');
+  app.key('keyup', 'w');
+  app.key('keydown', 'w');
   assert.equal(last(b, 'twist').linear.y, 0.1);
 });
 

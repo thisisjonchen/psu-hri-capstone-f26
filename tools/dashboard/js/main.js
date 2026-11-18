@@ -608,7 +608,6 @@ class DroneSession {
     this.heartbeat = null;
     this.waitUntil = 0;
     this.retryTimer = null;
-    this.positionMode = false;
     this.startTime = null;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
@@ -789,7 +788,6 @@ class DroneSession {
     this.tagOverlayStamp = null;
     this.fusedFrame = null;
     this.startTime = null;
-    this.positionMode = false;
     this.verticalHeightSamples = [];
     this.verticalSampleAt = null;
     this.rangeStamp = null;
@@ -907,7 +905,6 @@ class DroneSession {
     publisher('roomTarget', '/pidrone/desired/room_target', 'geometry_msgs/PoseStamped');
     publisher('cancelRoomTarget', '/pidrone/desired/cancel_room_target', 'std_msgs/Empty');
     publisher('reset', '/pidrone/reset_transform', 'std_msgs/Empty');
-    publisher('map', '/pidrone/map', 'std_msgs/Empty');
     publisher('routineStart', '/pidrone/routine/start', 'std_msgs/Empty');
     // ROSLIB advertises on first publish, and the routine would miss that first start.
     this.publishers.routineStart.advertise();
@@ -1008,9 +1005,6 @@ class DroneSession {
       this.routineReadyAt = Date.now();
       releaseSyncStart();
     });
-    subscribe('/pidrone/position_control', 'std_msgs/Bool', message => {
-      this.positionMode = !!message.data;
-    });
     subscribe('/pidrone/range', 'sensor_msgs/Range', message => {
       const time = this.time(message);
       const valid = Number.isFinite(time) && Number.isFinite(message.range) && message.range >= 0 &&
@@ -1081,33 +1075,30 @@ class DroneSession {
     return true;
   }
 
-  setMode(position) {
-    if (this.publish('positionMode', { data: position })) this.positionMode = position;
-  }
-
   twist(x = 0, y = 0, z = 0, yaw = 0) {
     this.publish('twist', { linear: { x, y, z }, angular: { x: 0, y: 0, z: yaw } });
   }
 
-  pose(x = 0, y = 0, z = 0) {
-    this.publish('pose', { position: { x, y, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } });
+  pose(z = 0) {
+    this.publish('positionMode', { data: false });
+    this.publish('pose', { position: { x: 0, y: 0, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } });
   }
 
   command(action) {
     if (!this.connected) return;
-    if (action === 'position') return this.setMode(true);
-    if (action === 'velocity') return this.setMode(false);
-    if (action === 'reset' || action === 'map') return this.publish(action, {});
+    if (action === 'reset') {
+      this.twist();
+      return this.publish(action, {});
+    }
     if (action === 'stop') return this.twist();
     if (action === 'arm' || action === 'disarm' || action === 'takeoff') {
       this.twist();
-      if (this.positionMode) this.pose();
       return this.publish('mode', { mode: { arm: 'ARMED', disarm: 'DISARMED', takeoff: 'FLYING' }[action] });
     }
-    if (action === 'up' || action === 'down') return this.pose(0, 0, action === 'up' ? 0.05 : -0.05);
+    if (action === 'up' || action === 'down') return this.pose(action === 'up' ? 0.05 : -0.05);
     if (action === 'yawLeft' || action === 'yawRight') return this.twist(0, 0, 0, action === 'yawLeft' ? -50 : 50);
     const offset = { left: [-0.1, 0], right: [0.1, 0], forward: [0, 0.1], backward: [0, -0.1] }[action];
-    if (offset) return this.positionMode ? this.pose(...offset, 0) : this.twist(...offset, 0);
+    if (offset) return this.twist(...offset, 0);
   }
 }
 
@@ -1115,8 +1106,8 @@ const drones = {};
 let fleetMap = null;
 let anchorCalibration = null;
 const heldKeys = new Map();
-const movementKeys = { j: 'left', l: 'right', i: 'forward', k: 'backward', w: 'up', s: 'down', a: 'yawLeft', d: 'yawRight' };
-const actionKeys = { ';': 'arm', t: 'takeoff', r: 'reset', p: 'position', v: 'velocity', m: 'map' };
+const movementKeys = { w: 'forward', s: 'backward', a: 'left', d: 'right', i: 'up', k: 'down', j: 'yawLeft', l: 'yawRight' };
+const actionKeys = { ';': 'arm', t: 'takeoff', r: 'reset' };
 
 function sessionsFor(target) { return target === 'both' ? Object.values(drones) : [drones[target]]; }
 function currentTarget() {
@@ -1196,8 +1187,7 @@ function dispatch(action, target = currentTarget()) {
   available.forEach(drone => drone.command(action));
   const label = {
     arm: 'Arm', disarm: 'Disarm', takeoff: 'Takeoff', stop: 'Stop motion',
-    position: 'Position mode',
-    velocity: 'Velocity mode', reset: 'Reset position hold', map: 'Toggle mapping',
+    reset: 'Stop motion',
     up: 'Up', down: 'Down', yawLeft: 'Yaw left', yawRight: 'Yaw right',
     left: 'Left', right: 'Right', forward: 'Forward', backward: 'Backward'
   }[action];

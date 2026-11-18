@@ -356,6 +356,9 @@ class PIDController(object):
             rospy.logwarn('Ignoring invalid velocity target')
             return
         self.cancel_room_target()
+        if self.position_control:
+            self.position_control = False
+            self.position_control_pub.publish(False)
         self.desired_velocity.x = msg.linear.x
         self.desired_velocity.y = msg.linear.y
         self.desired_yaw_velocity = msg.angular.z
@@ -398,6 +401,9 @@ class PIDController(object):
 
     @synchronized
     def position_control_callback(self, msg):
+        if bool(msg.data) != self.position_control:
+            self.desired_velocity.x = self.desired_velocity.y = 0
+            self.velocity_deadline = None
         if not msg.data:
             self.cancel_room_target()
         if msg.data and not self.position_control:
@@ -415,8 +421,7 @@ class PIDController(object):
     @synchronized
     def step(self):
         """Compute roll, pitch, yaw, and throttle commands."""
-        if self.room_target is None:
-            self.expire_velocity_command()
+        self.expire_velocity_command()
         xy_ready = self.calc_error()
 
         # Learn trim from fresh EKF velocity using the spacing-adjusted request.

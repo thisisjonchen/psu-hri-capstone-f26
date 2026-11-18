@@ -77,16 +77,29 @@ class VelocityControllerTest(unittest.TestCase):
         for axis in (0, 1):
             self.assertLess(abs(mean([v[axis] for v in late])), .02, 'still drifting on axis %d' % axis)
 
-    def test_push_beyond_authority_saturates_then_recovers_without_windup(self):
-        flight = Flight(push_deg=(8.0, 0.0))
-        flight.run(10)  # Needs more lean than the 5 deg limit allows.
-        self.assertLessEqual(max(abs(c[0] - 1500) for c in flight.commands), 500 * 5 / 60. + 1e-9)
-        flight.axes[0].push = 0.0
-        start = len(flight.velocities)
-        flight.run(8)
-        after = [v[0] for v in flight.velocities[start:]]
-        self.assertLess(abs(mean(after[-int(2 * RATE):])), .03, 'did not settle after the push stopped')
-        self.assertGreater(min(after), -.4, 'wound-up integral flung it the other way')
+    def test_saturation_preserves_trim_and_reverses_with_the_error(self):
+        controller = VelocityController()
+        now = 10.
+        controller.step((0., 0.), now)
+        for _ in range(int(2 * RATE)):
+            now += 1 / RATE
+            controller.step((.1, -.1), now)
+        trim = controller.step((0., 0.), now)
+        self.assertGreater(trim[0], 1500)
+        self.assertLess(trim[1], 1500)
+
+        # Ten seconds against each output limit must not accumulate a new trim.
+        for direction in (1, -1):
+            for _ in range(int(10 * RATE)):
+                now += 1 / RATE
+                command = controller.step((10. * direction, -10. * direction), now)
+                self.assertGreater((command[0] - 1500) * direction, 0)
+                self.assertLess((command[1] - 1500) * direction, 0)
+            now += 1 / RATE
+            recovered = controller.step((0., 0.), now)
+            for actual, expected in zip(recovered, trim):
+                self.assertAlmostEqual(actual, expected,
+                                       msg='saturated error changed the learned trim')
 
     def test_requested_move_is_reached_without_oscillation(self):
         flight = Flight(push_deg=(1.0, -1.0), delay=.1).run(8, requested=(0.0, .2))

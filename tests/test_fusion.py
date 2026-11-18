@@ -396,7 +396,7 @@ class FusionNodeTest(unittest.TestCase):
         self.assertIsNone(controller.room_target)
         controller.local_ready_callback(NS(data=False))
         controller.calc_error()
-        self.assertTrue(controller.position_control)
+        self.assertFalse(controller.position_control)
         self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0, 0))
 
     def test_room_commands_reject_wrong_frame_outside_or_invalid_outline_and_disarmed_mode(self):
@@ -455,6 +455,58 @@ class FusionNodeTest(unittest.TestCase):
         self.assertEqual(controller.desired_yaw_velocity, 0)
         self.assertIsNone(controller.velocity_deadline)
         self.assertIsNone(controller.yaw_deadline)
+
+    def test_position_mode_switch_clears_motion_and_preserves_repeated_hold(self):
+        controller = self.controller()
+        command = twist()
+        command.linear.x, command.linear.y = .1, -.1
+        controller.desired_twist_callback(command)
+        controller.velocity.integral = [.1, -.1]
+        controller.position_control_callback(NS(data=True))
+        controller.calc_error()
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0., 0.))
+        self.assertIsNone(controller.velocity_deadline)
+        self.assertEqual(controller.velocity.integral, [.1, -.1])
+        current = controller.current_state
+        current.pose_with_covariance.pose.position.x += .2
+        controller.current_state_callback(current)
+        controller.position_control_callback(NS(data=True))
+        controller.calc_error()
+        self.assertAlmostEqual(controller.pid_error.x, -.06)
+        controller.position_control_callback(NS(data=False))
+        controller.calc_error()
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0., 0.))
+        self.assertIsNone(controller.velocity_deadline)
+        controller.room_target_callback(NS(header=NS(frame_id='map', stamp=Stamp(self.ros_now)),
+                                          pose=NS(position=NS(x=1.4, y=2.))))
+        self.assertIsNotNone(controller.room_target)
+        # A velocity command takes over directly from the map waypoint.
+        controller.desired_twist_callback(command)
+        controller.calc_error()
+        self.assertIsNone(controller.room_target)
+        self.assertFalse(controller.position_control)
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (.1, -.1))
+        controller.desired_twist_callback(twist())
+        controller.calc_error()
+        self.assertEqual((controller.pid_error.x, controller.pid_error.y), (0., 0.))
+
+    def test_yaw_expires_while_following_room_target(self):
+        controller = self.controller()
+        command = twist()
+        command.angular.z = 20
+        controller.desired_twist_callback(command)
+        controller.room_target_callback(NS(header=NS(frame_id='map', stamp=Stamp(self.ros_now)),
+                                          pose=NS(position=NS(x=1.2, y=2.))))
+        self.assertEqual(controller.step()[2], 1520)
+        self.ros_now += .3
+        self.refresh()
+        self.node.step()
+        controller.current_state_callback(self.messages['pidrone/state'][-1])
+        controller.room_pose_callback(self.messages['pidrone/localization/fused'][-1])
+        self.assertEqual(controller.step()[2], 1500)
+        self.assertIsNone(controller.yaw_deadline)
+        np.testing.assert_array_equal(controller.room_target, (1.2, 2.))
+        self.assertGreater(controller.desired_velocity.x, 0)
 
     def test_xy_learns_a_constant_push_from_local_flow_without_uwb(self):
         controller = self.controller()

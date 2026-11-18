@@ -13,7 +13,7 @@
   <script src="js/roslib.js" defer></script>
   <script src="js/Chart.bundle.min.js" defer></script>
   <script src="js/anchor-calibration.js?v=20261108-corner-labels" defer></script>
-  <script src="js/main.js?v=20261109-position-uniform-units" defer></script>
+  <script src="js/main.js?v=20261117-wasd-controls" defer></script>
   <script src="js/xterm.js" defer></script>
   <script src="js/xterm-addon-fit.js" defer></script>
   <script src="js/routines.js?v=20261109-terminal-reconnect" defer></script>
@@ -144,21 +144,18 @@
     </section>
     <section class="panel routine-panel" aria-label="Control">
       <div class="panel-header"><div class="section-title"><h3>Controls</h3><details class="section-help help-above control-help"><summary aria-label="Control help and keyboard shortcuts" title="Help and keyboard shortcuts">?</summary><div class="help-content">
-            <p>Keep both drones disarmed, still, and facing map +Y before connecting or restarting. Before restarting, remove the props and let the drones sit powered on for a few minutes. Leave them untouched on the floor while Restart reboots the flight controllers, restarts the nodes, checks the gyros, and relocalizes the drones.</p>
-            <p>Click a terminal to type. If a connection fails, check it and click <strong>Connect</strong> again.</p>
-            <p><strong>Separation Guard</strong> controls spacing corrections and peer checks for both drones. It defaults off onboard and on this page. Change it only while all connected drones are disarmed. When enabled, the guard pairs drones automatically when both have fresh UWB positions or a peer joins during flight. Once paired, protection stays active through UWB or connection loss.</p>
-            <p>Hover over the shield beside each battery for guard status or over the flight state for preflight details.</p>
+            <p>Before connecting or restarting, keep drones disarmed and still on the floor facing map +Y. For Restart, remove props and leave drones powered for a few minutes first.</p>
+            <p>Use the keyboard to move. Release horizontal movement keys to brake. Keyboard movement cancels the map waypoint. Choose a destination and click <strong>Send target</strong> to follow a waypoint.</p>
+            <p><strong>Separation Guard</strong> manages spacing between drones. It defaults off. Change it while all drones are disarmed. Hover over the shield for status.</p>
             <p><strong>Keyboard shortcuts</strong></p>
             <table class="shortcut-table" aria-label="Keyboard shortcuts"><tbody>
               <tr><th scope="row"><kbd>Space</kbd></th><td>Disarm all (outside forms and terminals)</td></tr>
               <tr><th scope="row"><kbd>;</kbd> / <kbd>T</kbd></th><td>Arm / Takeoff</td></tr>
-              <tr><th scope="row"><kbd>J</kbd> / <kbd>L</kbd></th><td>Left / Right</td></tr>
-              <tr><th scope="row"><kbd>I</kbd> / <kbd>K</kbd></th><td>Forward / Backward</td></tr>
-              <tr><th scope="row"><kbd>W</kbd> / <kbd>S</kbd></th><td>Up / Down</td></tr>
-              <tr><th scope="row"><kbd>A</kbd> / <kbd>D</kbd></th><td>Yaw left / Right</td></tr>
-              <tr><th scope="row"><kbd>P</kbd> / <kbd>V</kbd></th><td>Position / Velocity control</td></tr>
-              <tr><th scope="row"><kbd>R</kbd></th><td>Reset position hold</td></tr>
-              <tr><th scope="row"><kbd>M</kbd></th><td>Toggle mapping</td></tr>
+              <tr><th scope="row"><kbd>W</kbd> / <kbd>S</kbd></th><td>Forward / Backward</td></tr>
+              <tr><th scope="row"><kbd>A</kbd> / <kbd>D</kbd></th><td>Left / Right</td></tr>
+              <tr><th scope="row"><kbd>I</kbd> / <kbd>K</kbd></th><td>Up / Down</td></tr>
+              <tr><th scope="row"><kbd>J</kbd> / <kbd>L</kbd></th><td>Yaw left / Right</td></tr>
+              <tr><th scope="row"><kbd>R</kbd></th><td>Stop motion</td></tr>
               <tr><th scope="row"><kbd>Esc</kbd></th><td>Leave terminal to use flight shortcuts</td></tr>
             </tbody></table></div></details></div>
         <div class="command-buttons" data-controller="shared" aria-label="Shared flight controls">
