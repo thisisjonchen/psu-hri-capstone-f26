@@ -37,18 +37,16 @@ class UWBLocalizationNode(object):
         self.frame_id = rospy.get_param('~frame_id', 'map')
         self.rate = float(rospy.get_param('~rate', 20.0))
         xy_stddev = float(rospy.get_param('~xy_stddev', 0.15))
-        z_stddev = float(rospy.get_param('~z_stddev', 0.03))
         self.reconnect_delay = float(rospy.get_param('~reconnect_delay', 5.0))
         if (not self.frame_id or not all(finite(v) and v > 0 for v in
-                (self.rate, xy_stddev, z_stddev, self.reconnect_delay))):
+                (self.rate, xy_stddev, self.reconnect_delay))):
             raise ValueError('Frame, rate, uncertainty and reconnect parameters are invalid')
-        self.xy_variance, self.z_variance = xy_stddev ** 2, z_stddev ** 2
+        self.xy_variance = xy_stddev ** 2
         self.next_connect = 0
         self.last_published = None
         self.last_anchor_published = None
         self.last_ros_time = None
         self.clock_reset_at = None
-        self.publisher = rospy.Publisher('pidrone/localization/pose', PoseWithCovarianceStamped, queue_size=1)
         self.xy_pub = rospy.Publisher('pidrone/localization/uwb', PoseWithCovarianceStamped, queue_size=1)
         self.status_pub = rospy.Publisher('pidrone/localization/status', DiagnosticArray, queue_size=1)
         # Publish live observations, rather than latching a layout that could be
@@ -70,7 +68,7 @@ class UWBLocalizationNode(object):
             self.combiner.update_attitude((q.x, q.y, q.z, q.w), msg.header.stamp.to_sec(),
                                           monotonic(), msg.orientation_covariance[0] != -1)
 
-    def pose_message(self, x, y, stamp, z=None):
+    def pose_message(self, x, y, stamp):
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = self.frame_id
         msg.header.stamp = rospy.Time.from_sec(stamp)
@@ -80,9 +78,6 @@ class UWBLocalizationNode(object):
         msg.pose.covariance[0] = msg.pose.covariance[7] = self.xy_variance
         for index in (14, 21, 28, 35):
             msg.pose.covariance[index] = 1e6
-        if z is not None:
-            msg.pose.pose.position.z = z
-            msg.pose.covariance[14] = self.z_variance
         return msg
 
     def step(self):
@@ -123,7 +118,6 @@ class UWBLocalizationNode(object):
             self.last_anchor_published = anchor_stamp
         if fix is not None and anchor_stamp != self.last_published:
             self.xy_pub.publish(self.pose_message(fix.x, fix.y, anchor_time))
-            self.publisher.publish(self.pose_message(fix.x, fix.y, fix.stamp, fix.z))
             self.last_published = anchor_stamp
         status = DiagnosticStatus()
         status.name = rospy.get_name().lstrip('/')

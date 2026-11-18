@@ -109,7 +109,7 @@ class NodeTest(unittest.TestCase):
 
     @property
     def poses(self):
-        return self.messages['pidrone/localization/pose']
+        return self.messages['pidrone/localization/uwb']
 
     @property
     def health(self):
@@ -124,18 +124,17 @@ class NodeTest(unittest.TestCase):
             header=SimpleNamespace(stamp=Stamp(self.ros_now))))
         self.node.locator.anchor_sample = AnchorSample(anchor_ranges((1., 2., distance)), self.now)
 
-    def test_publication_uses_tof_covariance_and_original_stamp_only_once(self):
+    def test_xy_publication_uses_covariance_and_original_range_report_stamp_only_once(self):
         self.sensors(range_stamp=99.95)
         self.node.step()
         msg = self.poses[-1]
         self.assertAlmostEqual(msg.pose.pose.position.x, 1.)
         self.assertAlmostEqual(msg.pose.pose.position.y, 2.)
-        self.assertEqual(msg.pose.pose.position.z, 0.5)
-        self.assertEqual(msg.header.stamp.to_sec(), 99.95)
+        self.assertEqual(msg.header.stamp.to_sec(), 100)
         self.assertEqual(msg.header.frame_id, 'map')
         self.assertEqual(msg.pose.pose.orientation.w, 1)
         self.assertAlmostEqual(msg.pose.covariance[0], 0.15 ** 2)
-        self.assertAlmostEqual(msg.pose.covariance[14], 0.03 ** 2)
+        self.assertEqual(msg.pose.covariance[14], 1e6)
         self.assertEqual(msg.pose.covariance[35], 1e6)
         self.node.step()
         self.assertEqual(len(self.poses), 1)
@@ -143,10 +142,6 @@ class NodeTest(unittest.TestCase):
         values = {item.key: item.value for item in self.health.values}
         self.assertEqual(values['height_source'], 'ToF')
         self.assertEqual(values['reader_state'], 'streaming')
-        xy = self.messages['pidrone/localization/uwb'][-1]
-        self.assertEqual(xy.header.stamp.to_sec(), 100)
-        self.assertEqual(xy.pose.covariance[14], 1e6)
-        self.assertEqual(len(self.messages['pidrone/localization/uwb']), 1)
 
     def test_xy_requires_four_consistent_ranges_and_ignores_firmware_position(self):
         self.sensors()
@@ -173,7 +168,6 @@ class NodeTest(unittest.TestCase):
         self.sensors(distance=8)
         self.node.step()
         self.assertEqual(self.poses, [])
-        self.assertEqual(self.messages['pidrone/localization/uwb'], [])
         self.sensors()
         self.now, self.ros_now = 10.6, 100.6
         self.node.locator.anchor_sample = AnchorSample(anchor_ranges(), self.now)

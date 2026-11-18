@@ -10,7 +10,7 @@ from localization.rotations import quaternion_matrix
 
 RangeSample = namedtuple('RangeSample', 'distance stamp received')
 Attitude = namedtuple('Attitude', 'up stamp received')
-Fix = namedtuple('Fix', 'x y z stamp')
+Fix = namedtuple('Fix', 'x y')
 Height = namedtuple('Height', 'z stamp')
 
 
@@ -148,4 +148,4 @@ class PositionCombiner(object):
         xy = solve_uwb_xy(sample.anchors, tag_height, self.max_range_error)
         if xy is None:
             return None, 'UWB ranges inconsistent with height or anchor geometry'
-        return Fix(xy[0], xy[1], height.z, min(stamps)), 'OK'
+        return Fix(xy[0], xy[1]), 'OK'

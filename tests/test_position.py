@@ -33,7 +33,7 @@ class PositionTest(unittest.TestCase):
         height = .2 - .06 * math.sin(angle) - .12 * math.cos(angle) + .8 * math.cos(angle + beam_tilt)
         self.sample = self.sample._replace(anchors=anchor_ranges((1., 2., height + .038 * math.sin(angle))))
         fix, _ = self.combine()
-        self.assertAlmostEqual(fix.z, height)
+        self.assertAlmostEqual(self.combiner.height(10, 100)[0].z, height)
         self.assertAlmostEqual(fix.x, 1.)
         self.assertAlmostEqual(fix.y, 2.)
 
@@ -81,7 +81,8 @@ class PositionTest(unittest.TestCase):
     def test_raw_tof_mode_explicitly_does_not_require_imu(self):
         self.combiner.compensate_tilt = False
         self.combiner.attitude = None
-        self.assertEqual(self.combine()[0].z, 0.5)
+        self.assertIsNotNone(self.combine()[0])
+        self.assertEqual(self.combiner.height(10, 100)[0].z, 0.5)
 
 
 if __name__ == '__main__':
